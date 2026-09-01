@@ -35,6 +35,3 @@ target/
 # IntelliJ IDEA
 .idea/
 *.iml
-
-# Kiro local settings
-.kiro/
