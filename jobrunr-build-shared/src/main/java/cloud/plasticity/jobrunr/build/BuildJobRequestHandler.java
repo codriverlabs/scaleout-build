@@ -5,6 +5,7 @@ package cloud.plasticity.jobrunr.build;
 
 import java.util.Objects;
 import java.util.Optional;
+import org.jobrunr.jobs.annotations.Job;
 import org.jobrunr.jobs.lambdas.JobRequestHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,7 +35,15 @@ public class BuildJobRequestHandler implements JobRequestHandler<BuildJobRequest
         this.buildLog = buildLog == null ? BuildLog.defaultLog() : buildLog;
     }
 
+    /**
+     * Retries disabled: a {@code native-image} failure (bad classpath, missing binary, OOM) is not
+     * transient, and JobRunr's default retry-with-backoff would also break the single-job
+     * {@link JobCompletionTracker#awaitCompletion} contract by running this method more than once.
+     * Fargate Spot interruption is handled separately, by re-queueing on graceful worker shutdown
+     * rather than through this mechanism.
+     */
     @Override
+    @Job(retries = 0)
     public void run(BuildJobRequest request) throws Exception {
         verifyArchitecture(request);
         tracker.jobStarted();
