@@ -19,19 +19,43 @@ public final class StorageSettings {
 
     private final StorageType type;
     private final String schemaPrefix;
+    private final DsqlConnectionSettings dsqlConnectionSettings;
 
-    private StorageSettings(StorageType type, String schemaPrefix) {
+    private StorageSettings(StorageType type, String schemaPrefix,
+                            DsqlConnectionSettings dsqlConnectionSettings) {
         this.type = Objects.requireNonNull(type, "type");
         this.schemaPrefix = Objects.requireNonNull(schemaPrefix, "schemaPrefix");
+        this.dsqlConnectionSettings = dsqlConnectionSettings;
+        if (type == StorageType.DSQL && dsqlConnectionSettings == null) {
+            throw new IllegalArgumentException("DSQL storage requires DsqlConnectionSettings");
+        }
     }
 
     public static StorageSettings inMemory() {
-        return new StorageSettings(StorageType.IN_MEMORY, DEFAULT_SCHEMA_PREFIX);
+        return new StorageSettings(StorageType.IN_MEMORY, DEFAULT_SCHEMA_PREFIX, null);
+    }
+
+    /** Settings for Aurora DSQL storage, schema-isolated per architecture. */
+    public static StorageSettings dsql(DsqlConnectionSettings connectionSettings) {
+        return dsql(connectionSettings, DEFAULT_SCHEMA_PREFIX);
+    }
+
+    public static StorageSettings dsql(DsqlConnectionSettings connectionSettings,
+                                       String schemaPrefix) {
+        Objects.requireNonNull(connectionSettings, "connectionSettings");
+        return new StorageSettings(StorageType.DSQL,
+                schemaPrefix == null || schemaPrefix.isBlank() ? DEFAULT_SCHEMA_PREFIX : schemaPrefix,
+                connectionSettings);
     }
 
     public static StorageSettings of(StorageType type, String schemaPrefix) {
+        if (type == StorageType.DSQL) {
+            throw new IllegalArgumentException(
+                    "Use StorageSettings.dsql(DsqlConnectionSettings) for DSQL storage");
+        }
         return new StorageSettings(type,
-                schemaPrefix == null || schemaPrefix.isBlank() ? DEFAULT_SCHEMA_PREFIX : schemaPrefix);
+                schemaPrefix == null || schemaPrefix.isBlank() ? DEFAULT_SCHEMA_PREFIX : schemaPrefix,
+                null);
     }
 
     public StorageType type() {
@@ -41,6 +65,11 @@ public final class StorageSettings {
     /** Base prefix for schema names, {@code jobrunr_} by default. */
     public String schemaPrefix() {
         return schemaPrefix;
+    }
+
+    /** Present only for {@link StorageType#DSQL}. */
+    public DsqlConnectionSettings dsqlConnectionSettings() {
+        return dsqlConnectionSettings;
     }
 
     /** Schema for one architecture, for example {@code jobrunr_x86_64}. */

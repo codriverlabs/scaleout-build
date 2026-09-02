@@ -31,10 +31,10 @@
 
         <!-- Runtime dependencies -->
         <jobrunr.version>8.8.2</jobrunr.version>
-        <awssdk.version>2.36.0</awssdk.version>
-        <aurora-dsql-connector.version>1.1.0</aurora-dsql-connector.version>
+        <awssdk.version>2.54.10</awssdk.version>
+        <aurora-dsql-connector.version>1.4.0</aurora-dsql-connector.version>
         <postgresql.version>42.7.7</postgresql.version>
-        <hikaricp.version>6.3.0</hikaricp.version>
+        <hikaricp.version>7.1.0</hikaricp.version>
         <jackson.version>2.20.0</jackson.version>
         <slf4j.version>2.0.17</slf4j.version>
 
@@ -47,7 +47,7 @@
         <mockito.version>5.23.0</mockito.version>
         <assertj.version>3.27.6</assertj.version>
         <maven-plugin-testing.version>3.3.0</maven-plugin-testing.version>
-        <testcontainers.version>1.21.3</testcontainers.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
 
         <!-- Build plugins -->
         <maven-compiler-plugin.version>3.15.0</maven-compiler-plugin.version>
@@ -136,12 +136,17 @@
             </dependency>
             <dependency>
                 <groupId>org.testcontainers</groupId>
-                <artifactId>postgresql</artifactId>
+                <artifactId>testcontainers</artifactId>
                 <version>${testcontainers.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.testcontainers</groupId>
-                <artifactId>junit-jupiter</artifactId>
+                <artifactId>testcontainers-postgresql</artifactId>
+                <version>${testcontainers.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-junit-jupiter</artifactId>
                 <version>${testcontainers.version}</version>
             </dependency>
         </dependencies>
