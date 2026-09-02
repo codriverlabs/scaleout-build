@@ -38,6 +38,16 @@ import java.util.Optional;
  *       <td>Upper bound on total worker lifetime</td></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_JOBS}</td><td>1</td>
  *       <td>Number of jobs to process before exiting</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_DSQL_ENDPOINT}</td><td>none, required</td>
+ *       <td>Aurora DSQL cluster endpoint host, e.g. {@code abcd1234.dsql.us-east-1.on.aws}</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_DSQL_REGION}</td><td>none, required</td>
+ *       <td>AWS region the DSQL cluster lives in</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_DSQL_USER}</td><td>{@code admin}</td>
+ *       <td>Database role to connect as; should be a scoped {@code dsql:DbConnect} role in
+ *           production, not {@code admin}</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_SCHEMA_PREFIX}</td><td>{@code jobrunr_}</td>
+ *       <td>Base schema prefix; the architecture's schema is {@code <prefix><arch>}, matching
+ *           the plugin side</td></tr>
  * </table>
  */
 public final class AgentConfig {
@@ -49,12 +59,17 @@ public final class AgentConfig {
     static final String ENV_IDLE_TIMEOUT_SECONDS = "JOBRUNR_BUILD_IDLE_TIMEOUT_SECONDS";
     static final String ENV_MAX_DURATION_MINUTES = "JOBRUNR_BUILD_MAX_DURATION_MINUTES";
     static final String ENV_JOBS = "JOBRUNR_BUILD_JOBS";
+    static final String ENV_DSQL_ENDPOINT = "JOBRUNR_BUILD_DSQL_ENDPOINT";
+    static final String ENV_DSQL_REGION = "JOBRUNR_BUILD_DSQL_REGION";
+    static final String ENV_DSQL_USER = "JOBRUNR_BUILD_DSQL_USER";
+    static final String ENV_SCHEMA_PREFIX = "JOBRUNR_BUILD_SCHEMA_PREFIX";
 
     private static final Path DEFAULT_MOUNT_ROOT = Paths.get("/mnt/build");
     private static final Path DEFAULT_TEMP_DIR = Paths.get("/tmp");
     private static final List<String> DEFAULT_NATIVE_IMAGE_COMMAND = List.of("native-image");
     private static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofMinutes(5);
     private static final Duration DEFAULT_MAX_DURATION = Duration.ofHours(2);
+    private static final String DEFAULT_DSQL_USER = "admin";
 
     private final Path mountRoot;
     private final Architecture architecture;
@@ -63,10 +78,15 @@ public final class AgentConfig {
     private final Duration idleTimeout;
     private final Duration maxDuration;
     private final int jobsToProcess;
+    private final String dsqlEndpoint;
+    private final String dsqlRegion;
+    private final String dsqlUser;
+    private final String schemaPrefix;
 
     private AgentConfig(Path mountRoot, Architecture architecture, List<String> nativeImageCommand,
                         Path tempDirectory, Duration idleTimeout, Duration maxDuration,
-                        int jobsToProcess) {
+                        int jobsToProcess, String dsqlEndpoint, String dsqlRegion, String dsqlUser,
+                        String schemaPrefix) {
         this.mountRoot = mountRoot;
         this.architecture = architecture;
         this.nativeImageCommand = nativeImageCommand;
@@ -74,6 +94,10 @@ public final class AgentConfig {
         this.idleTimeout = idleTimeout;
         this.maxDuration = maxDuration;
         this.jobsToProcess = jobsToProcess;
+        this.dsqlEndpoint = dsqlEndpoint;
+        this.dsqlRegion = dsqlRegion;
+        this.dsqlUser = dsqlUser;
+        this.schemaPrefix = schemaPrefix;
     }
 
     /** Reads configuration from the process environment. */
@@ -97,9 +121,15 @@ public final class AgentConfig {
         Duration idleTimeout = seconds(environment, ENV_IDLE_TIMEOUT_SECONDS, DEFAULT_IDLE_TIMEOUT);
         Duration maxDuration = minutes(environment, ENV_MAX_DURATION_MINUTES, DEFAULT_MAX_DURATION);
         int jobs = positiveInt(environment, ENV_JOBS, 1);
+        String dsqlEndpoint = requireValue(environment, ENV_DSQL_ENDPOINT);
+        String dsqlRegion = requireValue(environment, ENV_DSQL_REGION);
+        String dsqlUser = value(environment, ENV_DSQL_USER) == null ? DEFAULT_DSQL_USER
+                : value(environment, ENV_DSQL_USER);
+        String schemaPrefix = value(environment, ENV_SCHEMA_PREFIX) == null ? "jobrunr_"
+                : value(environment, ENV_SCHEMA_PREFIX);
 
         return new AgentConfig(mountRoot, architecture, nativeImageCommand, tempDirectory,
-                idleTimeout, maxDuration, jobs);
+                idleTimeout, maxDuration, jobs, dsqlEndpoint, dsqlRegion, dsqlUser, schemaPrefix);
     }
 
     public Path mountRoot() {
@@ -130,6 +160,26 @@ public final class AgentConfig {
         return jobsToProcess;
     }
 
+    /** Aurora DSQL cluster endpoint host this worker connects to. */
+    public String dsqlEndpoint() {
+        return dsqlEndpoint;
+    }
+
+    /** AWS region the DSQL cluster lives in. */
+    public String dsqlRegion() {
+        return dsqlRegion;
+    }
+
+    /** Database role to connect as. */
+    public String dsqlUser() {
+        return dsqlUser;
+    }
+
+    /** Base schema prefix; the effective schema is {@code <prefix><architecture>}. */
+    public String schemaPrefix() {
+        return schemaPrefix;
+    }
+
     @Override
     public String toString() {
         return "AgentConfig{mountRoot=" + mountRoot
@@ -139,6 +189,10 @@ public final class AgentConfig {
                 + ", idleTimeout=" + idleTimeout
                 + ", maxDuration=" + maxDuration
                 + ", jobsToProcess=" + jobsToProcess
+                + ", dsqlEndpoint=" + dsqlEndpoint
+                + ", dsqlRegion=" + dsqlRegion
+                + ", dsqlUser=" + dsqlUser
+                + ", schemaPrefix=" + schemaPrefix
                 + '}';
     }
 
@@ -211,5 +265,13 @@ public final class AgentConfig {
     private static String value(Map<String, String> environment, String key) {
         String raw = environment.get(key);
         return raw == null || raw.isBlank() ? null : raw.trim();
+    }
+
+    private static String requireValue(Map<String, String> environment, String key) {
+        String configured = value(environment, key);
+        if (configured == null) {
+            throw new IllegalArgumentException(key + " must be set");
+        }
+        return configured;
     }
 }

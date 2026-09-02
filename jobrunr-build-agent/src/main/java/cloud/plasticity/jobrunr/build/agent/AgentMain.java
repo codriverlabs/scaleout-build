@@ -8,6 +8,9 @@ import cloud.plasticity.jobrunr.build.BuildExecutor;
 import cloud.plasticity.jobrunr.build.BuildLog;
 import cloud.plasticity.jobrunr.build.NativeImageBuildExecutor;
 import cloud.plasticity.jobrunr.build.WorkerRuntime;
+import cloud.plasticity.jobrunr.build.storage.DsqlConnectionSettings;
+import cloud.plasticity.jobrunr.build.storage.StorageProviderFactory;
+import cloud.plasticity.jobrunr.build.storage.StorageSettings;
 import org.jobrunr.storage.StorageProvider;
 import org.jobrunr.utils.mapper.JsonMapper;
 import org.slf4j.Logger;
@@ -46,11 +49,31 @@ public final class AgentMain {
         }
         LOG.info("Starting build agent with {}", config);
 
-        // Storage backings that can be shared across JVMs arrive with the storage task; until then
-        // the agent is driven in-process by tests through run(...).
-        LOG.error("No shared storage backing is configured in this build of the agent. "
-                + "Configure Aurora DSQL or PostgreSQL storage to run against a real job store.");
-        System.exit(EXIT_CONFIGURATION_ERROR);
+        StorageProvider storageProvider;
+        JsonMapper jsonMapper = StorageProviderFactory.jsonMapper();
+        try {
+            storageProvider = buildStorageProvider(config, jsonMapper);
+        } catch (RuntimeException e) {
+            LOG.error("Failed to connect to the DSQL job store: {}", e.getMessage(), e);
+            System.exit(EXIT_CONFIGURATION_ERROR);
+            return;
+        }
+
+        int exitCode = run(config, storageProvider, jsonMapper);
+        System.exit(exitCode);
+    }
+
+    /**
+     * Builds the DSQL-backed storage provider for this agent's architecture, using the schema
+     * derived from {@link AgentConfig#schemaPrefix()} and {@link AgentConfig#architecture()} — the
+     * same derivation the plugin side uses, so both name the same schema for the same architecture.
+     */
+    private static StorageProvider buildStorageProvider(AgentConfig config, JsonMapper jsonMapper) {
+        DsqlConnectionSettings connectionSettings = DsqlConnectionSettings.of(
+                config.dsqlEndpoint(), config.dsqlRegion(), config.dsqlUser());
+        StorageSettings storageSettings =
+                StorageSettings.dsql(connectionSettings, config.schemaPrefix());
+        return StorageProviderFactory.create(storageSettings, config.architecture(), jsonMapper);
     }
 
     /**
