@@ -128,12 +128,13 @@ class S3StagingIntegrationTest {
 
     @Test
     void retrievesAnExpectedArtifactByName(@TempDir Path destinationDir) {
-        String key = "builds/build-3/x86_64/output/my-app";
+        String key = "builds/build-3/native/x86_64/output/my-app";
         s3Client.putObject(b -> b.bucket(BUCKET).key(key), RequestBody.fromString("binary-content"));
 
         S3ArtifactRetriever retriever = new S3ArtifactRetriever(s3Client, BUCKET);
         List<Path> downloaded = assertDoesNotThrow(() -> retriever.retrieve("build-3",
-                Architecture.X86_64, List.of("my-app"), destinationDir));
+                cloud.plasticity.jobrunr.build.BuildKind.NATIVE, Architecture.X86_64,
+                List.of("my-app"), destinationDir));
 
         assertThat(downloaded).hasSize(1);
         assertThat(downloaded.get(0)).exists().hasContent("binary-content");
@@ -141,12 +142,13 @@ class S3StagingIntegrationTest {
 
     @Test
     void retrievesByScanningWhenNoExpectedNamesAreGiven(@TempDir Path destinationDir) {
-        String key = "builds/build-4/arm64/output/self-named-binary";
+        String key = "builds/build-4/native/arm64/output/self-named-binary";
         s3Client.putObject(b -> b.bucket(BUCKET).key(key), RequestBody.fromString("arm64-binary"));
 
         S3ArtifactRetriever retriever = new S3ArtifactRetriever(s3Client, BUCKET);
         List<Path> downloaded = assertDoesNotThrow(() -> retriever.retrieve("build-4",
-                Architecture.ARM64, List.of(), destinationDir));
+                cloud.plasticity.jobrunr.build.BuildKind.NATIVE, Architecture.ARM64, List.of(),
+                destinationDir));
 
         assertThat(downloaded).hasSize(1);
         assertThat(downloaded.get(0).getFileName().toString()).isEqualTo("self-named-binary");

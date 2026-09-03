@@ -4,9 +4,9 @@
 package cloud.plasticity.jobrunr.build.agent;
 
 import cloud.plasticity.jobrunr.build.Architecture;
+import cloud.plasticity.jobrunr.build.BuildKind;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -17,87 +17,95 @@ import java.util.Optional;
  * Agent configuration, read from the environment.
  *
  * <p>Environment variables rather than command-line arguments because the container's entrypoint is
- * overridden to a fixed {@code java -jar} invocation, while the ECS task definition supplies
- * per-architecture values.
+ * overridden to a fixed {@code java -jar} invocation, while the Step Functions state machine's
+ * {@code RunTask.sync} state supplies per-cell values via ECS task overrides. See
+ * {@code docs/DESIGN.md} §5 for the task-override contract this mirrors.
+ *
+ * <p>The agent is single-shot: it reads its one assigned cell, runs it, and exits. There is no
+ * polling loop and no job store — the cell's parameters arrive directly as environment variables
+ * rather than being claimed from a shared queue.
  *
  * <table border="1">
  *   <caption>Recognised variables</caption>
  *   <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_MOUNT_ROOT}</td><td>{@code /mnt/build}</td>
- *       <td>Root of the S3 Files mount; job staging paths resolve against it</td></tr>
+ *       <td>Root of the S3 Files mount; the staging path resolves against it</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_ID}</td><td>none, required</td>
+ *       <td>Identifier shared by every cell of the triggering plugin invocation</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_KIND}</td><td>none, required</td>
+ *       <td>One of {@code native}, {@code native-pgo-instrument}, {@code native-pgo-optimize}
+ *           (never {@code jvm} — that build kind never launches a remote task)</td></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_ARCH}</td><td>host architecture</td>
- *       <td>Architecture this worker serves, selecting its JobRunr schema</td></tr>
+ *       <td>Architecture this cell targets; asserted against the container's actual architecture</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_STAGING_RELATIVE_PATH}</td><td>none, required</td>
+ *       <td>Staging root relative to the mount, and the {@code native-image} working directory</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_ARG_FILE_NAME}</td><td>{@code native-image.args}</td>
+ *       <td>Name of the argument file inside the staging root</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_PROFILE_RELATIVE_PATH}</td><td>none</td>
+ *       <td>Path to the {@code .iprof} profile inside the staging root; required only for
+ *           {@code native-pgo-optimize}</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_EXPECTED_ARTIFACTS}</td><td>none</td>
+ *       <td>Comma-separated artifact file names to look for; empty means discover by scanning</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_EXTRA_NATIVE_IMAGE_ARGS}</td><td>none</td>
+ *       <td>Extra arguments appended after the argfile and build-kind flags, space-separated
+ *           (so an argument containing a space cannot be expressed here)</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_TIMEOUT_MINUTES}</td><td>0 (no timeout)</td>
+ *       <td>Soft timeout applied to the {@code native-image} process</td></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_NATIVE_IMAGE}</td><td>{@code native-image}</td>
  *       <td>Command that runs native-image, space-separated</td></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_TEMP_DIR}</td><td>{@code /tmp}</td>
  *       <td>Scratch directory, kept on ephemeral storage rather than the mount</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_IDLE_TIMEOUT_SECONDS}</td><td>300</td>
- *       <td>Exit if no job is claimed within this window, so a task that lost its job to a
- *           concurrent worker stops billing</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_MAX_DURATION_MINUTES}</td><td>120</td>
- *       <td>Upper bound on total worker lifetime</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_JOBS}</td><td>1</td>
- *       <td>Number of jobs to process before exiting</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_DSQL_ENDPOINT}</td><td>none, required</td>
- *       <td>Aurora DSQL cluster endpoint host, e.g. {@code abcd1234.dsql.us-east-1.on.aws}</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_DSQL_REGION}</td><td>none, required</td>
- *       <td>AWS region the DSQL cluster lives in</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_DSQL_USER}</td><td>{@code admin}</td>
- *       <td>Database role to connect as; should be a scoped {@code dsql:DbConnect} role in
- *           production, not {@code admin}</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_SCHEMA_PREFIX}</td><td>{@code jobrunr_}</td>
- *       <td>Base schema prefix; the architecture's schema is {@code <prefix><arch>}, matching
- *           the plugin side</td></tr>
  * </table>
  */
 public final class AgentConfig {
 
     static final String ENV_MOUNT_ROOT = "JOBRUNR_BUILD_MOUNT_ROOT";
+    static final String ENV_BUILD_ID = "JOBRUNR_BUILD_ID";
+    static final String ENV_BUILD_KIND = "JOBRUNR_BUILD_KIND";
     static final String ENV_ARCH = "JOBRUNR_BUILD_ARCH";
+    static final String ENV_STAGING_RELATIVE_PATH = "JOBRUNR_BUILD_STAGING_RELATIVE_PATH";
+    static final String ENV_ARG_FILE_NAME = "JOBRUNR_BUILD_ARG_FILE_NAME";
+    static final String ENV_PROFILE_RELATIVE_PATH = "JOBRUNR_BUILD_PROFILE_RELATIVE_PATH";
+    static final String ENV_EXPECTED_ARTIFACTS = "JOBRUNR_BUILD_EXPECTED_ARTIFACTS";
+    static final String ENV_EXTRA_NATIVE_IMAGE_ARGS = "JOBRUNR_BUILD_EXTRA_NATIVE_IMAGE_ARGS";
+    static final String ENV_TIMEOUT_MINUTES = "JOBRUNR_BUILD_TIMEOUT_MINUTES";
     static final String ENV_NATIVE_IMAGE = "JOBRUNR_BUILD_NATIVE_IMAGE";
     static final String ENV_TEMP_DIR = "JOBRUNR_BUILD_TEMP_DIR";
-    static final String ENV_IDLE_TIMEOUT_SECONDS = "JOBRUNR_BUILD_IDLE_TIMEOUT_SECONDS";
-    static final String ENV_MAX_DURATION_MINUTES = "JOBRUNR_BUILD_MAX_DURATION_MINUTES";
-    static final String ENV_JOBS = "JOBRUNR_BUILD_JOBS";
-    static final String ENV_DSQL_ENDPOINT = "JOBRUNR_BUILD_DSQL_ENDPOINT";
-    static final String ENV_DSQL_REGION = "JOBRUNR_BUILD_DSQL_REGION";
-    static final String ENV_DSQL_USER = "JOBRUNR_BUILD_DSQL_USER";
-    static final String ENV_SCHEMA_PREFIX = "JOBRUNR_BUILD_SCHEMA_PREFIX";
 
     private static final Path DEFAULT_MOUNT_ROOT = Paths.get("/mnt/build");
     private static final Path DEFAULT_TEMP_DIR = Paths.get("/tmp");
     private static final List<String> DEFAULT_NATIVE_IMAGE_COMMAND = List.of("native-image");
-    private static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofMinutes(5);
-    private static final Duration DEFAULT_MAX_DURATION = Duration.ofHours(2);
-    private static final String DEFAULT_DSQL_USER = "admin";
+    private static final String DEFAULT_ARG_FILE_NAME = "native-image.args";
 
     private final Path mountRoot;
+    private final String buildId;
+    private final BuildKind buildKind;
     private final Architecture architecture;
+    private final String stagingRelativePath;
+    private final String argFileName;
+    private final String profileRelativePath;
+    private final List<String> expectedArtifacts;
+    private final List<String> extraNativeImageArgs;
+    private final int timeoutMinutes;
     private final List<String> nativeImageCommand;
     private final Path tempDirectory;
-    private final Duration idleTimeout;
-    private final Duration maxDuration;
-    private final int jobsToProcess;
-    private final String dsqlEndpoint;
-    private final String dsqlRegion;
-    private final String dsqlUser;
-    private final String schemaPrefix;
 
-    private AgentConfig(Path mountRoot, Architecture architecture, List<String> nativeImageCommand,
-                        Path tempDirectory, Duration idleTimeout, Duration maxDuration,
-                        int jobsToProcess, String dsqlEndpoint, String dsqlRegion, String dsqlUser,
-                        String schemaPrefix) {
+    private AgentConfig(Path mountRoot, String buildId, BuildKind buildKind, Architecture architecture,
+                        String stagingRelativePath, String argFileName, String profileRelativePath,
+                        List<String> expectedArtifacts, List<String> extraNativeImageArgs,
+                        int timeoutMinutes, List<String> nativeImageCommand, Path tempDirectory) {
         this.mountRoot = mountRoot;
+        this.buildId = buildId;
+        this.buildKind = buildKind;
         this.architecture = architecture;
+        this.stagingRelativePath = stagingRelativePath;
+        this.argFileName = argFileName;
+        this.profileRelativePath = profileRelativePath;
+        this.expectedArtifacts = expectedArtifacts;
+        this.extraNativeImageArgs = extraNativeImageArgs;
+        this.timeoutMinutes = timeoutMinutes;
         this.nativeImageCommand = nativeImageCommand;
         this.tempDirectory = tempDirectory;
-        this.idleTimeout = idleTimeout;
-        this.maxDuration = maxDuration;
-        this.jobsToProcess = jobsToProcess;
-        this.dsqlEndpoint = dsqlEndpoint;
-        this.dsqlRegion = dsqlRegion;
-        this.dsqlUser = dsqlUser;
-        this.schemaPrefix = schemaPrefix;
     }
 
     /** Reads configuration from the process environment. */
@@ -115,29 +123,67 @@ public final class AgentConfig {
         Objects.requireNonNull(environment, "environment");
 
         Path mountRoot = path(environment, ENV_MOUNT_ROOT, DEFAULT_MOUNT_ROOT);
-        Architecture architecture = architecture(environment);
+        String buildId = requireValue(environment, ENV_BUILD_ID);
+        BuildKind buildKind = buildKind(environment);
+        Architecture architecture = architecture(environment, buildKind);
+        String stagingRelativePath = requireValue(environment, ENV_STAGING_RELATIVE_PATH);
+        String argFileName = value(environment, ENV_ARG_FILE_NAME) == null ? DEFAULT_ARG_FILE_NAME
+                : value(environment, ENV_ARG_FILE_NAME);
+        String profileRelativePath = value(environment, ENV_PROFILE_RELATIVE_PATH);
+        if (buildKind.requiresProfile() && (profileRelativePath == null
+                || profileRelativePath.isBlank())) {
+            throw new IllegalArgumentException(
+                    ENV_PROFILE_RELATIVE_PATH + " must be set for build kind " + buildKind);
+        }
+        List<String> expectedArtifacts = commaSeparated(environment, ENV_EXPECTED_ARTIFACTS);
+        List<String> extraNativeImageArgs = spaceSeparated(environment, ENV_EXTRA_NATIVE_IMAGE_ARGS);
+        int timeoutMinutes = nonNegativeInt(environment, ENV_TIMEOUT_MINUTES, 0);
         List<String> nativeImageCommand = command(environment);
         Path tempDirectory = path(environment, ENV_TEMP_DIR, DEFAULT_TEMP_DIR);
-        Duration idleTimeout = seconds(environment, ENV_IDLE_TIMEOUT_SECONDS, DEFAULT_IDLE_TIMEOUT);
-        Duration maxDuration = minutes(environment, ENV_MAX_DURATION_MINUTES, DEFAULT_MAX_DURATION);
-        int jobs = positiveInt(environment, ENV_JOBS, 1);
-        String dsqlEndpoint = requireValue(environment, ENV_DSQL_ENDPOINT);
-        String dsqlRegion = requireValue(environment, ENV_DSQL_REGION);
-        String dsqlUser = value(environment, ENV_DSQL_USER) == null ? DEFAULT_DSQL_USER
-                : value(environment, ENV_DSQL_USER);
-        String schemaPrefix = value(environment, ENV_SCHEMA_PREFIX) == null ? "jobrunr_"
-                : value(environment, ENV_SCHEMA_PREFIX);
 
-        return new AgentConfig(mountRoot, architecture, nativeImageCommand, tempDirectory,
-                idleTimeout, maxDuration, jobs, dsqlEndpoint, dsqlRegion, dsqlUser, schemaPrefix);
+        return new AgentConfig(mountRoot, buildId, buildKind, architecture, stagingRelativePath,
+                argFileName, profileRelativePath, expectedArtifacts, extraNativeImageArgs,
+                timeoutMinutes, nativeImageCommand, tempDirectory);
     }
 
     public Path mountRoot() {
         return mountRoot;
     }
 
+    public String buildId() {
+        return buildId;
+    }
+
+    public BuildKind buildKind() {
+        return buildKind;
+    }
+
     public Architecture architecture() {
         return architecture;
+    }
+
+    public String stagingRelativePath() {
+        return stagingRelativePath;
+    }
+
+    public String argFileName() {
+        return argFileName;
+    }
+
+    public String profileRelativePath() {
+        return profileRelativePath;
+    }
+
+    public List<String> expectedArtifacts() {
+        return expectedArtifacts;
+    }
+
+    public List<String> extraNativeImageArgs() {
+        return extraNativeImageArgs;
+    }
+
+    public int timeoutMinutes() {
+        return timeoutMinutes;
     }
 
     public List<String> nativeImageCommand() {
@@ -148,66 +194,53 @@ public final class AgentConfig {
         return tempDirectory;
     }
 
-    public Duration idleTimeout() {
-        return idleTimeout;
-    }
-
-    public Duration maxDuration() {
-        return maxDuration;
-    }
-
-    public int jobsToProcess() {
-        return jobsToProcess;
-    }
-
-    /** Aurora DSQL cluster endpoint host this worker connects to. */
-    public String dsqlEndpoint() {
-        return dsqlEndpoint;
-    }
-
-    /** AWS region the DSQL cluster lives in. */
-    public String dsqlRegion() {
-        return dsqlRegion;
-    }
-
-    /** Database role to connect as. */
-    public String dsqlUser() {
-        return dsqlUser;
-    }
-
-    /** Base schema prefix; the effective schema is {@code <prefix><architecture>}. */
-    public String schemaPrefix() {
-        return schemaPrefix;
-    }
-
     @Override
     public String toString() {
         return "AgentConfig{mountRoot=" + mountRoot
+                + ", buildId=" + buildId
+                + ", buildKind=" + buildKind
                 + ", architecture=" + architecture
+                + ", stagingRelativePath=" + stagingRelativePath
+                + ", argFileName=" + argFileName
+                + ", profileRelativePath=" + profileRelativePath
                 + ", nativeImageCommand=" + nativeImageCommand
                 + ", tempDirectory=" + tempDirectory
-                + ", idleTimeout=" + idleTimeout
-                + ", maxDuration=" + maxDuration
-                + ", jobsToProcess=" + jobsToProcess
-                + ", dsqlEndpoint=" + dsqlEndpoint
-                + ", dsqlRegion=" + dsqlRegion
-                + ", dsqlUser=" + dsqlUser
-                + ", schemaPrefix=" + schemaPrefix
                 + '}';
     }
 
-    private static Architecture architecture(Map<String, String> environment) {
-        String configured = value(environment, ENV_ARCH);
-        if (configured != null) {
-            return Architecture.parse(configured);
-        }
-        Optional<Architecture> host = Architecture.host();
-        if (host.isEmpty()) {
+    private static BuildKind buildKind(Map<String, String> environment) {
+        String configured = requireValue(environment, ENV_BUILD_KIND);
+        BuildKind kind = BuildKind.parse(configured);
+        if (kind == BuildKind.JVM) {
             throw new IllegalArgumentException(
-                    ENV_ARCH + " is not set and the host architecture is unrecognised (os.arch="
-                            + System.getProperty("os.arch") + ")");
+                    ENV_BUILD_KIND + " must not be JVM: JVM cells never launch a remote task");
         }
-        return host.get();
+        return kind;
+    }
+
+    private static Architecture architecture(Map<String, String> environment, BuildKind buildKind) {
+        String configured = value(environment, ENV_ARCH);
+        Architecture architecture;
+        if (configured != null) {
+            architecture = Architecture.parse(configured);
+        } else {
+            Optional<Architecture> host = Architecture.host();
+            if (host.isEmpty()) {
+                throw new IllegalArgumentException(
+                        ENV_ARCH + " is not set and the host architecture is unrecognised (os.arch="
+                                + System.getProperty("os.arch") + ")");
+            }
+            architecture = host.get();
+        }
+        if (buildKind.requiresArchitecture() && !architecture.matchesHost()) {
+            String hostArch = Architecture.host().map(Enum::name)
+                    .orElseGet(() -> "unrecognised (os.arch=" + System.getProperty("os.arch") + ")");
+            throw new IllegalArgumentException(
+                    ENV_ARCH + " is " + architecture + " but this container is " + hostArch
+                            + ". native-image cannot cross-compile; check the task definition's "
+                            + "runtimePlatform matches the requested architecture.");
+        }
+        return architecture;
     }
 
     private static List<String> command(Map<String, String> environment) {
@@ -223,42 +256,41 @@ public final class AgentConfig {
         return tokens;
     }
 
+    private static List<String> commaSeparated(Map<String, String> environment, String key) {
+        String configured = value(environment, key);
+        if (configured == null) {
+            return List.of();
+        }
+        return Arrays.stream(configured.split(",")).map(String::trim).filter(s -> !s.isEmpty())
+                .toList();
+    }
+
+    private static List<String> spaceSeparated(Map<String, String> environment, String key) {
+        String configured = value(environment, key);
+        if (configured == null) {
+            return List.of();
+        }
+        return Arrays.stream(configured.trim().split("\\s+")).filter(s -> !s.isEmpty()).toList();
+    }
+
     private static Path path(Map<String, String> environment, String key, Path fallback) {
         String configured = value(environment, key);
         return configured == null ? fallback : Paths.get(configured);
     }
 
-    private static Duration seconds(Map<String, String> environment, String key, Duration fallback) {
-        String configured = value(environment, key);
-        return configured == null ? fallback : Duration.ofSeconds(parseLong(key, configured));
-    }
-
-    private static Duration minutes(Map<String, String> environment, String key, Duration fallback) {
-        String configured = value(environment, key);
-        return configured == null ? fallback : Duration.ofMinutes(parseLong(key, configured));
-    }
-
-    private static int positiveInt(Map<String, String> environment, String key, int fallback) {
+    private static int nonNegativeInt(Map<String, String> environment, String key, int fallback) {
         String configured = value(environment, key);
         if (configured == null) {
             return fallback;
         }
-        long parsed = parseLong(key, configured);
-        if (parsed < 1 || parsed > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException(key + " must be a positive integer, was " + configured);
-        }
-        return (int) parsed;
-    }
-
-    private static long parseLong(String key, String rawValue) {
         try {
-            long parsed = Long.parseLong(rawValue.trim());
+            int parsed = Integer.parseInt(configured.trim());
             if (parsed < 0) {
-                throw new IllegalArgumentException(key + " must not be negative, was " + rawValue);
+                throw new IllegalArgumentException(key + " must not be negative, was " + configured);
             }
             return parsed;
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(key + " must be a number, was '" + rawValue + "'", e);
+            throw new IllegalArgumentException(key + " must be a number, was '" + configured + "'", e);
         }
     }
 

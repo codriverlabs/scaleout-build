@@ -14,11 +14,10 @@ public interface BuildExecutor {
     /**
      * Executes the build described by {@code request}.
      *
-     * @throws BuildFailedException when the build tool reports failure, so JobRunr can apply its
-     *         retry policy and the plugin can surface the reason
-     * @throws InterruptedException when the worker is shutting down, typically a Fargate Spot
-     *         interruption; the job is then re-queued rather than failed
+     * @throws BuildFailedException when the build tool reports failure
+     * @throws InterruptedException when execution is interrupted, typically a Fargate Spot
+     *         interruption; the caller decides whether/how to retry
      */
-    BuildResult execute(BuildJobRequest request, BuildLog log)
+    BuildResult execute(BuildCellRequest request, BuildLog log)
             throws BuildFailedException, InterruptedException;
 }

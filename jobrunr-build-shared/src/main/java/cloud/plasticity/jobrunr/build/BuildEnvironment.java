@@ -56,7 +56,7 @@ public final class BuildEnvironment {
      * @throws BuildFailedException when the directory is missing, which in practice means the
      *         staged inputs never arrived
      */
-    public Path resolveStagingRoot(BuildJobRequest request) throws BuildFailedException {
+    public Path resolveStagingRoot(BuildCellRequest request) throws BuildFailedException {
         Path staging = mountRoot.resolve(request.getStagingRelativePath()).normalize();
         if (!staging.startsWith(mountRoot.normalize())) {
             throw new BuildFailedException(

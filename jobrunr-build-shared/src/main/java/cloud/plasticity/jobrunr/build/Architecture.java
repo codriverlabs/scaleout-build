@@ -11,9 +11,7 @@ import java.util.Optional;
  * A target CPU architecture for a native-image build.
  *
  * <p>GraalVM {@code native-image} cannot cross-compile, so every architecture needs a build on
- * matching hardware. Each architecture also gets its own JobRunr schema (see
- * {@link #schemaSuffix()}): JobRunr's Server Tags feature is Pro-only, so isolating the queues is
- * how we stop an arm64 worker from claiming an x86 job.
+ * matching hardware — see {@code docs/DESIGN.md} §3 for the full build matrix this feeds into.
  */
 public enum Architecture {
 
@@ -44,8 +42,8 @@ public enum Architecture {
     }
 
     /**
-     * Suffix for this architecture's JobRunr schema, used to build a table prefix such as
-     * {@code jobrunr_x86_64.} so that each architecture forms its own logical JobRunr cluster.
+     * Suffix used for this architecture's staging directory and task-definition family naming,
+     * such as {@code x86_64}.
      */
     public String schemaSuffix() {
         return schemaSuffix;

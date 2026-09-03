@@ -7,16 +7,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import cloud.plasticity.jobrunr.build.Architecture;
+import cloud.plasticity.jobrunr.build.BuildKind;
 import java.nio.file.Path;
-import java.time.Duration;
+import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class AgentConfigTest {
 
+    private static final Architecture HOST = Architecture.host().orElse(Architecture.X86_64);
+
     private static final Map<String, String> MINIMAL_REQUIRED = Map.of(
-            AgentConfig.ENV_DSQL_ENDPOINT, "abcd1234.dsql.us-east-1.on.aws",
-            AgentConfig.ENV_DSQL_REGION, "us-east-1");
+            AgentConfig.ENV_BUILD_ID, "build-1",
+            AgentConfig.ENV_BUILD_KIND, "native",
+            AgentConfig.ENV_ARCH, HOST.name(),
+            AgentConfig.ENV_STAGING_RELATIVE_PATH, "builds/build-1/" + HOST.stagingDirName());
 
     @Test
     void appliesDefaultsWhenOnlyRequiredVariablesAreSet() {
@@ -25,56 +30,96 @@ class AgentConfigTest {
         assertThat(config.mountRoot()).isEqualTo(Path.of("/mnt/build"));
         assertThat(config.nativeImageCommand()).containsExactly("native-image");
         assertThat(config.tempDirectory()).isEqualTo(Path.of("/tmp"));
-        assertThat(config.idleTimeout()).isEqualTo(Duration.ofMinutes(5));
-        assertThat(config.maxDuration()).isEqualTo(Duration.ofHours(2));
-        assertThat(config.jobsToProcess()).isEqualTo(1);
-        assertThat(config.architecture()).isEqualTo(
-                Architecture.host().orElseThrow(() -> new AssertionError("host architecture unknown")));
-        assertThat(config.dsqlEndpoint()).isEqualTo("abcd1234.dsql.us-east-1.on.aws");
-        assertThat(config.dsqlRegion()).isEqualTo("us-east-1");
-        assertThat(config.dsqlUser()).isEqualTo("admin");
-        assertThat(config.schemaPrefix()).isEqualTo("jobrunr_");
+        assertThat(config.buildId()).isEqualTo("build-1");
+        assertThat(config.buildKind()).isEqualTo(BuildKind.NATIVE);
+        assertThat(config.architecture()).isEqualTo(HOST);
+        assertThat(config.argFileName()).isEqualTo("native-image.args");
+        assertThat(config.profileRelativePath()).isNull();
+        assertThat(config.expectedArtifacts()).isEmpty();
+        assertThat(config.extraNativeImageArgs()).isEmpty();
+        assertThat(config.timeoutMinutes()).isZero();
     }
 
     @Test
     void readsEveryVariableWhenSet() {
         Map<String, String> environment = merged(Map.of(
                 AgentConfig.ENV_MOUNT_ROOT, "/data/build",
-                AgentConfig.ENV_ARCH, "arm64",
                 AgentConfig.ENV_NATIVE_IMAGE, "docker run --rm native-image",
                 AgentConfig.ENV_TEMP_DIR, "/scratch",
-                AgentConfig.ENV_IDLE_TIMEOUT_SECONDS, "42",
-                AgentConfig.ENV_MAX_DURATION_MINUTES, "7",
-                AgentConfig.ENV_JOBS, "3",
-                AgentConfig.ENV_DSQL_USER, "scoped-role",
-                AgentConfig.ENV_SCHEMA_PREFIX, "custom_"));
+                AgentConfig.ENV_ARG_FILE_NAME, "custom.args",
+                AgentConfig.ENV_EXPECTED_ARTIFACTS, "app, app.debug",
+                AgentConfig.ENV_EXTRA_NATIVE_IMAGE_ARGS, "-H:+ReportExceptionStackTraces --verbose",
+                AgentConfig.ENV_TIMEOUT_MINUTES, "45"));
 
         AgentConfig config = AgentConfig.fromMap(environment);
 
         assertThat(config.mountRoot()).isEqualTo(Path.of("/data/build"));
-        assertThat(config.architecture()).isEqualTo(Architecture.ARM64);
         assertThat(config.nativeImageCommand()).containsExactly("docker", "run", "--rm", "native-image");
         assertThat(config.tempDirectory()).isEqualTo(Path.of("/scratch"));
-        assertThat(config.idleTimeout()).isEqualTo(Duration.ofSeconds(42));
-        assertThat(config.maxDuration()).isEqualTo(Duration.ofMinutes(7));
-        assertThat(config.jobsToProcess()).isEqualTo(3);
-        assertThat(config.dsqlUser()).isEqualTo("scoped-role");
-        assertThat(config.schemaPrefix()).isEqualTo("custom_");
+        assertThat(config.argFileName()).isEqualTo("custom.args");
+        assertThat(config.expectedArtifacts()).containsExactly("app", "app.debug");
+        assertThat(config.extraNativeImageArgs())
+                .containsExactly("-H:+ReportExceptionStackTraces", "--verbose");
+        assertThat(config.timeoutMinutes()).isEqualTo(45);
     }
 
     @Test
-    void requiresTheDsqlEndpoint() {
-        assertThatThrownBy(() -> AgentConfig.fromMap(Map.of(AgentConfig.ENV_DSQL_REGION, "us-east-1")))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(AgentConfig.ENV_DSQL_ENDPOINT);
+    void readsTheProfilePathForPgoOptimize() {
+        Map<String, String> environment = merged(Map.of(
+                AgentConfig.ENV_BUILD_KIND, "native-pgo-optimize",
+                AgentConfig.ENV_PROFILE_RELATIVE_PATH, "default.iprof"));
+
+        AgentConfig config = AgentConfig.fromMap(environment);
+
+        assertThat(config.buildKind()).isEqualTo(BuildKind.NATIVE_PGO_OPTIMIZE);
+        assertThat(config.profileRelativePath()).isEqualTo("default.iprof");
     }
 
     @Test
-    void requiresTheDsqlRegion() {
-        assertThatThrownBy(() -> AgentConfig.fromMap(
-                Map.of(AgentConfig.ENV_DSQL_ENDPOINT, "abcd1234.dsql.us-east-1.on.aws")))
+    void requiresTheProfilePathForPgoOptimize() {
+        Map<String, String> environment = merged(Map.of(
+                AgentConfig.ENV_BUILD_KIND, "native-pgo-optimize"));
+
+        assertThatThrownBy(() -> AgentConfig.fromMap(environment))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(AgentConfig.ENV_DSQL_REGION);
+                .hasMessageContaining(AgentConfig.ENV_PROFILE_RELATIVE_PATH);
+    }
+
+    @Test
+    void requiresTheBuildId() {
+        assertThatThrownBy(() -> AgentConfig.fromMap(Map.of(
+                AgentConfig.ENV_BUILD_KIND, "native",
+                AgentConfig.ENV_ARCH, HOST.name(),
+                AgentConfig.ENV_STAGING_RELATIVE_PATH, "builds/x/x86_64")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(AgentConfig.ENV_BUILD_ID);
+    }
+
+    @Test
+    void requiresTheStagingRelativePath() {
+        assertThatThrownBy(() -> AgentConfig.fromMap(Map.of(
+                AgentConfig.ENV_BUILD_ID, "build-1",
+                AgentConfig.ENV_BUILD_KIND, "native",
+                AgentConfig.ENV_ARCH, HOST.name())))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(AgentConfig.ENV_STAGING_RELATIVE_PATH);
+    }
+
+    @Test
+    void rejectsJvmAsABuildKindSinceItNeverLaunchesARemoteTask() {
+        assertThatThrownBy(() -> AgentConfig.fromMap(merged(Map.of(
+                AgentConfig.ENV_BUILD_KIND, "jvm"))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("JVM");
+    }
+
+    @Test
+    void rejectsAnArchitectureMismatchWithTheHost() {
+        Architecture other = HOST == Architecture.X86_64 ? Architecture.ARM64 : Architecture.X86_64;
+        assertThatThrownBy(() -> AgentConfig.fromMap(merged(Map.of(
+                AgentConfig.ENV_ARCH, other.name()))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot cross-compile");
     }
 
     @Test
@@ -85,22 +130,15 @@ class AgentConfigTest {
     }
 
     @Test
-    void rejectsANonPositiveJobsValue() {
-        assertThatThrownBy(() -> AgentConfig.fromMap(merged(Map.of(AgentConfig.ENV_JOBS, "0"))))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(AgentConfig.ENV_JOBS);
-    }
-
-    @Test
-    void rejectsANonNumericDuration() {
+    void rejectsANonNumericTimeout() {
         assertThatThrownBy(() -> AgentConfig.fromMap(
-                merged(Map.of(AgentConfig.ENV_IDLE_TIMEOUT_SECONDS, "soon"))))
+                merged(Map.of(AgentConfig.ENV_TIMEOUT_MINUTES, "soon"))))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(AgentConfig.ENV_IDLE_TIMEOUT_SECONDS);
+                .hasMessageContaining(AgentConfig.ENV_TIMEOUT_MINUTES);
     }
 
     private static Map<String, String> merged(Map<String, String> extra) {
-        var combined = new java.util.HashMap<>(MINIMAL_REQUIRED);
+        var combined = new HashMap<>(MINIMAL_REQUIRED);
         combined.putAll(extra);
         return combined;
     }

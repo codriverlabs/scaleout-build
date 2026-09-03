@@ -42,8 +42,9 @@ class NativeImageBuildExecutorTest {
         Files.createDirectories(stagingRoot);
         Files.writeString(stagingRoot.resolve("native-image.args"), "-o\noutput/app\n");
 
-        BuildJobRequest request = BuildJobRequest.builder()
+        BuildCellRequest request = BuildCellRequest.builder()
                 .buildId("b1")
+                .buildKind(BuildKind.NATIVE)
                 .architecture(Architecture.host().orElse(Architecture.X86_64))
                 .stagingRelativePath(stagingRelativePath)
                 .expectedArtifacts(List.of("app"))
@@ -69,8 +70,9 @@ class NativeImageBuildExecutorTest {
         Files.createDirectories(stagingRoot);
         Files.writeString(stagingRoot.resolve("native-image.args"), "-o\noutput/app\n");
 
-        BuildJobRequest request = BuildJobRequest.builder()
+        BuildCellRequest request = BuildCellRequest.builder()
                 .buildId("b2")
+                .buildKind(BuildKind.NATIVE)
                 .architecture(Architecture.host().orElse(Architecture.X86_64))
                 .stagingRelativePath(stagingRelativePath)
                 .build();
@@ -88,8 +90,9 @@ class NativeImageBuildExecutorTest {
         String stagingRelativePath = "builds/b3/x86_64";
         Files.createDirectories(mountRoot.resolve(stagingRelativePath));
 
-        BuildJobRequest request = BuildJobRequest.builder()
+        BuildCellRequest request = BuildCellRequest.builder()
                 .buildId("b3")
+                .buildKind(BuildKind.NATIVE)
                 .architecture(Architecture.host().orElse(Architecture.X86_64))
                 .stagingRelativePath(stagingRelativePath)
                 .build();
@@ -97,6 +100,95 @@ class NativeImageBuildExecutorTest {
         assertThatThrownBy(() -> executor.execute(request, BuildLog.discarding()))
                 .isInstanceOf(BuildFailedException.class)
                 .hasMessageContaining("Argument file not found");
+    }
+
+    @Test
+    void addsPgoInstrumentFlagForThatBuildKind(@TempDir Path mountRoot)
+            throws IOException, BuildFailedException, InterruptedException {
+        Path fakeNativeImage = writeCapturingFakeNativeImage(mountRoot);
+        BuildEnvironment environment = BuildEnvironment.builder(mountRoot)
+                .nativeImageCommand(List.of(fakeNativeImage.toString()))
+                .build();
+        NativeImageBuildExecutor executor = new NativeImageBuildExecutor(environment);
+
+        String stagingRelativePath = "builds/b4/x86_64";
+        Path stagingRoot = mountRoot.resolve(stagingRelativePath);
+        Files.createDirectories(stagingRoot);
+        Files.writeString(stagingRoot.resolve("native-image.args"), "-o\noutput/app\n");
+
+        BuildCellRequest request = BuildCellRequest.builder()
+                .buildId("b4")
+                .buildKind(BuildKind.NATIVE_PGO_INSTRUMENT)
+                .architecture(Architecture.host().orElse(Architecture.X86_64))
+                .stagingRelativePath(stagingRelativePath)
+                .build();
+
+        executor.execute(request, BuildLog.discarding());
+
+        String capturedArgs = Files.readString(stagingRoot.resolve("captured-args.txt"));
+        assertThat(capturedArgs).contains("--pgo-instrument");
+    }
+
+    @Test
+    void addsPgoOptimizeFlagWithTheProfilePathForThatBuildKind(@TempDir Path mountRoot)
+            throws IOException, BuildFailedException, InterruptedException {
+        Path fakeNativeImage = writeCapturingFakeNativeImage(mountRoot);
+        BuildEnvironment environment = BuildEnvironment.builder(mountRoot)
+                .nativeImageCommand(List.of(fakeNativeImage.toString()))
+                .build();
+        NativeImageBuildExecutor executor = new NativeImageBuildExecutor(environment);
+
+        String stagingRelativePath = "builds/b5/x86_64";
+        Path stagingRoot = mountRoot.resolve(stagingRelativePath);
+        Files.createDirectories(stagingRoot);
+        Files.writeString(stagingRoot.resolve("native-image.args"), "-o\noutput/app\n");
+
+        BuildCellRequest request = BuildCellRequest.builder()
+                .buildId("b5")
+                .buildKind(BuildKind.NATIVE_PGO_OPTIMIZE)
+                .architecture(Architecture.host().orElse(Architecture.X86_64))
+                .stagingRelativePath(stagingRelativePath)
+                .profileRelativePath("default.iprof")
+                .build();
+
+        executor.execute(request, BuildLog.discarding());
+
+        String capturedArgs = Files.readString(stagingRoot.resolve("captured-args.txt"));
+        assertThat(capturedArgs).contains("--pgo=default.iprof");
+    }
+
+    @Test
+    void rejectsJvmBuildKindSinceItNeverInvokesNativeImage(@TempDir Path mountRoot) throws IOException {
+        BuildEnvironment environment = BuildEnvironment.builder(mountRoot).build();
+        NativeImageBuildExecutor executor = new NativeImageBuildExecutor(environment);
+
+        String stagingRelativePath = "builds/b6/jvm";
+        Files.createDirectories(mountRoot.resolve(stagingRelativePath));
+        Files.writeString(mountRoot.resolve(stagingRelativePath).resolve("native-image.args"), "");
+
+        BuildCellRequest request = BuildCellRequest.builder()
+                .buildId("b6")
+                .buildKind(BuildKind.JVM)
+                .stagingRelativePath(stagingRelativePath)
+                .build();
+
+        assertThatThrownBy(() -> executor.execute(request, BuildLog.discarding()))
+                .isInstanceOf(BuildFailedException.class)
+                .hasMessageContaining("JVM");
+    }
+
+    /** Writes a fake native-image that records every argument it was called with. */
+    private static Path writeCapturingFakeNativeImage(Path baseDir) throws IOException {
+        Path script = baseDir.resolve("fake-native-image-capture.sh");
+        String body = "#!/bin/sh\n"
+                + "echo \"$@\" > captured-args.txt\n"
+                + "mkdir -p output\n"
+                + "printf 'binary' > output/app\n"
+                + "exit 0\n";
+        Files.writeString(script, body);
+        Files.setPosixFilePermissions(script, Set.of(PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
+        return script;
     }
 
     /** Writes a shell script that exits with {@code exitCode} and optionally creates a binary. */

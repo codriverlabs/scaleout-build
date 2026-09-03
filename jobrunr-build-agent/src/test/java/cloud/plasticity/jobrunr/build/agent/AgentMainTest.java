@@ -6,98 +6,121 @@ package cloud.plasticity.jobrunr.build.agent;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import cloud.plasticity.jobrunr.build.Architecture;
-import cloud.plasticity.jobrunr.build.BuildJobRequest;
-import cloud.plasticity.jobrunr.build.storage.StorageProviderFactory;
-import cloud.plasticity.jobrunr.build.storage.StorageSettings;
+import cloud.plasticity.jobrunr.build.BuildLog;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.List;
 import java.util.Map;
-import org.jobrunr.scheduling.JobRequestScheduler;
-import org.jobrunr.storage.StorageProvider;
-import org.jobrunr.utils.mapper.JsonMapper;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Exercises {@link AgentMain#run} — the claim/build/exit lifecycle — without a container or a real
- * database, using in-memory storage in place of DSQL. This is the same code path
- * {@link AgentMain#main} drives after building a real DSQL-backed provider; only the storage
- * backing differs, per the design note that the plugin's local mode and the container agent share
- * one worker code path.
+ * Exercises {@link AgentMain#run} — the single-shot read-config/build/exit lifecycle — against a
+ * fake {@code native-image} script, without a container.
  */
 class AgentMainTest {
 
+    private static final Architecture HOST = Architecture.host().orElse(Architecture.X86_64);
+
     @Test
-    void exitsSuccessfullyAfterProcessingOneJob(@TempDir Path mountRoot) throws Exception {
-        Architecture architecture = Architecture.host().orElse(Architecture.X86_64);
-        Path fakeNativeImage = writeFakeNativeImage(mountRoot);
-        AgentConfig config = AgentConfig.fromMap(Map.of(
-                AgentConfig.ENV_DSQL_ENDPOINT, "unused.dsql.us-east-1.on.aws",
-                AgentConfig.ENV_DSQL_REGION, "us-east-1",
-                AgentConfig.ENV_MOUNT_ROOT, mountRoot.toString(),
-                AgentConfig.ENV_ARCH, architecture.name(),
-                AgentConfig.ENV_NATIVE_IMAGE, fakeNativeImage.toString(),
-                AgentConfig.ENV_IDLE_TIMEOUT_SECONDS, "10",
-                AgentConfig.ENV_MAX_DURATION_MINUTES, "1"));
-
-        JsonMapper jsonMapper = StorageProviderFactory.jsonMapper();
-        StorageProvider storageProvider =
-                StorageProviderFactory.create(StorageSettings.inMemory(), jsonMapper);
-
-        String stagingRelativePath = "builds/agent-test-1/" + architecture.stagingDirName();
+    void exitsSuccessfullyAfterBuilding(@TempDir Path mountRoot) throws Exception {
+        Path fakeNativeImage = writeFakeNativeImage(mountRoot, 0);
+        String stagingRelativePath = "builds/agent-test-1/" + HOST.stagingDirName();
         Path stagingRoot = mountRoot.resolve(stagingRelativePath);
         Files.createDirectories(stagingRoot);
         Files.writeString(stagingRoot.resolve("native-image.args"), "-o\noutput/app\n");
 
-        new JobRequestScheduler(storageProvider).enqueue(BuildJobRequest.builder()
-                .buildId("agent-test-1")
-                .architecture(architecture)
-                .stagingRelativePath(stagingRelativePath)
-                .expectedArtifacts(java.util.List.of("app"))
-                .build());
+        AgentConfig config = AgentConfig.fromMap(Map.of(
+                AgentConfig.ENV_MOUNT_ROOT, mountRoot.toString(),
+                AgentConfig.ENV_BUILD_ID, "agent-test-1",
+                AgentConfig.ENV_BUILD_KIND, "native",
+                AgentConfig.ENV_ARCH, HOST.name(),
+                AgentConfig.ENV_STAGING_RELATIVE_PATH, stagingRelativePath,
+                AgentConfig.ENV_EXPECTED_ARTIFACTS, "app",
+                AgentConfig.ENV_NATIVE_IMAGE, fakeNativeImage.toString()));
 
-        int exitCode = AgentMain.run(config, storageProvider, jsonMapper);
+        int exitCode = AgentMain.run(config, BuildLog.discarding());
 
         assertThat(exitCode).isEqualTo(AgentMain.EXIT_SUCCESS);
         assertThat(stagingRoot.resolve("output/app")).exists();
     }
 
     @Test
-    void exitsWithNoJobProcessedWhenNothingIsEnqueuedBeforeIdleTimeout(@TempDir Path mountRoot) {
-        Architecture architecture = Architecture.host().orElse(Architecture.X86_64);
+    void exitsWithFailureWhenNativeImageFails(@TempDir Path mountRoot) throws Exception {
+        Path fakeNativeImage = writeFakeNativeImage(mountRoot, 1);
+        String stagingRelativePath = "builds/agent-test-2/" + HOST.stagingDirName();
+        Path stagingRoot = mountRoot.resolve(stagingRelativePath);
+        Files.createDirectories(stagingRoot);
+        Files.writeString(stagingRoot.resolve("native-image.args"), "-o\noutput/app\n");
+
         AgentConfig config = AgentConfig.fromMap(Map.of(
-                AgentConfig.ENV_DSQL_ENDPOINT, "unused.dsql.us-east-1.on.aws",
-                AgentConfig.ENV_DSQL_REGION, "us-east-1",
                 AgentConfig.ENV_MOUNT_ROOT, mountRoot.toString(),
-                AgentConfig.ENV_ARCH, architecture.name(),
-                AgentConfig.ENV_IDLE_TIMEOUT_SECONDS, "1",
-                AgentConfig.ENV_MAX_DURATION_MINUTES, "1"));
+                AgentConfig.ENV_BUILD_ID, "agent-test-2",
+                AgentConfig.ENV_BUILD_KIND, "native",
+                AgentConfig.ENV_ARCH, HOST.name(),
+                AgentConfig.ENV_STAGING_RELATIVE_PATH, stagingRelativePath,
+                AgentConfig.ENV_NATIVE_IMAGE, fakeNativeImage.toString()));
 
-        JsonMapper jsonMapper = StorageProviderFactory.jsonMapper();
-        StorageProvider storageProvider =
-                StorageProviderFactory.create(StorageSettings.inMemory(), jsonMapper);
+        int exitCode = AgentMain.run(config, BuildLog.discarding());
 
-        int exitCode = AgentMain.run(config, storageProvider, jsonMapper);
-
-        assertThat(exitCode).isEqualTo(AgentMain.EXIT_NO_JOB_PROCESSED);
+        assertThat(exitCode).isEqualTo(AgentMain.EXIT_BUILD_FAILED);
     }
 
-    /** Writes a fake {@code native-image} shell script that writes the binary named by {@code -o}. */
-    private static Path writeFakeNativeImage(Path baseDir) throws Exception {
+    @Test
+    void passesThePgoInstrumentFlagThrough(@TempDir Path mountRoot) throws Exception {
+        Path fakeNativeImage = writeCapturingFakeNativeImage(mountRoot);
+        String stagingRelativePath = "builds/agent-test-3/" + HOST.stagingDirName();
+        Path stagingRoot = mountRoot.resolve(stagingRelativePath);
+        Files.createDirectories(stagingRoot);
+        Files.writeString(stagingRoot.resolve("native-image.args"), "-o\noutput/app\n");
+
+        AgentConfig config = AgentConfig.fromMap(Map.of(
+                AgentConfig.ENV_MOUNT_ROOT, mountRoot.toString(),
+                AgentConfig.ENV_BUILD_ID, "agent-test-3",
+                AgentConfig.ENV_BUILD_KIND, "native-pgo-instrument",
+                AgentConfig.ENV_ARCH, HOST.name(),
+                AgentConfig.ENV_STAGING_RELATIVE_PATH, stagingRelativePath,
+                AgentConfig.ENV_NATIVE_IMAGE, fakeNativeImage.toString()));
+
+        int exitCode = AgentMain.run(config, BuildLog.discarding());
+
+        assertThat(exitCode).isEqualTo(AgentMain.EXIT_SUCCESS);
+        assertThat(Files.readString(stagingRoot.resolve("captured-args.txt")))
+                .contains("--pgo-instrument");
+    }
+
+    private static Path writeFakeNativeImage(Path baseDir, int exitCode) throws Exception {
         Path script = baseDir.resolve("fake-native-image.sh");
         Files.writeString(script, """
                 #!/bin/sh
                 set -e
-                argfile="${1#@}"
-                outname=$(awk '/^-o$/{getline; print; exit}' "$argfile")
-                mkdir -p "$(dirname "$outname")"
-                printf 'binary' > "$outname"
-                """);
-        Files.setPosixFilePermissions(script, java.util.Set.of(
-                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
-                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE));
+                if [ %d -eq 0 ]; then
+                  mkdir -p output
+                  printf 'binary' > output/app
+                fi
+                exit %d
+                """.formatted(exitCode, exitCode));
+        setExecutable(script);
         return script;
+    }
+
+    private static Path writeCapturingFakeNativeImage(Path baseDir) throws Exception {
+        Path script = baseDir.resolve("fake-native-image-capture.sh");
+        Files.writeString(script, """
+                #!/bin/sh
+                echo "$@" > captured-args.txt
+                mkdir -p output
+                printf 'binary' > output/app
+                exit 0
+                """);
+        setExecutable(script);
+        return script;
+    }
+
+    private static void setExecutable(Path script) throws Exception {
+        Files.setPosixFilePermissions(script, Set.of(PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
     }
 }

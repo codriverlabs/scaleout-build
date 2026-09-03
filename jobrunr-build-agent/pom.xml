@@ -18,8 +18,8 @@
 
     <name>JobRunr Parallel Build (agent)</name>
     <description>
-        Ephemeral JobRunr worker mounted into an unmodified Mandrel builder image: claims one build
-        job for its architecture, runs native-image, exits.
+        Single-shot worker mounted into an unmodified Mandrel builder image: runs the one matrix
+        cell it was launched for, then exits.
     </description>
 
     <dependencies>

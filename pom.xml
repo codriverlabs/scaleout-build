@@ -14,8 +14,8 @@
 
     <name>JobRunr Parallel Build (parent)</name>
     <description>
-        Maven plugin that fans GraalVM/Mandrel native-image builds out to AWS Fargate Spot tasks,
-        one per target architecture, orchestrated with JobRunr.
+        Maven plugin that computes a GraalVM/Mandrel build matrix and fans it out to AWS Fargate
+        Spot tasks via AWS Step Functions, one task per matrix cell.
     </description>
 
     <modules>
@@ -30,11 +30,7 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <!-- Runtime dependencies -->
-        <jobrunr.version>8.8.2</jobrunr.version>
         <awssdk.version>2.54.10</awssdk.version>
-        <aurora-dsql-connector.version>1.4.0</aurora-dsql-connector.version>
-        <postgresql.version>42.7.7</postgresql.version>
-        <hikaricp.version>7.1.0</hikaricp.version>
         <jackson.version>2.20.0</jackson.version>
         <slf4j.version>2.0.17</slf4j.version>
 
@@ -66,12 +62,6 @@
             </dependency>
 
             <dependency>
-                <groupId>org.jobrunr</groupId>
-                <artifactId>jobrunr</artifactId>
-                <version>${jobrunr.version}</version>
-            </dependency>
-
-            <dependency>
                 <groupId>software.amazon.awssdk</groupId>
                 <artifactId>bom</artifactId>
                 <version>${awssdk.version}</version>
@@ -93,21 +83,6 @@
                 <scope>import</scope>
             </dependency>
 
-            <dependency>
-                <groupId>software.amazon.dsql</groupId>
-                <artifactId>aurora-dsql-jdbc-connector</artifactId>
-                <version>${aurora-dsql-connector.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.postgresql</groupId>
-                <artifactId>postgresql</artifactId>
-                <version>${postgresql.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.zaxxer</groupId>
-                <artifactId>HikariCP</artifactId>
-                <version>${hikaricp.version}</version>
-            </dependency>
             <dependency>
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-api</artifactId>
@@ -141,17 +116,7 @@
             </dependency>
             <dependency>
                 <groupId>org.testcontainers</groupId>
-                <artifactId>testcontainers-postgresql</artifactId>
-                <version>${testcontainers.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.testcontainers</groupId>
                 <artifactId>testcontainers-junit-jupiter</artifactId>
-                <version>${testcontainers.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.testcontainers</groupId>
-                <artifactId>testcontainers-localstack</artifactId>
                 <version>${testcontainers.version}</version>
             </dependency>
         </dependencies>

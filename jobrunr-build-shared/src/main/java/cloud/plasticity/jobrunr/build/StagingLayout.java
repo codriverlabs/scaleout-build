@@ -14,14 +14,19 @@ import java.util.Objects;
  *
  * <p>Layout:
  * <pre>
- * cas/{sha256}                        content-addressed blobs, shared across builds and architectures
- * agent/{version}/agent.jar           the worker jar mounted into the builder container
- * builds/{buildId}/{arch}/            staging root for one job, and the process working directory
+ * cas/{sha256}                              content-addressed blobs, shared across builds, kinds and architectures
+ * agent/{version}/agent.jar                 the worker jar mounted into the builder container
+ * builds/{buildId}/{buildKind}/{arch}/      staging root for one matrix cell, and the process working directory
  *     native-image.args
  *     &lt;runner&gt;.jar
  *     lib/*.jar
- *     output/                         binary destination when the argfile directs output there
+ *     output/                               binary destination when the argfile directs output there
  * </pre>
+ *
+ * <p>The build kind is part of the path (not just the architecture) because one plugin invocation
+ * can request more than one build kind for the same architecture in the same run — e.g. both
+ * {@code NATIVE} and {@code NATIVE_PGO_OPTIMIZE} for {@code x86_64} — and those need distinct
+ * staging roots even though they share a {@code buildId}.
  *
  * <p>Classpath jars are uploaded once into {@code cas/} and then materialised into a build's
  * {@code lib/} directory with server-side copies. That keeps the argfile free of indirection (which
@@ -58,17 +63,19 @@ public final class StagingLayout {
     }
 
     /**
-     * Staging root for one job: the directory the argfile paths are relative to, and the working
-     * directory {@code native-image} is launched in.
+     * Staging root for one matrix cell: the directory the argfile paths are relative to, and the
+     * working directory {@code native-image} is launched in.
      */
-    public String stagingPath(String buildId, Architecture architecture) {
+    public String stagingPath(String buildId, BuildKind buildKind, Architecture architecture) {
+        Objects.requireNonNull(buildKind, "buildKind");
         Objects.requireNonNull(architecture, "architecture");
-        return buildPrefix(buildId) + "/" + architecture.stagingDirName();
+        return buildPrefix(buildId) + "/" + buildKind.configValue() + "/"
+                + architecture.stagingDirName();
     }
 
     /** Directory a build's produced binaries are collected from. */
-    public String outputPath(String buildId, Architecture architecture) {
-        return stagingPath(buildId, architecture) + "/" + OUTPUT_DIR_NAME;
+    public String outputPath(String buildId, BuildKind buildKind, Architecture architecture) {
+        return stagingPath(buildId, buildKind, architecture) + "/" + OUTPUT_DIR_NAME;
     }
 
     /** Key of a content-addressed blob. */

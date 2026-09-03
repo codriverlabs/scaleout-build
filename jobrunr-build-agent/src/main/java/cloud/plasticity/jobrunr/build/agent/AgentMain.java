@@ -3,36 +3,33 @@
  */
 package cloud.plasticity.jobrunr.build.agent;
 
+import cloud.plasticity.jobrunr.build.BuildCellRequest;
 import cloud.plasticity.jobrunr.build.BuildEnvironment;
 import cloud.plasticity.jobrunr.build.BuildExecutor;
+import cloud.plasticity.jobrunr.build.BuildFailedException;
 import cloud.plasticity.jobrunr.build.BuildLog;
+import cloud.plasticity.jobrunr.build.BuildResult;
 import cloud.plasticity.jobrunr.build.NativeImageBuildExecutor;
-import cloud.plasticity.jobrunr.build.WorkerRuntime;
-import cloud.plasticity.jobrunr.build.storage.DsqlConnectionSettings;
-import cloud.plasticity.jobrunr.build.storage.StorageProviderFactory;
-import cloud.plasticity.jobrunr.build.storage.StorageSettings;
-import org.jobrunr.storage.StorageProvider;
-import org.jobrunr.utils.mapper.JsonMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Entry point for the worker mounted into the builder image.
  *
- * <p>Lifecycle: read configuration, start a single-worker JobRunr server against this
- * architecture's schema, process the configured number of jobs, exit. The container is therefore
- * ephemeral — there is no long-running service to scale down.
+ * <p>Single-shot: read the one matrix cell this task was launched for (via environment variables
+ * set as ECS task overrides by the Step Functions state machine's {@code RunTask.sync} state, see
+ * {@code docs/DESIGN.md} §5), run it, exit. No polling loop and no job store — there is nothing to
+ * claim, since the state machine already decided which cell this specific task runs.
  *
- * <p>{@code SIGTERM} (a Fargate Spot reclaim, among others) triggers a graceful worker shutdown so
- * JobRunr re-queues the in-flight job for a replacement task instead of failing the build.
+ * <p>A Fargate Spot interruption simply kills this process; Step Functions' {@code Retry} on the
+ * calling state relaunches a replacement task for the same cell, per §5.
  */
 public final class AgentMain {
 
     private static final Logger LOG = LoggerFactory.getLogger(AgentMain.class);
 
-    /** Distinguishes "did the work" from "found nothing to do" for the surrounding task. */
     static final int EXIT_SUCCESS = 0;
-    static final int EXIT_NO_JOB_PROCESSED = 3;
+    static final int EXIT_BUILD_FAILED = 1;
     static final int EXIT_CONFIGURATION_ERROR = 78; // EX_CONFIG
 
     private AgentMain() {
@@ -48,78 +45,50 @@ public final class AgentMain {
             return;
         }
         LOG.info("Starting build agent with {}", config);
-
-        StorageProvider storageProvider;
-        JsonMapper jsonMapper = StorageProviderFactory.jsonMapper();
-        try {
-            storageProvider = buildStorageProvider(config, jsonMapper);
-        } catch (RuntimeException e) {
-            LOG.error("Failed to connect to the DSQL job store: {}", e.getMessage(), e);
-            System.exit(EXIT_CONFIGURATION_ERROR);
-            return;
-        }
-
-        int exitCode = run(config, storageProvider, jsonMapper);
-        System.exit(exitCode);
+        System.exit(run(config, BuildLog.defaultLog()));
     }
 
     /**
-     * Builds the DSQL-backed storage provider for this agent's architecture, using the schema
-     * derived from {@link AgentConfig#schemaPrefix()} and {@link AgentConfig#architecture()} — the
-     * same derivation the plugin side uses, so both name the same schema for the same architecture.
-     */
-    private static StorageProvider buildStorageProvider(AgentConfig config, JsonMapper jsonMapper) {
-        DsqlConnectionSettings connectionSettings = DsqlConnectionSettings.of(
-                config.dsqlEndpoint(), config.dsqlRegion(), config.dsqlUser());
-        StorageSettings storageSettings =
-                StorageSettings.dsql(connectionSettings, config.schemaPrefix());
-        return StorageProviderFactory.create(storageSettings, config.architecture(), jsonMapper);
-    }
-
-    /**
-     * Runs the worker against an already-constructed storage provider.
+     * Runs the one configured build cell to completion.
      *
-     * <p>Separated from {@link #main(String[])} so the whole agent path — claim, build, exit — can be
-     * exercised without a container or a database.
+     * <p>Separated from {@link #main(String[])} so the whole agent path can be exercised without a
+     * container.
      *
      * @return process exit code
      */
-    public static int run(AgentConfig config, StorageProvider storageProvider, JsonMapper jsonMapper) {
+    public static int run(AgentConfig config, BuildLog buildLog) {
         BuildEnvironment environment = BuildEnvironment.builder(config.mountRoot())
                 .nativeImageCommand(config.nativeImageCommand())
                 .tempDirectory(config.tempDirectory())
                 .build();
         BuildExecutor executor = new NativeImageBuildExecutor(environment);
 
-        WorkerRuntime.WorkerOptions options = WorkerRuntime.WorkerOptions.defaults()
-                .name("jobrunr-build-agent-" + config.architecture().schemaSuffix())
-                .workerCount(1)
-                .idleTimeout(config.idleTimeout())
-                .overallTimeout(config.maxDuration())
-                .buildLog(BuildLog.defaultLog());
+        BuildCellRequest request = BuildCellRequest.builder()
+                .buildId(config.buildId())
+                .buildKind(config.buildKind())
+                .architecture(config.architecture())
+                .stagingRelativePath(config.stagingRelativePath())
+                .argFileName(config.argFileName())
+                .profileRelativePath(config.profileRelativePath())
+                .expectedArtifacts(config.expectedArtifacts())
+                .extraNativeImageArgs(config.extraNativeImageArgs())
+                .timeoutMinutes(config.timeoutMinutes())
+                .build();
 
-        try (WorkerRuntime worker = WorkerRuntime.start(storageProvider, jsonMapper, executor, options)) {
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                LOG.warn("Received shutdown signal, stopping worker so the job can be re-queued");
-                worker.close();
-            }, "agent-shutdown"));
-
-            boolean completed = worker.awaitCompletion(config.jobsToProcess());
-            if (completed) {
-                return EXIT_SUCCESS;
-            }
-            if (worker.tracker().startedCount() == 0) {
-                LOG.warn("No job was claimed within {}; exiting so the task stops billing",
-                        config.idleTimeout());
-                return EXIT_NO_JOB_PROCESSED;
-            }
-            LOG.error("Worker exceeded its maximum duration of {} with {} job(s) finished",
-                    config.maxDuration(), worker.tracker().finishedCount());
-            return EXIT_NO_JOB_PROCESSED;
+        try {
+            BuildResult result = executor.execute(request, buildLog);
+            LOG.info("Completed {} build {} for {} in {} producing {}",
+                    config.buildKind(), config.buildId(), config.architecture(), result.duration(),
+                    result.artifacts());
+            return EXIT_SUCCESS;
+        } catch (BuildFailedException e) {
+            LOG.error("Build {} failed: {}", config.buildId(), e.getMessage(), e);
+            return EXIT_BUILD_FAILED;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            LOG.warn("Interrupted while waiting for the build to finish; job will be re-queued");
-            return EXIT_NO_JOB_PROCESSED;
+            LOG.warn("Interrupted while building {} — likely a Spot interruption; "
+                    + "Step Functions will relaunch this cell", config.buildId());
+            return EXIT_BUILD_FAILED;
         }
     }
 }

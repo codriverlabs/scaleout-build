@@ -4,6 +4,7 @@
 package cloud.plasticity.jobrunr.maven.staging;
 
 import cloud.plasticity.jobrunr.build.Architecture;
+import cloud.plasticity.jobrunr.build.BuildKind;
 import cloud.plasticity.jobrunr.build.StagingLayout;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -58,21 +59,24 @@ public final class S3ArtifactRetriever {
      * listing under the build's staging prefix as a fallback.
      *
      * @param buildId        the build identifier used when staging inputs
+     * @param buildKind      which build kind's staging root to look under
      * @param architecture   which architecture's staging root to look under
      * @param expectedNames  artifact file names to look for first; may be empty
      * @param destinationDir local directory the downloaded files are written into, created if
      *                       missing
      * @return absolute local paths of the downloaded files, in discovery order
      */
-    public List<Path> retrieve(String buildId, Architecture architecture, List<String> expectedNames,
+    public List<Path> retrieve(String buildId, BuildKind buildKind,
+                               Architecture architecture, List<String> expectedNames,
                                Path destinationDir) throws IOException {
         Objects.requireNonNull(buildId, "buildId");
+        Objects.requireNonNull(buildKind, "buildKind");
         Objects.requireNonNull(architecture, "architecture");
         Objects.requireNonNull(destinationDir, "destinationDir");
         Files.createDirectories(destinationDir);
 
-        String stagingPrefix = layout.stagingPath(buildId, architecture);
-        String outputPrefix = layout.outputPath(buildId, architecture);
+        String stagingPrefix = layout.stagingPath(buildId, buildKind, architecture);
+        String outputPrefix = layout.outputPath(buildId, buildKind, architecture);
 
         List<String> keys = new ArrayList<>();
         for (String name : expectedNames) {

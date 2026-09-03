@@ -6,83 +6,67 @@ package cloud.plasticity.jobrunr.build;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import org.jobrunr.jobs.lambdas.JobRequest;
-import org.jobrunr.jobs.lambdas.JobRequestHandler;
 
 /**
- * One remote native-image build: the unit of work enqueued into JobRunr.
+ * One matrix cell's build: the unit of work run either directly (local-first) or inside a Fargate
+ * task launched by the Step Functions state machine's {@code RunTask.sync} state.
  *
- * <p>JobRunr serialises job arguments to JSON and stores them in the database, so this payload
- * stays deliberately small. Build inputs travel out of band through the staging area and are
- * referenced here only by relative path.
- *
- * <p>{@link #getModuleSelector()} is reserved: today one job builds one architecture for the whole
- * project, but carrying the field from the start means per-module fan-out can be added later without
- * changing the stored payload shape.
- *
- * <p>Mutable with a no-argument constructor because JobRunr's JSON mapper instantiates it
- * reflectively on the worker side.
+ * <p>Deliberately plain data with no framework coupling — the plugin constructs one directly for a
+ * local-first build, and serialises an equivalent set of fields into ECS task-override environment
+ * variables for a remote one. See {@code docs/DESIGN.md} §5 for the task-override contract and §6
+ * for the agent's env var names.
  */
-public class BuildJobRequest implements JobRequest {
+public final class BuildCellRequest {
 
     private String buildId;
+    private BuildKind buildKind;
     private Architecture architecture;
     private String stagingRelativePath;
     private String argFileName = StagingLayout.DEFAULT_ARGS_FILE_NAME;
+    private String profileRelativePath;
     private List<String> expectedArtifacts = new ArrayList<>();
     private List<String> extraNativeImageArgs = new ArrayList<>();
     private String moduleSelector;
     private int timeoutMinutes;
 
-    public BuildJobRequest() {
-        // for JSON deserialization
-    }
-
-    private BuildJobRequest(Builder builder) {
+    private BuildCellRequest(Builder builder) {
         this.buildId = builder.buildId;
+        this.buildKind = builder.buildKind;
         this.architecture = builder.architecture;
         this.stagingRelativePath = builder.stagingRelativePath;
         this.argFileName = builder.argFileName;
+        this.profileRelativePath = builder.profileRelativePath;
         this.expectedArtifacts = List.copyOf(builder.expectedArtifacts);
         this.extraNativeImageArgs = List.copyOf(builder.extraNativeImageArgs);
         this.moduleSelector = builder.moduleSelector;
         this.timeoutMinutes = builder.timeoutMinutes;
     }
 
-    @Override
-    public Class<? extends JobRequestHandler> getJobRequestHandler() {
-        return BuildJobRequestHandler.class;
-    }
-
-    /** Identifier shared by all architectures of one plugin invocation. */
+    /** Identifier shared by every cell of one plugin invocation. */
     public String getBuildId() {
         return buildId;
     }
 
-    public void setBuildId(String buildId) {
-        this.buildId = buildId;
+    /** Which build kind this cell produces. */
+    public BuildKind getBuildKind() {
+        return buildKind;
     }
 
-    /** Target architecture; asserted against the host before the build starts. */
+    /**
+     * Target architecture; {@code null} for {@link BuildKind#JVM}, asserted against the host before
+     * a native-image build starts.
+     */
     public Architecture getArchitecture() {
         return architecture;
-    }
-
-    public void setArchitecture(Architecture architecture) {
-        this.architecture = architecture;
     }
 
     /**
      * Staging root relative to the worker's mount root. Also the working directory for
      * {@code native-image}, which is what makes the argfile's relative paths portable between a
-     * local run and the container.
+     * local run and a remote one.
      */
     public String getStagingRelativePath() {
         return stagingRelativePath;
-    }
-
-    public void setStagingRelativePath(String stagingRelativePath) {
-        this.stagingRelativePath = stagingRelativePath;
     }
 
     /** Name of the native-image argument file inside the staging root. */
@@ -90,8 +74,12 @@ public class BuildJobRequest implements JobRequest {
         return argFileName;
     }
 
-    public void setArgFileName(String argFileName) {
-        this.argFileName = argFileName;
+    /**
+     * Path to the {@code .iprof} profile inside the staging root, relative like every other path
+     * here. Only present for {@link BuildKind#NATIVE_PGO_OPTIMIZE}.
+     */
+    public String getProfileRelativePath() {
+        return profileRelativePath;
     }
 
     /**
@@ -103,18 +91,9 @@ public class BuildJobRequest implements JobRequest {
         return expectedArtifacts;
     }
 
-    public void setExpectedArtifacts(List<String> expectedArtifacts) {
-        this.expectedArtifacts = expectedArtifacts == null ? new ArrayList<>() : expectedArtifacts;
-    }
-
-    /** Arguments appended after the argfile reference, e.g. diagnostics or memory limits. */
+    /** Arguments appended after the argfile reference and any build-kind-specific flags. */
     public List<String> getExtraNativeImageArgs() {
         return extraNativeImageArgs;
-    }
-
-    public void setExtraNativeImageArgs(List<String> extraNativeImageArgs) {
-        this.extraNativeImageArgs =
-                extraNativeImageArgs == null ? new ArrayList<>() : extraNativeImageArgs;
     }
 
     /** Reserved for future per-module fan-out; {@code null} means "the whole project". */
@@ -122,25 +101,19 @@ public class BuildJobRequest implements JobRequest {
         return moduleSelector;
     }
 
-    public void setModuleSelector(String moduleSelector) {
-        this.moduleSelector = moduleSelector;
-    }
-
     /** Soft timeout applied to the {@code native-image} process; 0 means no timeout. */
     public int getTimeoutMinutes() {
         return timeoutMinutes;
     }
 
-    public void setTimeoutMinutes(int timeoutMinutes) {
-        this.timeoutMinutes = timeoutMinutes;
-    }
-
     @Override
     public String toString() {
-        return "BuildJobRequest{buildId=" + buildId
+        return "BuildCellRequest{buildId=" + buildId
+                + ", buildKind=" + buildKind
                 + ", architecture=" + architecture
                 + ", stagingRelativePath=" + stagingRelativePath
                 + ", argFileName=" + argFileName
+                + ", profileRelativePath=" + profileRelativePath
                 + ", moduleSelector=" + moduleSelector
                 + '}';
     }
@@ -149,12 +122,14 @@ public class BuildJobRequest implements JobRequest {
         return new Builder();
     }
 
-    /** Fluent builder; validates the fields the worker cannot recover from being absent. */
+    /** Fluent builder; validates the fields a build cannot recover from being absent. */
     public static final class Builder {
         private String buildId;
+        private BuildKind buildKind;
         private Architecture architecture;
         private String stagingRelativePath;
         private String argFileName = StagingLayout.DEFAULT_ARGS_FILE_NAME;
+        private String profileRelativePath;
         private List<String> expectedArtifacts = List.of();
         private List<String> extraNativeImageArgs = List.of();
         private String moduleSelector;
@@ -162,6 +137,11 @@ public class BuildJobRequest implements JobRequest {
 
         public Builder buildId(String buildId) {
             this.buildId = buildId;
+            return this;
+        }
+
+        public Builder buildKind(BuildKind buildKind) {
+            this.buildKind = buildKind;
             return this;
         }
 
@@ -177,6 +157,11 @@ public class BuildJobRequest implements JobRequest {
 
         public Builder argFileName(String argFileName) {
             this.argFileName = argFileName;
+            return this;
+        }
+
+        public Builder profileRelativePath(String profileRelativePath) {
+            this.profileRelativePath = profileRelativePath;
             return this;
         }
 
@@ -201,9 +186,18 @@ public class BuildJobRequest implements JobRequest {
             return this;
         }
 
-        public BuildJobRequest build() {
+        public BuildCellRequest build() {
             Objects.requireNonNull(buildId, "buildId");
-            Objects.requireNonNull(architecture, "architecture");
+            Objects.requireNonNull(buildKind, "buildKind");
+            if (buildKind.requiresArchitecture()) {
+                Objects.requireNonNull(architecture,
+                        "architecture is required for build kind " + buildKind);
+            }
+            if (buildKind.requiresProfile() && (profileRelativePath == null
+                    || profileRelativePath.isBlank())) {
+                throw new IllegalArgumentException(
+                        "profileRelativePath is required for build kind " + buildKind);
+            }
             Objects.requireNonNull(stagingRelativePath, "stagingRelativePath");
             if (argFileName == null || argFileName.isBlank()) {
                 throw new IllegalArgumentException("argFileName must not be blank");
@@ -211,7 +205,7 @@ public class BuildJobRequest implements JobRequest {
             if (timeoutMinutes < 0) {
                 throw new IllegalArgumentException("timeoutMinutes must not be negative");
             }
-            return new BuildJobRequest(this);
+            return new BuildCellRequest(this);
         }
     }
 }

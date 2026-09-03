@@ -4,25 +4,22 @@
 package cloud.plasticity.jobrunr.maven.ecs;
 
 import cloud.plasticity.jobrunr.build.Architecture;
-import cloud.plasticity.jobrunr.build.storage.DsqlConnectionSettings;
+import cloud.plasticity.jobrunr.build.BuildKind;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.Compatibility;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
 import software.amazon.awssdk.services.ecs.model.EphemeralStorage;
-import software.amazon.awssdk.services.ecs.model.KeyValuePair;
 import software.amazon.awssdk.services.ecs.model.LogConfiguration;
 import software.amazon.awssdk.services.ecs.model.NetworkMode;
 import software.amazon.awssdk.services.ecs.model.RegisterTaskDefinitionRequest;
@@ -34,7 +31,7 @@ import software.amazon.awssdk.services.ecs.model.TaskDefinitionField;
 import software.amazon.awssdk.services.ecs.model.Volume;
 
 /**
- * Registers the ECS task definition for one architecture's build agent, idempotently.
+ * Registers the ECS task definition for one (build kind, architecture) matrix cell, idempotently.
  *
  * <p>ECS has no "register only if changed" operation of its own — every call to
  * {@code RegisterTaskDefinition} creates a new revision, even when nothing changed. Repeated plugin
@@ -43,9 +40,12 @@ import software.amazon.awssdk.services.ecs.model.Volume;
  * matter, and skipping registration when the desired configuration already matches the family's
  * current revision.
  *
- * <p>The hash is computed from the plugin's own input settings, not from the AWS SDK request object,
- * specifically so it is stable across SDK versions and unaffected by fields ECS fills in itself
- * (revision number, registration timestamp, ARNs).
+ * <p>The task definition carries no per-build environment variables — those (build kind,
+ * architecture, staging paths, the {@code .iprof} path for {@code NATIVE_PGO_OPTIMIZE}) are supplied
+ * per-cell as ECS task overrides by the Step Functions state machine's {@code RunTask.sync} state
+ * (see {@code docs/DESIGN.md} §5), not baked into the definition itself. That is what lets one task
+ * definition per (build kind, architecture) combination serve every build, rather than needing a new
+ * revision per invocation.
  */
 public final class TaskDefinitionRegistrar {
 
@@ -56,7 +56,6 @@ public final class TaskDefinitionRegistrar {
 
     private static final String CONTAINER_NAME = "jobrunr-build-agent";
     private static final String S3_FILES_VOLUME_NAME = "jobrunr-build-mount";
-    private static final String MOUNT_PATH = "/mnt/build";
     private static final String LOG_STREAM_PREFIX = "jobrunr-build";
 
     private final EcsClient ecsClient;
@@ -66,39 +65,43 @@ public final class TaskDefinitionRegistrar {
     }
 
     /**
-     * Registers (or reuses) the task definition for {@code architecture}.
+     * Registers (or reuses) the task definition for {@code buildKind}/{@code architecture}.
      *
+     * @param architecture required when {@code buildKind.requiresArchitecture()}; ignored (may be
+     *                     {@code null}) otherwise — {@link BuildKind#JVM} never reaches this method
+     *                     in practice, since JVM cells never launch a remote task, but the family
+     *                     naming still needs a consistent answer if it is called
      * @return the ARN of the task definition to run, either a pre-existing revision whose
      *         configuration already matches, or a freshly registered one
      */
     public String registerIfChanged(EcsClusterSettings clusterSettings,
                                     AgentContainerSettings containerSettings,
-                                    DsqlConnectionSettings dsqlConnectionSettings,
-                                    String schemaPrefix, Architecture architecture) {
+                                    BuildKind buildKind, Architecture architecture) {
         Objects.requireNonNull(clusterSettings, "clusterSettings");
         Objects.requireNonNull(containerSettings, "containerSettings");
-        Objects.requireNonNull(dsqlConnectionSettings, "dsqlConnectionSettings");
-        Objects.requireNonNull(schemaPrefix, "schemaPrefix");
-        Objects.requireNonNull(architecture, "architecture");
+        Objects.requireNonNull(buildKind, "buildKind");
+        if (buildKind.requiresArchitecture()) {
+            Objects.requireNonNull(architecture,
+                    "architecture is required for build kind " + buildKind);
+        }
 
-        String family = taskDefinitionFamily(architecture);
-        Map<String, String> environment = buildEnvironment(clusterSettings, dsqlConnectionSettings,
-                schemaPrefix, architecture);
-        String configHash = computeConfigHash(clusterSettings, containerSettings, architecture,
-                environment);
+        String family = taskDefinitionFamily(buildKind, architecture);
+        String configHash = computeConfigHash(clusterSettings, containerSettings, buildKind,
+                architecture);
 
         Optional<String> existingArnIfUnchanged = findUnchangedRevision(family, configHash);
         if (existingArnIfUnchanged.isPresent()) {
-            LOG.info("Task definition for {} is unchanged (family {}); reusing {}", architecture,
-                    family, existingArnIfUnchanged.get());
+            LOG.info("Task definition for {}/{} is unchanged (family {}); reusing {}", buildKind,
+                    architecture, family, existingArnIfUnchanged.get());
             return existingArnIfUnchanged.get();
         }
 
         RegisterTaskDefinitionRequest request = buildRequest(family, clusterSettings,
-                containerSettings, architecture, environment, configHash);
+                containerSettings, buildKind, architecture, configHash);
         RegisterTaskDefinitionResponse response = ecsClient.registerTaskDefinition(request);
         String arn = response.taskDefinition().taskDefinitionArn();
-        LOG.info("Registered new task definition revision for {}: {}", architecture, arn);
+        LOG.info("Registered new task definition revision for {}/{}: {}", buildKind, architecture,
+                arn);
         return arn;
     }
 
@@ -133,18 +136,12 @@ public final class TaskDefinitionRegistrar {
     private RegisterTaskDefinitionRequest buildRequest(String family,
                                                         EcsClusterSettings clusterSettings,
                                                         AgentContainerSettings containerSettings,
-                                                        Architecture architecture,
-                                                        Map<String, String> environment,
+                                                        BuildKind buildKind, Architecture architecture,
                                                         String configHash) {
-        List<KeyValuePair> environmentPairs = environment.entrySet().stream()
-                .map(entry -> KeyValuePair.builder().name(entry.getKey()).value(entry.getValue()).build())
-                .toList();
-
         ContainerDefinition containerDefinition = ContainerDefinition.builder()
                 .name(CONTAINER_NAME)
                 .image(containerSettings.agentImageUri())
                 .essential(true)
-                .environment(environmentPairs)
                 .logConfiguration(LogConfiguration.builder()
                         .logDriver("awslogs")
                         .options(Map.of(
@@ -177,12 +174,14 @@ public final class TaskDefinitionRegistrar {
                 .taskRoleArn(clusterSettings.taskRoleArn())
                 .containerDefinitions(containerDefinition)
                 .volumes(s3FilesVolume)
-                .runtimePlatform(RuntimePlatform.builder()
-                        .cpuArchitecture(architecture.ecsCpuArchitecture())
-                        .operatingSystemFamily("LINUX")
-                        .build())
                 .tags(Tag.builder().key(CONFIG_HASH_TAG_KEY).value(configHash).build());
 
+        if (buildKind.requiresArchitecture()) {
+            requestBuilder.runtimePlatform(RuntimePlatform.builder()
+                    .cpuArchitecture(architecture.ecsCpuArchitecture())
+                    .operatingSystemFamily("LINUX")
+                    .build());
+        }
         if (containerSettings.ephemeralStorageGiB() > 0) {
             requestBuilder.ephemeralStorage(
                     EphemeralStorage.builder().sizeInGiB(containerSettings.ephemeralStorageGiB()).build());
@@ -190,25 +189,10 @@ public final class TaskDefinitionRegistrar {
         return requestBuilder.build();
     }
 
-    /**
-     * Environment variables matching the names {@code AgentConfig} reads, so the container started
-     * from this task definition needs no further configuration beyond what ECS injects.
-     */
-    private Map<String, String> buildEnvironment(EcsClusterSettings clusterSettings,
-                                                  DsqlConnectionSettings dsqlConnectionSettings,
-                                                  String schemaPrefix, Architecture architecture) {
-        Map<String, String> environment = new LinkedHashMap<>();
-        environment.put("JOBRUNR_BUILD_MOUNT_ROOT", MOUNT_PATH);
-        environment.put("JOBRUNR_BUILD_ARCH", architecture.name());
-        environment.put("JOBRUNR_BUILD_DSQL_ENDPOINT", dsqlConnectionSettings.clusterEndpoint());
-        environment.put("JOBRUNR_BUILD_DSQL_REGION", dsqlConnectionSettings.region());
-        environment.put("JOBRUNR_BUILD_DSQL_USER", dsqlConnectionSettings.databaseUser());
-        environment.put("JOBRUNR_BUILD_SCHEMA_PREFIX", schemaPrefix);
-        return environment;
-    }
-
-    private String taskDefinitionFamily(Architecture architecture) {
-        return CONTAINER_NAME + "-" + architecture.schemaSuffix();
+    private String taskDefinitionFamily(BuildKind buildKind, Architecture architecture) {
+        String suffix = buildKind.requiresArchitecture() ? architecture.schemaSuffix()
+                : buildKind.configValue();
+        return CONTAINER_NAME + "-" + buildKind.configValue() + "-" + suffix;
     }
 
     /**
@@ -216,16 +200,16 @@ public final class TaskDefinitionRegistrar {
      * Deliberately excludes anything ECS assigns itself (revision, ARNs, registeredAt).
      */
     private String computeConfigHash(EcsClusterSettings clusterSettings,
-                                     AgentContainerSettings containerSettings,
-                                     Architecture architecture, Map<String, String> environment) {
-        // TreeMap for the environment gives a deterministic key order regardless of insertion order.
-        Map<String, String> sortedEnvironment = new TreeMap<>(environment);
+                                     AgentContainerSettings containerSettings, BuildKind buildKind,
+                                     Architecture architecture) {
         List<String> parts = new ArrayList<>();
         parts.add("image=" + containerSettings.agentImageUri());
         parts.add("cpu=" + containerSettings.cpu());
         parts.add("memory=" + containerSettings.memory());
         parts.add("ephemeralStorageGiB=" + containerSettings.ephemeralStorageGiB());
-        parts.add("cpuArchitecture=" + architecture.ecsCpuArchitecture());
+        parts.add("buildKind=" + buildKind);
+        parts.add("cpuArchitecture="
+                + (buildKind.requiresArchitecture() ? architecture.ecsCpuArchitecture() : "n/a"));
         parts.add("executionRoleArn=" + clusterSettings.executionRoleArn());
         parts.add("taskRoleArn=" + clusterSettings.taskRoleArn());
         parts.add("s3FilesFileSystemArn=" + clusterSettings.s3FilesFileSystemArn());
@@ -233,7 +217,6 @@ public final class TaskDefinitionRegistrar {
         parts.add("s3FilesAccessPointArn=" + clusterSettings.s3FilesAccessPointArn());
         parts.add("logGroupName=" + clusterSettings.logGroupName());
         parts.add("region=" + clusterSettings.region());
-        sortedEnvironment.forEach((key, value) -> parts.add("env." + key + "=" + value));
 
         String canonical = String.join("\n", parts);
         return sha256Hex(canonical);

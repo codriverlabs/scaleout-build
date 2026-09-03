@@ -39,9 +39,14 @@ public final class NativeImageBuildExecutor implements BuildExecutor {
     }
 
     @Override
-    public BuildResult execute(BuildJobRequest request, BuildLog log)
+    public BuildResult execute(BuildCellRequest request, BuildLog log)
             throws BuildFailedException, InterruptedException {
         Objects.requireNonNull(request, "request");
+        if (!request.getBuildKind().requiresArchitecture()) {
+            throw new BuildFailedException(
+                    "NativeImageBuildExecutor does not handle build kind " + request.getBuildKind()
+                            + "; JVM-kind cells never invoke native-image");
+        }
         BuildLog output = log == null ? BuildLog.discarding() : log;
 
         Path stagingRoot = environment.resolveStagingRoot(request);
@@ -76,7 +81,8 @@ public final class NativeImageBuildExecutor implements BuildExecutor {
             artifacts.forEach(artifact -> output.line("[jobrunr-build] produced " + artifact));
             return new BuildResult(exitCode, duration, artifacts);
         } catch (InterruptedException e) {
-            // Typically a Fargate Spot interruption: stop the builder and let JobRunr re-queue.
+            // Typically a Fargate Spot interruption: stop the builder; the caller (BuildMojo's
+            // local-first path, or the agent's single-shot execution) decides what happens next.
             LOG.warn("Build interrupted, terminating native-image process");
             process.destroyForcibly();
             throw e;
@@ -85,9 +91,10 @@ public final class NativeImageBuildExecutor implements BuildExecutor {
         }
     }
 
-    private List<String> buildCommand(BuildJobRequest request) {
+    private List<String> buildCommand(BuildCellRequest request) {
         List<String> command = new ArrayList<>(environment.nativeImageCommand());
         command.add("@" + request.getArgFileName());
+        command.addAll(request.getBuildKind().nativeImageFlags(request.getProfileRelativePath()));
         command.addAll(request.getExtraNativeImageArgs());
         return List.copyOf(command);
     }
