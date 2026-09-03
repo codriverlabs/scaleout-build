@@ -16,10 +16,11 @@
     <artifactId>jobrunr-maven-plugin</artifactId>
     <packaging>maven-plugin</packaging>
 
-    <name>JobRunr Parallel Build Maven Plugin</name>
+    <name>AWS ECS Parallel Build Maven Plugin</name>
     <description>
-        Fans GraalVM/Mandrel native-image builds out to AWS Fargate Spot tasks, one per target
-        architecture, and attaches the resulting binaries to the reactor.
+        Fans GraalVM/Mandrel native-image builds out to Amazon ECS (Fargate and Fargate Spot today;
+        ECS Managed Instances planned), one task per target architecture, and attaches the
+        resulting binaries to the reactor.
     </description>
 
     <prerequisites>
@@ -81,7 +82,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-plugin-plugin</artifactId>
                 <configuration>
-                    <goalPrefix>fargate</goalPrefix>
+                    <goalPrefix>aws-ecs</goalPrefix>
                 </configuration>
             </plugin>
         </plugins>

@@ -57,7 +57,7 @@ import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * {@code fargate:build} — computes a GraalVM build matrix and runs it directly against ECS, with no
+ * {@code aws-ecs:build} — computes a GraalVM build matrix and runs it directly against ECS, with no
  * orchestration layer above it (see {@code docs/PURE_ECS_ALTERNATIVE.md} for why, and when a
  * declarative orchestrator like Step Functions would be worth reintroducing instead).
  *
@@ -80,11 +80,11 @@ public class BuildMojo extends AbstractMojo {
      * Build kinds to produce: any of {@code jvm}, {@code native}, {@code native-pgo-instrument},
      * {@code native-pgo-optimize}. Defaults to {@code [native]}.
      */
-    @Parameter(property = "fargate.buildKinds")
+    @Parameter(property = "aws-ecs.buildKinds")
     private List<String> buildKinds;
 
     /** Target architectures for every non-JVM build kind. Defaults to the host architecture. */
-    @Parameter(property = "fargate.architectures")
+    @Parameter(property = "aws-ecs.architectures")
     private List<String> architectures;
 
     /**
@@ -92,15 +92,15 @@ public class BuildMojo extends AbstractMojo {
      * the requested build kinds. Per {@code docs/DESIGN.md} §3, collecting this profile (running an
      * instrumented binary against real traffic) is out of scope for this plugin.
      */
-    @Parameter(property = "fargate.profilePath")
+    @Parameter(property = "aws-ecs.profilePath")
     private String profilePath;
 
     /** Explicit main class for derived-argfile builds; read from the artifact manifest if omitted. */
-    @Parameter(property = "fargate.mainClass")
+    @Parameter(property = "aws-ecs.mainClass")
     private String mainClass;
 
     /** Explicit output binary name for derived-argfile builds; defaults to the project's final name. */
-    @Parameter(property = "fargate.imageName")
+    @Parameter(property = "aws-ecs.imageName")
     private String imageName;
 
     /** Extra {@code native-image} arguments appended for derived-argfile builds. */
@@ -112,70 +112,80 @@ public class BuildMojo extends AbstractMojo {
     private List<String> extraNativeImageArgs;
 
     /** Command that invokes {@code native-image} for local-first cells, space-separated. */
-    @Parameter(property = "fargate.nativeImageCommand", defaultValue = "native-image")
+    @Parameter(property = "aws-ecs.nativeImageCommand", defaultValue = "native-image")
     private String nativeImageCommand;
 
-    /** Directory local-first builds are staged into; defaults to {@code target/fargate-build}. */
-    @Parameter(property = "fargate.workDirectory")
+    /** Directory local-first builds are staged into; defaults to {@code target/aws-ecs-build}. */
+    @Parameter(property = "aws-ecs.workDirectory")
     private String workDirectory;
 
     /** Soft timeout applied to each {@code native-image} process; 0 disables it. */
-    @Parameter(property = "fargate.timeoutMinutes", defaultValue = "0")
+    @Parameter(property = "aws-ecs.timeoutMinutes", defaultValue = "0")
     private int timeoutMinutes;
 
     /** Overall time to wait for the remote matrix execution to finish before failing the goal. */
-    @Parameter(property = "fargate.overallTimeoutMinutes", defaultValue = "120")
+    @Parameter(property = "aws-ecs.overallTimeoutMinutes", defaultValue = "120")
     private int overallTimeoutMinutes;
 
     /** Skips the goal entirely, for profiles that only want native builds on CI. */
-    @Parameter(property = "fargate.skip", defaultValue = "false")
+    @Parameter(property = "aws-ecs.skip", defaultValue = "false")
     private boolean skip;
+
+    /**
+     * Sends every non-JVM cell to ECS regardless of whether its architecture matches the host —
+     * the default behavior otherwise always prefers building a host-matching cell locally with no
+     * AWS calls at all. Set this when you specifically want every cell built remotely, e.g. to keep
+     * the local machine's toolchain out of the loop entirely or to exercise the remote path for a
+     * cell that happens to match the host.
+     */
+    @Parameter(property = "aws-ecs.forceRemote", defaultValue = "false")
+    private boolean forceRemote;
 
     // --- Remote orchestration configuration; only required if any cell cannot run locally. ---
 
-    @Parameter(property = "fargate.s3Bucket")
+    @Parameter(property = "aws-ecs.s3Bucket")
     private String s3Bucket;
-    @Parameter(property = "fargate.clusterArn")
+    @Parameter(property = "aws-ecs.clusterArn")
     private String clusterArn;
-    @Parameter(property = "fargate.subnetIds")
+    @Parameter(property = "aws-ecs.subnetIds")
     private List<String> subnetIds;
-    @Parameter(property = "fargate.securityGroupIds")
+    @Parameter(property = "aws-ecs.securityGroupIds")
     private List<String> securityGroupIds;
-    @Parameter(property = "fargate.assignPublicIp", defaultValue = "false")
+    @Parameter(property = "aws-ecs.assignPublicIp", defaultValue = "false")
     private boolean assignPublicIp;
-    @Parameter(property = "fargate.executionRoleArn")
+    @Parameter(property = "aws-ecs.executionRoleArn")
     private String executionRoleArn;
-    @Parameter(property = "fargate.taskRoleArn")
+    @Parameter(property = "aws-ecs.taskRoleArn")
     private String taskRoleArn;
-    @Parameter(property = "fargate.s3FilesFileSystemArn")
+    @Parameter(property = "aws-ecs.s3FilesFileSystemArn")
     private String s3FilesFileSystemArn;
-    @Parameter(property = "fargate.s3FilesRootDirectory")
+    @Parameter(property = "aws-ecs.s3FilesRootDirectory")
     private String s3FilesRootDirectory;
-    @Parameter(property = "fargate.s3FilesAccessPointArn")
+    @Parameter(property = "aws-ecs.s3FilesAccessPointArn")
     private String s3FilesAccessPointArn;
-    @Parameter(property = "fargate.logGroupName")
+    @Parameter(property = "aws-ecs.logGroupName")
     private String logGroupName;
-    @Parameter(property = "fargate.region")
+    @Parameter(property = "aws-ecs.region")
     private String region;
-    @Parameter(property = "fargate.agentImageUri")
+    @Parameter(property = "aws-ecs.agentImageUri")
     private String agentImageUri;
-    @Parameter(property = "fargate.agentCpu", defaultValue = "4096")
+    @Parameter(property = "aws-ecs.agentCpu", defaultValue = "4096")
     private String agentCpu;
-    @Parameter(property = "fargate.agentMemory", defaultValue = "16384")
+    @Parameter(property = "aws-ecs.agentMemory", defaultValue = "16384")
     private String agentMemory;
-    @Parameter(property = "fargate.agentEphemeralStorageGiB", defaultValue = "0")
+    @Parameter(property = "aws-ecs.agentEphemeralStorageGiB", defaultValue = "0")
     private int agentEphemeralStorageGiB;
     /** How many Spot interruptions a cell tolerates before its relaunch prefers on-demand capacity. */
-    @Parameter(property = "fargate.maxSpotInterruptionsBeforeOnDemand", defaultValue = "2")
+    @Parameter(property = "aws-ecs.maxSpotInterruptionsBeforeOnDemand", defaultValue = "2")
     private int maxSpotInterruptionsBeforeOnDemand;
     /** How often to poll ECS/CloudWatch Logs while a remote cell is running. */
-    @Parameter(property = "fargate.pollIntervalSeconds", defaultValue = "5")
+    @Parameter(property = "aws-ecs.pollIntervalSeconds", defaultValue = "5")
     private int pollIntervalSeconds;
 
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
         if (skip) {
-            getLog().info("fargate:build skipped (fargate.skip=true)");
+            getLog().info("aws-ecs:build skipped (aws-ecs.skip=true)");
             return;
         }
 
@@ -195,10 +205,9 @@ public class BuildMojo extends AbstractMojo {
             NativeImageInputPlan plan = planInputs();
             getLog().info("Input plan: " + plan);
 
-            List<MatrixCell> localCells =
-                    nativeishCells.stream().filter(c -> c.architecture.matchesHost()).toList();
-            List<MatrixCell> remoteCells =
-                    nativeishCells.stream().filter(c -> !c.architecture.matchesHost()).toList();
+            LocalRemoteSplit split = splitLocalAndRemote(nativeishCells, forceRemote);
+            List<MatrixCell> localCells = split.localCells();
+            List<MatrixCell> remoteCells = split.remoteCells();
 
             for (MatrixCell cell : localCells) {
                 try {
@@ -228,7 +237,7 @@ public class BuildMojo extends AbstractMojo {
 
         if (!failures.isEmpty()) {
             throw new MojoFailureException(
-                    "fargate:build failed for " + failures.size() + " cell(s):\n"
+                    "aws-ecs:build failed for " + failures.size() + " cell(s):\n"
                             + String.join("\n", failures));
         }
     }
@@ -247,6 +256,29 @@ public class BuildMojo extends AbstractMojo {
         public String toString() {
             return architecture == null ? buildKind.toString() : buildKind + "/" + architecture;
         }
+    }
+
+    /** Which non-JVM cells build locally versus on ECS. */
+    record LocalRemoteSplit(List<MatrixCell> localCells, List<MatrixCell> remoteCells) {
+    }
+
+    /**
+     * Splits non-JVM cells into local-first and remote groups.
+     *
+     * <p>By default a cell whose architecture matches the host builds locally with no AWS calls at
+     * all; {@code forceRemote} overrides that and sends every cell to ECS regardless of host match
+     * — e.g. to keep the local machine's toolchain out of the loop entirely, or to exercise the
+     * remote path for a cell that happens to match the host.
+     */
+    static LocalRemoteSplit splitLocalAndRemote(List<MatrixCell> nativeishCells, boolean forceRemote) {
+        if (forceRemote) {
+            return new LocalRemoteSplit(List.of(), nativeishCells);
+        }
+        List<MatrixCell> localCells =
+                nativeishCells.stream().filter(c -> c.architecture.matchesHost()).toList();
+        List<MatrixCell> remoteCells =
+                nativeishCells.stream().filter(c -> !c.architecture.matchesHost()).toList();
+        return new LocalRemoteSplit(localCells, remoteCells);
     }
 
     private List<MatrixCell> resolveMatrix() throws MojoFailureException {
@@ -273,7 +305,7 @@ public class BuildMojo extends AbstractMojo {
         if (kinds.contains(BuildKind.NATIVE_PGO_OPTIMIZE) && (profilePath == null
                 || profilePath.isBlank())) {
             throw new MojoFailureException(
-                    "fargate.profilePath must be set when native-pgo-optimize is requested");
+                    "aws-ecs.profilePath must be set when native-pgo-optimize is requested");
         }
         return cells;
     }
@@ -307,7 +339,7 @@ public class BuildMojo extends AbstractMojo {
     private void attachJvmArtifact() {
         if (project.getArtifact() == null || project.getArtifact().getFile() == null) {
             getLog().warn("build kind 'jvm' was requested but the project has no packaged artifact "
-                    + "yet; is fargate:build bound after the package phase?");
+                    + "yet; is aws-ecs:build bound after the package phase?");
             return;
         }
         getLog().info("JVM build kind: attaching the already-packaged project artifact "
@@ -376,7 +408,7 @@ public class BuildMojo extends AbstractMojo {
             throws IOException, MojoFailureException {
         Path source = Path.of(profilePath);
         if (!java.nio.file.Files.isRegularFile(source)) {
-            throw new MojoFailureException("fargate.profilePath does not exist: " + profilePath);
+            throw new MojoFailureException("aws-ecs.profilePath does not exist: " + profilePath);
         }
         String relativeName = "default.iprof";
         Path destination = mountRoot.resolve(stagingRelativePath).resolve(relativeName);
@@ -551,7 +583,7 @@ public class BuildMojo extends AbstractMojo {
             throws IOException, MojoFailureException {
         Path source = Path.of(profilePath);
         if (!java.nio.file.Files.isRegularFile(source)) {
-            throw new MojoFailureException("fargate.profilePath does not exist: " + profilePath);
+            throw new MojoFailureException("aws-ecs.profilePath does not exist: " + profilePath);
         }
         String relativeName = "default.iprof";
         String key = stagingRelativePath.endsWith("/")
@@ -601,34 +633,34 @@ public class BuildMojo extends AbstractMojo {
     private void requireRemoteConfig() throws MojoFailureException {
         List<String> missing = new ArrayList<>();
         if (isBlank(s3Bucket)) {
-            missing.add("fargate.s3Bucket");
+            missing.add("aws-ecs.s3Bucket");
         }
         if (isBlank(clusterArn)) {
-            missing.add("fargate.clusterArn");
+            missing.add("aws-ecs.clusterArn");
         }
         if (subnetIds == null || subnetIds.isEmpty()) {
-            missing.add("fargate.subnetIds");
+            missing.add("aws-ecs.subnetIds");
         }
         if (securityGroupIds == null || securityGroupIds.isEmpty()) {
-            missing.add("fargate.securityGroupIds");
+            missing.add("aws-ecs.securityGroupIds");
         }
         if (isBlank(executionRoleArn)) {
-            missing.add("fargate.executionRoleArn");
+            missing.add("aws-ecs.executionRoleArn");
         }
         if (isBlank(taskRoleArn)) {
-            missing.add("fargate.taskRoleArn");
+            missing.add("aws-ecs.taskRoleArn");
         }
         if (isBlank(s3FilesFileSystemArn)) {
-            missing.add("fargate.s3FilesFileSystemArn");
+            missing.add("aws-ecs.s3FilesFileSystemArn");
         }
         if (isBlank(logGroupName)) {
-            missing.add("fargate.logGroupName");
+            missing.add("aws-ecs.logGroupName");
         }
         if (isBlank(region)) {
-            missing.add("fargate.region");
+            missing.add("aws-ecs.region");
         }
         if (isBlank(agentImageUri)) {
-            missing.add("fargate.agentImageUri");
+            missing.add("aws-ecs.agentImageUri");
         }
         if (!missing.isEmpty()) {
             throw new MojoFailureException(
@@ -665,7 +697,7 @@ public class BuildMojo extends AbstractMojo {
         if (workDirectory != null && !workDirectory.isBlank()) {
             return Path.of(workDirectory);
         }
-        return Path.of(project.getBuild().getDirectory(), "fargate-build");
+        return Path.of(project.getBuild().getDirectory(), "aws-ecs-build");
     }
 
     private List<String> splitCommand(String command) {

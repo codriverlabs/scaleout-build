@@ -9,6 +9,28 @@ necessary, or does calling ECS directly suffice?
 **Short answer: pure ECS suffices, and for a small fixed matrix it's simpler.** This document is
 the tradeoff analysis; §5 says which one to actually use and when to switch.
 
+## 0. Naming: `aws-ecs`, not `fargate`
+
+The goal is `aws-ecs:build` (parameters `aws-ecs.*`), not `fargate:build`. This is a deliberate
+choice, not cosmetic: Fargate is one *launch type* within Amazon ECS, and the roadmap includes
+broadening beyond it — most immediately **ECS Managed Instances**, which already supports EC2 Spot
+capacity (`capacityOptionType: SPOT` on the managed-instance capacity provider, GA) and, unlike the
+raw EC2 launch type, stays compatible with S3 Files for staging (see the caveat below). Naming
+everything after "Fargate" would have described less and less of what the plugin does as more
+launch types are added under the same ECS cluster/task-definition model. A bare `ecs` prefix was
+considered and rejected as too short/generic for a goal prefix meant to be unambiguous in a
+`pom.xml` or CLI transcript read out of context.
+
+**A real constraint for any future EC2 launch type work, confirmed against AWS's docs, not
+assumed:** S3 Files volumes — the mechanism this whole staging design (`S3StagingSink`/
+`S3ArtifactRetriever`, the agent's S3 Files mount) depends on — are GA on **Fargate** and
+**ECS Managed Instances**, but explicitly **not supported on the raw EC2 launch type**: "If you
+configure an S3 file system in a task definition and attempt to run it on the Amazon EC2 launch
+type, the task will fail at launch." So ECS Managed Instances is a straightforward next launch type
+to add (same staging mechanism, just a different capacity provider); the raw EC2 launch type is not
+— it would need a different staging mechanism (e.g. EBS-backed local disk, or reintroducing direct
+S3 SDK calls inside the agent for that one launch type) before it could work at all.
+
 ## 1. Progress streaming was never a Step Functions feature
 
 Both designs stream build progress the same way: the task's `awslogs` log driver ships stdout/
@@ -30,6 +52,12 @@ Three things Step Functions's ASL expressed declaratively become code again:
    this plugin never launches more tasks in one invocation than that.
 3. **Relaunch on Spot interruption.** `FargateTaskSupervisor` polls `DescribeTasks` and relaunches
    when a stop looks like a genuine Spot reclaim.
+
+By default, a cell whose target architecture matches the machine running `mvn` builds locally with
+no AWS calls at all (`BuildMojo.splitLocalAndRemote`) — only the non-matching architecture's cell
+goes remote. Set `aws-ecs.forceRemote=true` to send every non-JVM cell to ECS regardless of host
+match, e.g. to keep the local toolchain out of the loop entirely or to exercise the remote path for
+an architecture that happens to match the host.
 
 ## 3. Spot interruption detection is a real, verified gap
 

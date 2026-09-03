@@ -96,7 +96,7 @@ build pointing at the `.iprof` that process produced.
 
 ```mermaid
 sequenceDiagram
-    participant M as mvn package fargate:build
+    participant M as mvn package aws-ecs:build
     participant SF as Step Functions<br/>(Standard workflow)
     participant S3 as S3 bucket
     participant T as Fargate Spot task<br/>(per matrix cell)
