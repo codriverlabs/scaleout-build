@@ -62,10 +62,6 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudwatchlogs</artifactId>
         </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>sfn</artifactId>
-        </dependency>
 
         <dependency>
             <groupId>org.slf4j</groupId>

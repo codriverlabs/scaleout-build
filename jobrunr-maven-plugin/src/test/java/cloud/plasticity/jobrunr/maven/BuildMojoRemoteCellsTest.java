@@ -27,29 +27,28 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.cloudwatchlogs.model.FilterLogEventsResponse;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ClientException;
+import software.amazon.awssdk.services.ecs.model.Container;
+import software.amazon.awssdk.services.ecs.model.DescribeTasksResponse;
 import software.amazon.awssdk.services.ecs.model.RegisterTaskDefinitionRequest;
 import software.amazon.awssdk.services.ecs.model.RegisterTaskDefinitionResponse;
+import software.amazon.awssdk.services.ecs.model.RunTaskResponse;
+import software.amazon.awssdk.services.ecs.model.Task;
 import software.amazon.awssdk.services.ecs.model.TaskDefinition;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
-import software.amazon.awssdk.services.sfn.SfnClient;
-import software.amazon.awssdk.services.sfn.model.CreateStateMachineResponse;
-import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
-import software.amazon.awssdk.services.sfn.model.ExecutionStatus;
-import software.amazon.awssdk.services.sfn.model.ListStateMachinesResponse;
-import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
 
 /**
- * Exercises {@code BuildMojo}'s remote-cell orchestration — staging, task definition
- * registration, state machine deployment, execution supervision, and artifact retrieval — through
- * the package-visible {@code runRemoteCells} overload that accepts explicit AWS clients, against
- * mocked ECS/S3/Step Functions rather than real AWS.
+ * Exercises {@code BuildMojo}'s pure-ECS remote-cell orchestration — stage, register, launch
+ * directly, supervise, retrieve, attach, with no orchestration layer above ECS — through the
+ * package-visible {@code runRemoteCells} overload that accepts explicit AWS clients.
  */
 @ExtendWith(MockitoExtension.class)
-@Timeout(15)
+@Timeout(20)
 class BuildMojoRemoteCellsTest {
 
     @Mock
@@ -57,13 +56,14 @@ class BuildMojoRemoteCellsTest {
     @Mock
     private EcsClient ecsClient;
     @Mock
-    private SfnClient sfnClient;
+    private CloudWatchLogsClient logsClient;
     @Mock
     private MavenProjectHelper projectHelper;
 
     private BuildMojo mojo;
 
     @BeforeEach
+    @SuppressWarnings("unchecked")
     void setUp(@TempDir Path targetDir) throws Exception {
         mojo = new BuildMojo();
         MavenProject project = new MavenProject();
@@ -87,15 +87,17 @@ class BuildMojoRemoteCellsTest {
         setField(mojo, "agentImageUri", "quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25");
         setField(mojo, "agentCpu", "4096");
         setField(mojo, "agentMemory", "16384");
-        setField(mojo, "stateMachineExecutionRoleArn", "arn:aws:iam::123456789012:role/sfn-exec");
-        setField(mojo, "stateMachineName", "jobrunr-build-matrix");
-        setField(mojo, "maxAttemptsPerCell", 2);
+        setField(mojo, "maxSpotInterruptionsBeforeOnDemand", 2);
+        setField(mojo, "pollIntervalSeconds", 1);
         setField(mojo, "overallTimeoutMinutes", 1);
+
+        when(logsClient.filterLogEvents(any(Consumer.class)))
+                .thenReturn(FilterLogEventsResponse.builder().events(List.of()).build());
     }
 
     @Test
     @SuppressWarnings("unchecked")
-    void stagesRegistersDeploysSupervisesAndAttachesOnSuccess() throws Exception {
+    void stagesRegistersLaunchesSupervisesAndAttachesOnSuccess() throws Exception {
         when(ecsClient.describeTaskDefinition(any(Consumer.class)))
                 .thenThrow(ClientException.builder().message("not found").build());
         when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
@@ -104,19 +106,13 @@ class BuildMojoRemoteCellsTest {
                                 .taskDefinitionArn("arn:...:task-definition/agent-native-arm64:1")
                                 .build())
                         .build());
-        when(sfnClient.listStateMachines(any(Consumer.class)))
-                .thenReturn(ListStateMachinesResponse.builder().stateMachines(List.of()).build());
-        when(sfnClient.createStateMachine(any(Consumer.class)))
-                .thenReturn(CreateStateMachineResponse.builder()
-                        .stateMachineArn("arn:...:stateMachine:jobrunr-build-matrix").build());
-        when(sfnClient.startExecution(any(Consumer.class)))
-                .thenReturn(StartExecutionResponse.builder().executionArn("arn:...:execution:x")
-                        .build());
-        String output = """
-                [{"buildId":"b1","buildKind":"native","architecture":"ARM64","success":true}]""";
-        when(sfnClient.describeExecution(any(Consumer.class)))
-                .thenReturn(DescribeExecutionResponse.builder().status(ExecutionStatus.SUCCEEDED)
-                        .output(output).build());
+        when(ecsClient.runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class))).thenReturn(RunTaskResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").build()).build());
+        when(ecsClient.describeTasks(any(Consumer.class))).thenReturn(DescribeTasksResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").lastStatus("STOPPED")
+                        .stoppedReason("Essential container in task exited")
+                        .containers(Container.builder().exitCode(0).build()).build())
+                .build());
 
         when(s3Client.headObject(any(Consumer.class)))
                 .thenReturn(HeadObjectResponse.builder().contentLength(4L).build());
@@ -133,18 +129,17 @@ class BuildMojoRemoteCellsTest {
                 List.of(newCell(BuildKind.NATIVE, Architecture.ARM64));
 
         List<String> failures = mojo.runRemoteCells(remoteCells, generatedPlan, "b1", s3Client,
-                ecsClient, sfnClient);
+                ecsClient, logsClient);
 
         assertThat(failures).isEmpty();
         verify(ecsClient, times(1)).registerTaskDefinition(any(RegisterTaskDefinitionRequest.class));
-        verify(sfnClient, times(1)).createStateMachine(any(Consumer.class));
-        verify(sfnClient, times(1)).startExecution(any(Consumer.class));
+        verify(ecsClient, times(1)).runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class));
         verify(projectHelper, times(1)).attachArtifact(any(), any(), any(), any());
     }
 
     @Test
     @SuppressWarnings("unchecked")
-    void reportsAFailureForACellTheExecutionReportedAsFailed() throws Exception {
+    void reportsAFailureWhenTheContainerExitsNonZero() throws Exception {
         when(ecsClient.describeTaskDefinition(any(Consumer.class)))
                 .thenThrow(ClientException.builder().message("not found").build());
         when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
@@ -153,20 +148,14 @@ class BuildMojoRemoteCellsTest {
                                 .taskDefinitionArn("arn:...:task-definition/agent-native-arm64:1")
                                 .build())
                         .build());
-        when(sfnClient.listStateMachines(any(Consumer.class)))
-                .thenReturn(ListStateMachinesResponse.builder().stateMachines(List.of()).build());
-        when(sfnClient.createStateMachine(any(Consumer.class)))
-                .thenReturn(CreateStateMachineResponse.builder()
-                        .stateMachineArn("arn:...:stateMachine:jobrunr-build-matrix").build());
-        when(sfnClient.startExecution(any(Consumer.class)))
-                .thenReturn(StartExecutionResponse.builder().executionArn("arn:...:execution:x")
-                        .build());
-        String output = """
-                [{"buildId":"b1","buildKind":"native","architecture":"ARM64","success":false,
-                  "error":"States.TaskFailed","cause":"no capacity"}]""";
-        when(sfnClient.describeExecution(any(Consumer.class)))
-                .thenReturn(DescribeExecutionResponse.builder().status(ExecutionStatus.SUCCEEDED)
-                        .output(output).build());
+        when(ecsClient.runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class))).thenReturn(RunTaskResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").build()).build());
+        when(ecsClient.describeTasks(any(Consumer.class))).thenReturn(DescribeTasksResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").lastStatus("STOPPED")
+                        .stoppedReason("Essential container in task exited")
+                        .containers(Container.builder().exitCode(1).reason("no capacity").build())
+                        .build())
+                .build());
 
         NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),
                 "-o\noutput/test-app\n", List.of("test-app"));
@@ -174,11 +163,62 @@ class BuildMojoRemoteCellsTest {
                 List.of(newCell(BuildKind.NATIVE, Architecture.ARM64));
 
         List<String> failures = mojo.runRemoteCells(remoteCells, generatedPlan, "b1", s3Client,
-                ecsClient, sfnClient);
+                ecsClient, logsClient);
 
         assertThat(failures).hasSize(1);
         assertThat(failures.get(0)).contains("no capacity");
         verify(projectHelper, times(0)).attachArtifact(any(), any(), any(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void supervisesMultipleRemoteCellsConcurrently() throws Exception {
+        when(ecsClient.describeTaskDefinition(any(Consumer.class)))
+                .thenThrow(ClientException.builder().message("not found").build());
+        when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
+                .thenReturn(RegisterTaskDefinitionResponse.builder()
+                        .taskDefinition(TaskDefinition.builder().taskDefinitionArn("arn:...:1")
+                                .build())
+                        .build());
+        when(ecsClient.runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class)))
+                .thenReturn(RunTaskResponse.builder()
+                        .tasks(Task.builder().taskArn("arn:...:task/x86").build()).build())
+                .thenReturn(RunTaskResponse.builder()
+                        .tasks(Task.builder().taskArn("arn:...:task/arm").build()).build());
+        when(ecsClient.describeTasks(any(Consumer.class))).thenAnswer(invocation -> {
+            Consumer<software.amazon.awssdk.services.ecs.model.DescribeTasksRequest.Builder> consumer =
+                    invocation.getArgument(0);
+            var builder = software.amazon.awssdk.services.ecs.model.DescribeTasksRequest.builder();
+            consumer.accept(builder);
+            String taskArn = builder.build().tasks().get(0);
+            return DescribeTasksResponse.builder()
+                    .tasks(Task.builder().taskArn(taskArn).lastStatus("STOPPED")
+                            .stoppedReason("Essential container in task exited")
+                            .containers(Container.builder().exitCode(0).build()).build())
+                    .build();
+        });
+
+        when(s3Client.headObject(any(Consumer.class)))
+                .thenReturn(HeadObjectResponse.builder().contentLength(4L).build());
+        when(s3Client.getObject(any(GetObjectRequest.class), any(Path.class)))
+                .thenAnswer(invocation -> {
+                    Path destination = invocation.getArgument(1);
+                    Files.writeString(destination, "bin");
+                    return null;
+                });
+
+        NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),
+                "-o\noutput/test-app\n", List.of("test-app"));
+        List<BuildMojo.MatrixCell> remoteCells = List.of(
+                newCell(BuildKind.NATIVE, Architecture.X86_64),
+                newCell(BuildKind.NATIVE, Architecture.ARM64));
+
+        List<String> failures = mojo.runRemoteCells(remoteCells, generatedPlan, "b1", s3Client,
+                ecsClient, logsClient);
+
+        assertThat(failures).isEmpty();
+        verify(ecsClient, times(2)).runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class));
+        verify(projectHelper, times(2)).attachArtifact(any(), any(), any(), any());
     }
 
     private static BuildMojo.MatrixCell newCell(BuildKind buildKind, Architecture architecture) {

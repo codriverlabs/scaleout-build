@@ -56,7 +56,8 @@ public final class TaskDefinitionRegistrar {
 
     private static final String CONTAINER_NAME = "jobrunr-build-agent";
     private static final String S3_FILES_VOLUME_NAME = "jobrunr-build-mount";
-    private static final String LOG_STREAM_PREFIX = "jobrunr-build";
+    /** Value for the container's {@code awslogs-stream-prefix}; referenced by {@code BuildMojo}. */
+    public static final String LOG_STREAM_PREFIX = "jobrunr-build";
 
     private final EcsClient ecsClient;
 

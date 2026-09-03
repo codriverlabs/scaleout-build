@@ -14,7 +14,10 @@ import cloud.plasticity.jobrunr.build.BuildResult;
 import cloud.plasticity.jobrunr.build.NativeImageBuildExecutor;
 import cloud.plasticity.jobrunr.build.StagingLayout;
 import cloud.plasticity.jobrunr.maven.ecs.AgentContainerSettings;
+import cloud.plasticity.jobrunr.maven.ecs.CloudWatchLogTailer;
 import cloud.plasticity.jobrunr.maven.ecs.EcsClusterSettings;
+import cloud.plasticity.jobrunr.maven.ecs.FargateTaskLauncher;
+import cloud.plasticity.jobrunr.maven.ecs.FargateTaskSupervisor;
 import cloud.plasticity.jobrunr.maven.ecs.TaskDefinitionRegistrar;
 import cloud.plasticity.jobrunr.maven.planner.InputPlanningException;
 import cloud.plasticity.jobrunr.maven.planner.NativeImageInputPlan;
@@ -23,12 +26,6 @@ import cloud.plasticity.jobrunr.maven.planner.ProjectInputs;
 import cloud.plasticity.jobrunr.maven.staging.LocalStagingSink;
 import cloud.plasticity.jobrunr.maven.staging.S3ArtifactRetriever;
 import cloud.plasticity.jobrunr.maven.staging.S3StagingSink;
-import cloud.plasticity.jobrunr.maven.stepfunctions.BuildMatrixStateMachineDefinition;
-import cloud.plasticity.jobrunr.maven.stepfunctions.StateMachineManager;
-import cloud.plasticity.jobrunr.maven.stepfunctions.StepFunctionsExecutionSupervisor;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -39,6 +36,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -51,17 +52,20 @@ import org.apache.maven.plugins.annotations.ResolutionScope;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectHelper;
 import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.ecs.model.KeyValuePair;
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.sfn.SfnClient;
 
 /**
- * {@code fargate:build} — computes a GraalVM build matrix and runs it, per {@code docs/DESIGN.md}.
+ * {@code fargate:build} — computes a GraalVM build matrix and runs it directly against ECS, with no
+ * orchestration layer above it (see {@code docs/PURE_ECS_ALTERNATIVE.md} for why, and when a
+ * declarative orchestrator like Step Functions would be worth reintroducing instead).
  *
  * <p>Every requested cell whose architecture matches the host runs directly, in-process, via
  * {@link NativeImageBuildExecutor} — no AWS involved. Cells that don't match the host (and every
- * {@link BuildKind#JVM} cell needs no build at all — it is the project's already-packaged jar) are
- * batched into a single AWS Step Functions execution that fans out one Fargate Spot task per cell,
- * per the state machine defined in {@link BuildMatrixStateMachineDefinition}.
+ * {@link BuildKind#JVM} cell needs no build at all — it is the project's already-packaged jar) each
+ * get their own {@code RunTask} call and their own {@link FargateTaskSupervisor}, run concurrently
+ * on a bounded thread pool sized to the number of remote cells.
  */
 @Mojo(name = "build", defaultPhase = LifecyclePhase.PACKAGE, requiresDependencyResolution = ResolutionScope.RUNTIME)
 public class BuildMojo extends AbstractMojo {
@@ -161,12 +165,12 @@ public class BuildMojo extends AbstractMojo {
     private String agentMemory;
     @Parameter(property = "fargate.agentEphemeralStorageGiB", defaultValue = "0")
     private int agentEphemeralStorageGiB;
-    @Parameter(property = "fargate.stateMachineExecutionRoleArn")
-    private String stateMachineExecutionRoleArn;
-    @Parameter(property = "fargate.stateMachineName", defaultValue = "jobrunr-build-matrix")
-    private String stateMachineName;
-    @Parameter(property = "fargate.maxAttemptsPerCell", defaultValue = "2")
-    private int maxAttemptsPerCell;
+    /** How many Spot interruptions a cell tolerates before its relaunch prefers on-demand capacity. */
+    @Parameter(property = "fargate.maxSpotInterruptionsBeforeOnDemand", defaultValue = "2")
+    private int maxSpotInterruptionsBeforeOnDemand;
+    /** How often to poll ECS/CloudWatch Logs while a remote cell is running. */
+    @Parameter(property = "fargate.pollIntervalSeconds", defaultValue = "5")
+    private int pollIntervalSeconds;
 
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
@@ -381,7 +385,7 @@ public class BuildMojo extends AbstractMojo {
         return relativeName;
     }
 
-    // --- Remote cells (Step Functions / Fargate Spot) --------------------------------------
+    // --- Remote cells (direct Fargate Spot, no orchestration layer) -----------------------
 
     private List<String> runRemoteCells(List<MatrixCell> remoteCells, NativeImageInputPlan plan,
                                         String buildId) throws IOException, MojoExecutionException,
@@ -392,21 +396,21 @@ public class BuildMojo extends AbstractMojo {
                 .build();
         EcsClient ecsClient =
                 EcsClient.builder().region(software.amazon.awssdk.regions.Region.of(region)).build();
-        SfnClient sfnClient =
-                SfnClient.builder().region(software.amazon.awssdk.regions.Region.of(region)).build();
+        CloudWatchLogsClient logsClient = CloudWatchLogsClient.builder()
+                .region(software.amazon.awssdk.regions.Region.of(region)).build();
         try {
-            return runRemoteCells(remoteCells, plan, buildId, s3Client, ecsClient, sfnClient);
+            return runRemoteCells(remoteCells, plan, buildId, s3Client, ecsClient, logsClient);
         } finally {
             s3Client.close();
             ecsClient.close();
-            sfnClient.close();
+            logsClient.close();
         }
     }
 
     /** Package-visible for testing the orchestration logic against mocked AWS clients. */
     List<String> runRemoteCells(List<MatrixCell> remoteCells, NativeImageInputPlan plan,
                                 String buildId, S3Client s3Client, EcsClient ecsClient,
-                                SfnClient sfnClient)
+                                CloudWatchLogsClient logsClient)
             throws IOException, MojoExecutionException, MojoFailureException, InterruptedException {
         EcsClusterSettings clusterSettings = new EcsClusterSettings(clusterArn, subnetIds,
                 securityGroupIds, assignPublicIp, executionRoleArn, taskRoleArn,
@@ -418,9 +422,14 @@ public class BuildMojo extends AbstractMojo {
 
         S3StagingSink stagingSink = new S3StagingSink(s3Client, s3Bucket);
         TaskDefinitionRegistrar registrar = new TaskDefinitionRegistrar(ecsClient);
-        ObjectMapper objectMapper = new ObjectMapper();
-        ArrayNode cellsJson = objectMapper.createArrayNode();
+        FargateTaskLauncher launcher = new FargateTaskLauncher(ecsClient);
+        CloudWatchLogTailer logTailer = new CloudWatchLogTailer(logsClient);
+        FargateTaskSupervisor supervisor = new FargateTaskSupervisor(launcher, logTailer, ecsClient);
 
+        // Stage every cell's inputs and register its task definition up front, sequentially --
+        // both are cheap and this keeps the concurrent section below to just the part that
+        // actually benefits from running in parallel: watching each task run.
+        List<CellLaunchPlan> launchPlans = new ArrayList<>();
         for (MatrixCell cell : remoteCells) {
             String stagingRelativePath =
                     StagingLayout.defaults().stagingPath(buildId, cell.buildKind, cell.architecture);
@@ -435,75 +444,108 @@ public class BuildMojo extends AbstractMojo {
 
             String taskDefinitionArn = registrar.registerIfChanged(clusterSettings, containerSettings,
                     cell.buildKind, cell.architecture);
-
-            cellsJson.add(buildCellInput(clusterSettings, taskDefinitionArn, buildId, cell,
-                    stagingRelativePath, plan, profileRelativePath, objectMapper));
+            List<KeyValuePair> environment = buildTaskOverrideEnvironment(buildId, cell,
+                    stagingRelativePath, plan, profileRelativePath);
+            launchPlans.add(new CellLaunchPlan(cell, taskDefinitionArn, environment));
         }
 
-        int maxConcurrency = Math.max(1, Math.min(40, remoteCells.size()));
-        ObjectNode definition = BuildMatrixStateMachineDefinition.build(objectMapper, maxConcurrency,
-                Math.max(1, maxAttemptsPerCell));
+        return superviseAllCellsConcurrently(launchPlans, clusterSettings, supervisor, buildId, plan,
+                s3Client);
+    }
 
-        StateMachineManager stateMachineManager = new StateMachineManager(sfnClient, objectMapper);
-        String stateMachineArn = stateMachineManager.deployIfChanged(stateMachineName,
-                stateMachineExecutionRoleArn, definition);
+    /** Everything one cell's task launch needs, computed once before the concurrent section. */
+    private record CellLaunchPlan(MatrixCell cell, String taskDefinitionArn,
+                                  List<KeyValuePair> environment) {
+    }
 
-        ObjectNode executionInput = objectMapper.createObjectNode();
-        executionInput.set("cells", cellsJson);
+    /**
+     * Launches and supervises every remote cell's task concurrently, one thread per cell, since
+     * there is no Map state doing the fan-out for us. Bounded to {@code remoteCells.size()}
+     * threads — this plugin never launches more tasks than that in one invocation, so there is no
+     * reason to cap concurrency below it the way {@code MaxConcurrency} would on a Map state.
+     */
+    private List<String> superviseAllCellsConcurrently(List<CellLaunchPlan> launchPlans,
+                                                        EcsClusterSettings clusterSettings,
+                                                        FargateTaskSupervisor supervisor,
+                                                        String buildId, NativeImageInputPlan plan,
+                                                        S3Client s3Client)
+            throws MojoExecutionException, InterruptedException {
+        ExecutorService executor = Executors.newFixedThreadPool(launchPlans.size());
+        try {
+            List<Future<String>> futures = new ArrayList<>();
+            for (CellLaunchPlan launchPlan : launchPlans) {
+                Callable<String> task = () -> superviseOneCell(launchPlan, clusterSettings,
+                        supervisor, buildId, plan, s3Client);
+                futures.add(executor.submit(task));
+            }
 
-        StepFunctionsExecutionSupervisor supervisor =
-                new StepFunctionsExecutionSupervisor(sfnClient, objectMapper);
-        StepFunctionsExecutionSupervisor.MatrixResult result = supervisor.supervise(stateMachineArn,
-                "fargate-build-" + buildId, executionInput.toString(), Duration.ofSeconds(15),
-                Duration.ofMinutes(Math.max(1, overallTimeoutMinutes)));
+            List<String> failures = new ArrayList<>();
+            for (Future<String> future : futures) {
+                try {
+                    String failure = future.get();
+                    if (failure != null) {
+                        failures.add(failure);
+                    }
+                } catch (java.util.concurrent.ExecutionException e) {
+                    throw new MojoExecutionException(
+                            "Unexpected error supervising a remote cell", e.getCause());
+                }
+            }
+            return failures;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * @return a failure message if this cell did not succeed, or {@code null} on success (after
+     *         its artifact has already been attached to the reactor)
+     */
+    private String superviseOneCell(CellLaunchPlan launchPlan, EcsClusterSettings clusterSettings,
+                                     FargateTaskSupervisor supervisor, String buildId,
+                                     NativeImageInputPlan plan, S3Client s3Client)
+            throws InterruptedException {
+        MatrixCell cell = launchPlan.cell();
+        FargateTaskSupervisor.SupervisionOptions options = FargateTaskSupervisor.SupervisionOptions
+                .defaults()
+                .pollInterval(Duration.ofSeconds(Math.max(1, pollIntervalSeconds)))
+                .overallTimeout(Duration.ofMinutes(Math.max(1, overallTimeoutMinutes)))
+                .maxSpotInterruptionsBeforeOnDemand(Math.max(0, maxSpotInterruptionsBeforeOnDemand));
+
+        FargateTaskSupervisor.SupervisionResult result = supervisor.supervise(clusterSettings,
+                launchPlan.taskDefinitionArn(), launchPlan.environment(), LOG_STREAM_PREFIX,
+                line -> getLog().info("[" + cell + "] " + line), options);
 
         if (result.timedOut()) {
-            return List.of("remote matrix execution exceeded " + overallTimeoutMinutes
-                    + " minute(s) without finishing");
+            return cell + ": " + result.failureReason();
+        }
+        if (!result.succeeded()) {
+            return cell + " failed remotely: " + result.failureReason();
         }
 
-        List<String> failures = new ArrayList<>();
-        S3ArtifactRetriever retriever = new S3ArtifactRetriever(s3Client, s3Bucket);
-        for (StepFunctionsExecutionSupervisor.CellOutcome outcome : result.cellOutcomes()) {
-            MatrixCell cell = findCell(remoteCells, outcome);
-            if (cell == null) {
-                failures.add("Could not correlate execution output entry " + outcome
-                        + " back to a requested cell");
-                continue;
+        try {
+            Path destinationDir = resolveWorkDirectory().resolve("remote-artifacts")
+                    .resolve(cell.toString().replace('/', '-'));
+            S3ArtifactRetriever retriever = new S3ArtifactRetriever(s3Client, s3Bucket);
+            List<Path> artifacts = retriever.retrieve(buildId, cell.buildKind, cell.architecture,
+                    plan.expectedArtifacts(), destinationDir);
+            if (artifacts.isEmpty()) {
+                return cell + " reported success but no artifact was found in S3";
             }
-            if (!outcome.success()) {
-                failures.add(cell + " failed remotely: " + outcome.error() + " ("
-                        + outcome.cause() + ")");
-                continue;
-            }
-            try {
-                Path destinationDir = resolveWorkDirectory().resolve("remote-artifacts")
-                        .resolve(cell.toString().replace('/', '-'));
-                List<Path> artifacts = retriever.retrieve(buildId, cell.buildKind, cell.architecture,
-                        plan.expectedArtifacts(), destinationDir);
-                if (artifacts.isEmpty()) {
-                    failures.add(cell + " reported success but no artifact was found in S3");
-                    continue;
-                }
-                attachArtifacts(cell, artifacts);
-            } catch (IOException e) {
-                failures.add(cell + " succeeded remotely but its artifact could not be downloaded: "
-                        + e.getMessage());
-            }
+            attachArtifacts(cell, artifacts);
+            return null;
+        } catch (IOException e) {
+            return cell + " succeeded remotely but its artifact could not be downloaded: "
+                    + e.getMessage();
         }
-        return failures;
     }
 
-    private MatrixCell findCell(List<MatrixCell> remoteCells,
-                                StepFunctionsExecutionSupervisor.CellOutcome outcome) {
-        for (MatrixCell cell : remoteCells) {
-            if (cell.buildKind.configValue().equals(outcome.buildKind())
-                    && cell.architecture.name().equals(outcome.architecture())) {
-                return cell;
-            }
-        }
-        return null;
-    }
+    /**
+     * Log stream prefix configured on the task definition's {@code awslogs-stream-prefix} — the
+     * actual stream name ({@code prefix/container-name/task-id}) isn't known until the task starts,
+     * so {@link CloudWatchLogTailer} matches on this prefix rather than the full stream name.
+     */
+    private static final String LOG_STREAM_PREFIX = TaskDefinitionRegistrar.LOG_STREAM_PREFIX;
 
     private String stageRemoteProfile(S3Client s3Client, String stagingRelativePath)
             throws IOException, MojoFailureException {
@@ -523,55 +565,37 @@ public class BuildMojo extends AbstractMojo {
         return relativeName;
     }
 
-    private ObjectNode buildCellInput(EcsClusterSettings clusterSettings, String taskDefinitionArn,
-                                      String buildId, MatrixCell cell, String stagingRelativePath,
-                                      NativeImageInputPlan plan, String profileRelativePath,
-                                      ObjectMapper objectMapper) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("clusterArn", clusterSettings.clusterArn());
-        node.put("taskDefinitionArn", taskDefinitionArn);
-        ArrayNode subnets = node.putArray("subnetIds");
-        clusterSettings.subnetIds().forEach(subnets::add);
-        ArrayNode securityGroups = node.putArray("securityGroupIds");
-        clusterSettings.securityGroupIds().forEach(securityGroups::add);
-        node.put("assignPublicIp", clusterSettings.assignPublicIp());
-        node.put("preferOnDemand", false);
-        node.put("buildId", buildId);
-        node.put("buildKind", cell.buildKind.configValue());
-        node.put("architecture", cell.architecture.name());
-
-        ArrayNode environment = node.putArray("environment");
-        putEnv(environment, objectMapper, "JOBRUNR_BUILD_MOUNT_ROOT", "/mnt/build");
-        putEnv(environment, objectMapper, "JOBRUNR_BUILD_ID", buildId);
-        putEnv(environment, objectMapper, "JOBRUNR_BUILD_KIND", cell.buildKind.configValue());
-        putEnv(environment, objectMapper, "JOBRUNR_BUILD_ARCH", cell.architecture.name());
-        putEnv(environment, objectMapper, "JOBRUNR_BUILD_STAGING_RELATIVE_PATH",
-                stagingRelativePath);
-        putEnv(environment, objectMapper, "JOBRUNR_BUILD_ARG_FILE_NAME", plan.argsFileName());
+    /** Task-override environment variables matching {@code AgentConfig}'s exact names. */
+    private List<KeyValuePair> buildTaskOverrideEnvironment(String buildId, MatrixCell cell,
+                                                             String stagingRelativePath,
+                                                             NativeImageInputPlan plan,
+                                                             String profileRelativePath) {
+        List<KeyValuePair> environment = new ArrayList<>();
+        environment.add(env("JOBRUNR_BUILD_MOUNT_ROOT", "/mnt/build"));
+        environment.add(env("JOBRUNR_BUILD_ID", buildId));
+        environment.add(env("JOBRUNR_BUILD_KIND", cell.buildKind.configValue()));
+        environment.add(env("JOBRUNR_BUILD_ARCH", cell.architecture.name()));
+        environment.add(env("JOBRUNR_BUILD_STAGING_RELATIVE_PATH", stagingRelativePath));
+        environment.add(env("JOBRUNR_BUILD_ARG_FILE_NAME", plan.argsFileName()));
         if (profileRelativePath != null) {
-            putEnv(environment, objectMapper, "JOBRUNR_BUILD_PROFILE_RELATIVE_PATH",
-                    profileRelativePath);
+            environment.add(env("JOBRUNR_BUILD_PROFILE_RELATIVE_PATH", profileRelativePath));
         }
         if (!plan.expectedArtifacts().isEmpty()) {
-            putEnv(environment, objectMapper, "JOBRUNR_BUILD_EXPECTED_ARTIFACTS",
-                    String.join(",", plan.expectedArtifacts()));
+            environment.add(env("JOBRUNR_BUILD_EXPECTED_ARTIFACTS",
+                    String.join(",", plan.expectedArtifacts())));
         }
         if (extraNativeImageArgs != null && !extraNativeImageArgs.isEmpty()) {
-            putEnv(environment, objectMapper, "JOBRUNR_BUILD_EXTRA_NATIVE_IMAGE_ARGS",
-                    String.join(" ", extraNativeImageArgs));
+            environment.add(env("JOBRUNR_BUILD_EXTRA_NATIVE_IMAGE_ARGS",
+                    String.join(" ", extraNativeImageArgs)));
         }
         if (timeoutMinutes > 0) {
-            putEnv(environment, objectMapper, "JOBRUNR_BUILD_TIMEOUT_MINUTES",
-                    String.valueOf(timeoutMinutes));
+            environment.add(env("JOBRUNR_BUILD_TIMEOUT_MINUTES", String.valueOf(timeoutMinutes)));
         }
-        return node;
+        return environment;
     }
 
-    private void putEnv(ArrayNode environment, ObjectMapper objectMapper, String name, String value) {
-        ObjectNode entry = objectMapper.createObjectNode();
-        entry.put("Name", name);
-        entry.put("Value", value);
-        environment.add(entry);
+    private static KeyValuePair env(String name, String value) {
+        return KeyValuePair.builder().name(name).value(value).build();
     }
 
     private void requireRemoteConfig() throws MojoFailureException {
@@ -605,9 +629,6 @@ public class BuildMojo extends AbstractMojo {
         }
         if (isBlank(agentImageUri)) {
             missing.add("fargate.agentImageUri");
-        }
-        if (isBlank(stateMachineExecutionRoleArn)) {
-            missing.add("fargate.stateMachineExecutionRoleArn");
         }
         if (!missing.isEmpty()) {
             throw new MojoFailureException(
