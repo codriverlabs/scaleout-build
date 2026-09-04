@@ -93,12 +93,13 @@ bind-mounts exactly that host path into the container at the same path the agent
 established for the cluster, VPC, and IAM roles; provisioning the container instances' user-data is
 the caller's responsibility, the same way provisioning the cluster itself is.
 
-One real unknown, not papered over: AWS's docs confirm Mountpoint can read, list, and create files,
-but don't explicitly confirm `mkdir` semantics for the `output/` directory the agent creates before
-writing the binary. This has moderate-not-verified confidence — directory creation is basic enough
-that AWS would likely flag it if unsupported, the way the other limitations are flagged — but it
-has not been proven against a real mount. Verify this for real (mount a bucket with `mount-s3`, run
-the agent's directory-creation path against it) before relying on the EC2 launch type in production.
+`mkdir` for the `output/` directory the agent creates before writing the binary is supported —
+confirmed directly against Mountpoint's own source (`aws/mountpoint-s3`, not just the user-facing
+docs): it implements a real FUSE `mkdir` handler (`MkDir`/`fs.mkdir`), and its own reference-test
+harness (`mountpoint-s3-fs/tests/reftests/harness.rs`) exercises directory creation explicitly,
+correctly rejecting only genuine conflicts (`EEXIST` when a file or directory already exists at
+that path) rather than rejecting directory creation outright. Combined with the read/write pattern
+already covered above, there is no remaining gap for the agent's actual usage.
 
 A bare `ecs` prefix was considered and rejected as too short/generic for a goal prefix meant to be
 unambiguous in a `pom.xml` or CLI transcript read out of context — `aws-ecs` was chosen instead.
@@ -203,6 +204,7 @@ Fargate.)
 Same caveat as both prior designs: no ECS cluster, VPC, S3 Files filesystem, EC2 container
 instances, or Mountpoint-for-S3 user-data mount has been provisioned. `EcsTaskSupervisor`'s Spot-
 interruption detection in particular has only been exercised against a mocked `stoppedReason`
-string matching AWS's documentation — it has not been observed against a real Spot reclaim. The
-`mkdir` semantics question raised in §0 for the EC2/Mountpoint path is a real open item, not a
-formality — verify it before relying on that launch type in production.
+string matching AWS's documentation — it has not been observed against a real Spot reclaim.
+Mountpoint's own `mkdir` support is confirmed against its source (§0), but the EC2 launch type as a
+whole — the user-data mount, the host bind mount, the container instance IAM/network setup — is
+still unexercised against real infrastructure.
