@@ -40,6 +40,7 @@ class TaskDefinitionRegistrarTest {
     void setUp() {
         registrar = new TaskDefinitionRegistrar(ecsClient);
         clusterSettings = new EcsClusterSettings(
+                EcsLaunchType.FARGATE,
                 "arn:aws:ecs:us-east-1:123456789012:cluster/jobrunr-build",
                 List.of("subnet-1", "subnet-2"),
                 List.of("sg-1"),
@@ -47,6 +48,8 @@ class TaskDefinitionRegistrarTest {
                 "arn:aws:iam::123456789012:role/jobrunr-build-execution",
                 "arn:aws:iam::123456789012:role/jobrunr-build-task",
                 "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123",
+                null,
+                null,
                 null,
                 null,
                 "/jobrunr/build-agent",
@@ -168,14 +171,94 @@ class TaskDefinitionRegistrarTest {
         assertThat(request.family()).isEqualTo("jobrunr-build-agent-native-pgo-optimize-arm64");
         assertThat(request.tags()).anySatisfy(tag ->
                 assertThat(tag.key()).isEqualTo(TaskDefinitionRegistrar.CONFIG_HASH_TAG_KEY));
+        assertThat(request.requiresCompatibilities())
+                .containsExactly(software.amazon.awssdk.services.ecs.model.Compatibility.FARGATE);
         assertThat(request.volumes()).hasSize(1);
         assertThat(request.volumes().get(0).s3filesVolumeConfiguration().fileSystemArn())
                 .isEqualTo("arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123");
         assertThat(request.runtimePlatform().cpuArchitectureAsString()).isEqualTo("ARM64");
         assertThat(request.containerDefinitions()).hasSize(1);
+        // Regression guard: the volume must actually be mounted into the container, not just
+        // declared at the task level -- without an explicit mountPoints entry, ECS never mounts an
+        // S3 Files (or any other) volume into a container at all.
+        assertThat(request.containerDefinitions().get(0).mountPoints()).singleElement().satisfies(mp -> {
+            assertThat(mp.sourceVolume()).isEqualTo(request.volumes().get(0).name());
+            assertThat(mp.containerPath()).isEqualTo(TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH);
+        });
         // No per-build environment variables baked into the task definition -- those arrive as
-        // task overrides from the Step Functions RunTask.sync state instead.
+        // task overrides from RunTask instead.
         assertThat(request.containerDefinitions().get(0).environment()).isEmpty();
+    }
+
+    @Test
+    void managedInstancesUsesAnS3FilesVolumeAndTheManagedInstancesCompatibility() {
+        EcsClusterSettings managedInstancesSettings = new EcsClusterSettings(
+                EcsLaunchType.MANAGED_INSTANCES,
+                "arn:aws:ecs:us-east-1:123456789012:cluster/jobrunr-build",
+                List.of("subnet-1", "subnet-2"), List.of("sg-1"), false,
+                "arn:aws:iam::123456789012:role/jobrunr-build-execution",
+                "arn:aws:iam::123456789012:role/jobrunr-build-task",
+                "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null, null,
+                "managed-instances-cp", "/jobrunr/build-agent", "us-east-1");
+        when(ecsClient.describeTaskDefinition(any(java.util.function.Consumer.class)))
+                .thenThrow(ClientException.builder().message("not found").build());
+        when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
+                .thenReturn(RegisterTaskDefinitionResponse.builder()
+                        .taskDefinition(TaskDefinition.builder()
+                                .taskDefinitionArn("arn:...:task-definition/x:1").build())
+                        .build());
+
+        registrar.registerIfChanged(managedInstancesSettings, containerSettings, BuildKind.NATIVE,
+                Architecture.X86_64);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(RegisterTaskDefinitionRequest.class);
+        verify(ecsClient).registerTaskDefinition(captor.capture());
+        RegisterTaskDefinitionRequest request = captor.getValue();
+
+        assertThat(request.requiresCompatibilities()).containsExactly(
+                software.amazon.awssdk.services.ecs.model.Compatibility.MANAGED_INSTANCES);
+        assertThat(request.volumes().get(0).s3filesVolumeConfiguration()).isNotNull();
+        assertThat(request.volumes().get(0).host()).isNull();
+        // ephemeralStorage is not a valid parameter for MANAGED_INSTANCES tasks (confirmed against
+        // AWS's task-definition-differences documentation) -- must be omitted even if the container
+        // settings request one.
+        assertThat(request.ephemeralStorage()).isNull();
+    }
+
+    @Test
+    void ec2UsesAHostBindMountVolumeAndTheEc2CompatibilityAndOmitsEphemeralStorage() {
+        AgentContainerSettings withEphemeralStorage = new AgentContainerSettings(
+                "quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25", "4096", "16384", 50);
+        EcsClusterSettings ec2Settings = new EcsClusterSettings(
+                EcsLaunchType.EC2,
+                "arn:aws:ecs:us-east-1:123456789012:cluster/jobrunr-build",
+                List.of("subnet-1", "subnet-2"), List.of("sg-1"), false,
+                "arn:aws:iam::123456789012:role/jobrunr-build-execution",
+                "arn:aws:iam::123456789012:role/jobrunr-build-task",
+                null, null, null,
+                "/mnt/build", "ec2-asg-cp", "/jobrunr/build-agent", "us-east-1");
+        when(ecsClient.describeTaskDefinition(any(java.util.function.Consumer.class)))
+                .thenThrow(ClientException.builder().message("not found").build());
+        when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
+                .thenReturn(RegisterTaskDefinitionResponse.builder()
+                        .taskDefinition(TaskDefinition.builder()
+                                .taskDefinitionArn("arn:...:task-definition/x:1").build())
+                        .build());
+
+        registrar.registerIfChanged(ec2Settings, withEphemeralStorage, BuildKind.NATIVE,
+                Architecture.X86_64);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(RegisterTaskDefinitionRequest.class);
+        verify(ecsClient).registerTaskDefinition(captor.capture());
+        RegisterTaskDefinitionRequest request = captor.getValue();
+
+        assertThat(request.requiresCompatibilities())
+                .containsExactly(software.amazon.awssdk.services.ecs.model.Compatibility.EC2);
+        assertThat(request.volumes().get(0).s3filesVolumeConfiguration()).isNull();
+        assertThat(request.volumes().get(0).host().sourcePath()).isEqualTo("/mnt/build");
+        assertThat(request.containerDefinitions().get(0).mountPoints()).singleElement().satisfies(mp ->
+                assertThat(mp.containerPath()).isEqualTo(TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH));
+        assertThat(request.ephemeralStorage()).isNull();
     }
 
     @Test

@@ -32,16 +32,16 @@ import software.amazon.awssdk.services.ecs.model.Task;
 // instead of hanging the whole build indefinitely.
 @ExtendWith(MockitoExtension.class)
 @Timeout(10)
-class FargateTaskSupervisorTest {
+class EcsTaskSupervisorTest {
 
     @Mock
     private EcsClient ecsClient;
     @Mock
     private CloudWatchLogsClient logsClient;
 
-    private FargateTaskLauncher launcher;
+    private EcsTaskLauncher launcher;
     private CloudWatchLogTailer logTailer;
-    private FargateTaskSupervisor supervisor;
+    private EcsTaskSupervisor supervisor;
     private EcsClusterSettings clusterSettings;
     private List<KeyValuePair> environment;
     private List<String> logLines;
@@ -49,14 +49,15 @@ class FargateTaskSupervisorTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
-        launcher = new FargateTaskLauncher(ecsClient);
+        launcher = new EcsTaskLauncher(ecsClient);
         logTailer = new CloudWatchLogTailer(logsClient);
-        supervisor = new FargateTaskSupervisor(launcher, logTailer, ecsClient);
+        supervisor = new EcsTaskSupervisor(launcher, logTailer, ecsClient);
         clusterSettings = new EcsClusterSettings(
+                EcsLaunchType.FARGATE,
                 "arn:aws:ecs:us-east-1:123456789012:cluster/jobrunr-build",
                 List.of("subnet-1"), List.of("sg-1"), false,
                 "arn:aws:iam::123456789012:role/exec", "arn:aws:iam::123456789012:role/task",
-                "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null,
+                "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null, null, null,
                 "/jobrunr/build-agent", "us-east-1");
         environment = List.of(KeyValuePair.builder().name("JOBRUNR_BUILD_ARCH").value("ARM64").build());
         logLines = new java.util.ArrayList<>();
@@ -78,7 +79,7 @@ class FargateTaskSupervisorTest {
 
         var result = supervisor.supervise(clusterSettings, "arn:...:task-definition/x:1", environment,
                 "jobrunr-build", logLines::add,
-                FargateTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
+                EcsTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
 
         assertThat(result.succeeded()).isTrue();
         assertThat(result.timedOut()).isFalse();
@@ -100,7 +101,7 @@ class FargateTaskSupervisorTest {
 
         var result = supervisor.supervise(clusterSettings, "arn:...:task-definition/x:1", environment,
                 "jobrunr-build", logLines::add,
-                FargateTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
+                EcsTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
 
         assertThat(result.succeeded()).isFalse();
         assertThat(result.timedOut()).isFalse();
@@ -132,7 +133,7 @@ class FargateTaskSupervisorTest {
 
         var result = supervisor.supervise(clusterSettings, "arn:...:task-definition/x:1", environment,
                 "jobrunr-build", logLines::add,
-                FargateTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
+                EcsTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
 
         assertThat(result.succeeded()).isTrue();
         assertThat(result.spotInterruptions()).isEqualTo(1);
@@ -155,7 +156,7 @@ class FargateTaskSupervisorTest {
 
         var result = supervisor.supervise(clusterSettings, "arn:...:task-definition/x:1", environment,
                 "jobrunr-build", logLines::add,
-                FargateTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
+                EcsTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
 
         assertThat(result.succeeded()).isFalse();
         assertThat(result.spotInterruptions()).isZero();
@@ -173,7 +174,7 @@ class FargateTaskSupervisorTest {
 
         var result = supervisor.supervise(clusterSettings, "arn:...:task-definition/x:1", environment,
                 "jobrunr-build", logLines::add,
-                FargateTaskSupervisor.SupervisionOptions.defaults()
+                EcsTaskSupervisor.SupervisionOptions.defaults()
                         .pollInterval(Duration.ofMillis(10))
                         .overallTimeout(Duration.ofMillis(50)));
 
@@ -211,7 +212,7 @@ class FargateTaskSupervisorTest {
 
         var result = supervisor.supervise(clusterSettings, "arn:...:task-definition/x:1", environment,
                 "jobrunr-build", logLines::add,
-                FargateTaskSupervisor.SupervisionOptions.defaults()
+                EcsTaskSupervisor.SupervisionOptions.defaults()
                         .pollInterval(Duration.ofMillis(10))
                         .maxSpotInterruptionsBeforeOnDemand(1));
 
@@ -231,4 +232,36 @@ class FargateTaskSupervisorTest {
         assertThat(firstProviders).containsExactly("FARGATE_SPOT", "FARGATE");
         assertThat(secondProviders).containsExactly("FARGATE", "FARGATE_SPOT");
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void managedInstancesNeverTreatsAStopAsASpotInterruptionEvenWithTheFargateSpotWording()
+            throws InterruptedException {
+        // Regression guard for the documented gap in EcsTaskSupervisor's javadoc: the Fargate-Spot
+        // stoppedReason string must never be reused to drive relaunch logic for MANAGED_INSTANCES,
+        // since that exact wording has not been verified for that launch type.
+        EcsClusterSettings managedInstancesSettings = new EcsClusterSettings(
+                EcsLaunchType.MANAGED_INSTANCES,
+                "arn:aws:ecs:us-east-1:123456789012:cluster/jobrunr-build",
+                List.of("subnet-1"), List.of("sg-1"), false,
+                "arn:aws:iam::123456789012:role/exec", "arn:aws:iam::123456789012:role/task",
+                "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null, null,
+                "managed-instances-cp", "/jobrunr/build-agent", "us-east-1");
+        when(ecsClient.runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class))).thenReturn(RunTaskResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").build()).build());
+        when(ecsClient.describeTasks(any(Consumer.class))).thenReturn(DescribeTasksResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").lastStatus("STOPPED")
+                        .stoppedReason("Your Spot Task was interrupted.")
+                        .containers(Container.builder().exitCode(1).build()).build())
+                .build());
+
+        var result = supervisor.supervise(managedInstancesSettings, "arn:...:task-definition/x:1",
+                environment, "jobrunr-build", logLines::add,
+                EcsTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
+
+        assertThat(result.succeeded()).isFalse();
+        assertThat(result.spotInterruptions()).isZero();
+        verify(ecsClient, times(1)).runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class));
+    }
 }
+

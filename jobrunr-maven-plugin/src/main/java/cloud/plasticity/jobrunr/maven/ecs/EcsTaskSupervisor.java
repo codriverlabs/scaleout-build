@@ -17,7 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Watches one Fargate task through to completion, without any orchestration layer above ECS — the
+ * Watches one ECS task through to completion, without any orchestration layer above ECS — the
  * "pure ECS" alternative to {@code docs/DESIGN.md}'s Step Functions design, for when the matrix is
  * small and fixed (e.g. exactly x86_64 + arm64) and the extra declarative machinery isn't worth it.
  * See {@code docs/PURE_ECS_ALTERNATIVE.md} for the tradeoff analysis.
@@ -27,7 +27,7 @@ import org.slf4j.LoggerFactory;
  * ECS's {@code stopCode} field is a strict enum — confirmed against the SDK model —
  * of only {@code TaskFailedToStart}, {@code EssentialContainerExited}, and {@code UserInitiated}.
  * There is no dedicated stop code for a Spot reclaim. AWS's documented signal is the free-text
- * {@code stoppedReason} field, whose value for a genuine Spot interruption is specifically
+ * {@code stoppedReason} field, whose value for a genuine Fargate Spot interruption is specifically
  * {@code "Your Spot Task was interrupted."} (confirmed against AWS's own troubleshooting guidance
  * and support threads, not guessed) — this class matches that string, but it is not a stable typed
  * value the way Step Functions' error names are, and a wording change on AWS's side would silently
@@ -35,10 +35,19 @@ import org.slf4j.LoggerFactory;
  * are only available via {@code DescribeTasks} for one hour after the task stops — not a concern
  * for this class's own tight poll loop, but relevant if anyone reuses this detection logic
  * elsewhere against an already-stopped task discovered later.
+ *
+ * <p><b>This detection is deliberately scoped to {@link EcsLaunchType#FARGATE} only.</b> The exact
+ * {@code stoppedReason} wording ECS uses when a {@code MANAGED_INSTANCES} or {@code EC2} Spot
+ * instance is reclaimed has not been verified against AWS's docs — reusing the Fargate-Spot string
+ * for those launch types would either never match (a silent false negative, since an EC2/Managed
+ * Instances Spot reclaim would then be treated as an ordinary terminal failure instead of retried)
+ * or, worse, be presented as verified when it is not. Rather than guess, any stop on those launch
+ * types is treated as terminal today; automatic Spot-interruption retry for them is a documented
+ * follow-up in {@code docs/PURE_ECS_ALTERNATIVE.md}, not silently assumed to already work.
  */
-public final class FargateTaskSupervisor {
+public final class EcsTaskSupervisor {
 
-    private static final Logger LOG = LoggerFactory.getLogger(FargateTaskSupervisor.class);
+    private static final Logger LOG = LoggerFactory.getLogger(EcsTaskSupervisor.class);
 
     /**
      * The exact, documented free-text value ECS uses for a genuine Fargate Spot reclaim. Matched
@@ -47,12 +56,12 @@ public final class FargateTaskSupervisor {
      */
     static final String SPOT_INTERRUPTION_STOPPED_REASON = "Your Spot Task was interrupted.";
 
-    private final FargateTaskLauncher launcher;
+    private final EcsTaskLauncher launcher;
     private final CloudWatchLogTailer logTailer;
     private final EcsClient ecsClient;
 
-    public FargateTaskSupervisor(FargateTaskLauncher launcher, CloudWatchLogTailer logTailer,
-                                 EcsClient ecsClient) {
+    public EcsTaskSupervisor(EcsTaskLauncher launcher, CloudWatchLogTailer logTailer,
+                             EcsClient ecsClient) {
         this.launcher = Objects.requireNonNull(launcher, "launcher");
         this.logTailer = Objects.requireNonNull(logTailer, "logTailer");
         this.ecsClient = Objects.requireNonNull(ecsClient, "ecsClient");
@@ -118,7 +127,7 @@ public final class FargateTaskSupervisor {
 
             Task task = describeTask(clusterSettings, currentTaskArn);
             if (task != null && "STOPPED".equals(task.lastStatus())) {
-                if (isSpotInterruption(task)) {
+                if (isSpotInterruption(clusterSettings, task)) {
                     spotInterruptions++;
                     boolean preferOnDemand =
                             spotInterruptions > effectiveOptions.maxSpotInterruptionsBeforeOnDemand;
@@ -163,8 +172,14 @@ public final class FargateTaskSupervisor {
         return new SupervisionResult(false, false, reason, spotInterruptions);
     }
 
-    private boolean isSpotInterruption(Task task) {
-        return SPOT_INTERRUPTION_STOPPED_REASON.equals(task.stoppedReason());
+    /**
+     * Only {@link EcsLaunchType#FARGATE} is matched here — see the class javadoc for why this is
+     * not generalized to {@code MANAGED_INSTANCES}/{@code EC2} without a verified stopped-reason
+     * string for those launch types.
+     */
+    private boolean isSpotInterruption(EcsClusterSettings clusterSettings, Task task) {
+        return clusterSettings.launchType() == EcsLaunchType.FARGATE
+                && SPOT_INTERRUPTION_STOPPED_REASON.equals(task.stoppedReason());
     }
 
     private Task describeTask(EcsClusterSettings clusterSettings, String taskArn) {

@@ -20,7 +20,9 @@ import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.Compatibility;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
 import software.amazon.awssdk.services.ecs.model.EphemeralStorage;
+import software.amazon.awssdk.services.ecs.model.HostVolumeProperties;
 import software.amazon.awssdk.services.ecs.model.LogConfiguration;
+import software.amazon.awssdk.services.ecs.model.MountPoint;
 import software.amazon.awssdk.services.ecs.model.NetworkMode;
 import software.amazon.awssdk.services.ecs.model.RegisterTaskDefinitionRequest;
 import software.amazon.awssdk.services.ecs.model.RegisterTaskDefinitionResponse;
@@ -55,7 +57,9 @@ public final class TaskDefinitionRegistrar {
     static final String CONFIG_HASH_TAG_KEY = "jobrunr:configHash";
 
     private static final String CONTAINER_NAME = "jobrunr-build-agent";
-    private static final String S3_FILES_VOLUME_NAME = "jobrunr-build-mount";
+    private static final String MOUNT_VOLUME_NAME = "jobrunr-build-mount";
+    /** Container path the staging mount is exposed at; must match {@code AgentConfig}'s default. */
+    public static final String MOUNT_CONTAINER_PATH = "/mnt/build";
     /** Value for the container's {@code awslogs-stream-prefix}; referenced by {@code BuildMojo}. */
     public static final String LOG_STREAM_PREFIX = "jobrunr-build";
 
@@ -139,7 +143,7 @@ public final class TaskDefinitionRegistrar {
                                                         AgentContainerSettings containerSettings,
                                                         BuildKind buildKind, Architecture architecture,
                                                         String configHash) {
-        ContainerDefinition containerDefinition = ContainerDefinition.builder()
+        ContainerDefinition.Builder containerDefinitionBuilder = ContainerDefinition.builder()
                 .name(CONTAINER_NAME)
                 .image(containerSettings.agentImageUri())
                 .essential(true)
@@ -150,31 +154,28 @@ public final class TaskDefinitionRegistrar {
                                 "awslogs-region", clusterSettings.region(),
                                 "awslogs-stream-prefix", LOG_STREAM_PREFIX))
                         .build())
-                .build();
+                // Every launch type mounts the staging volume at the same container path the agent
+                // expects (AgentConfig's default JOBRUNR_BUILD_MOUNT_ROOT) -- without this, the
+                // `volumes` entry below declares the volume at the task level but never actually
+                // mounts it into the container, leaving the agent writing to an ordinary, empty,
+                // non-shared container-filesystem directory instead.
+                .mountPoints(MountPoint.builder()
+                        .sourceVolume(MOUNT_VOLUME_NAME)
+                        .containerPath(MOUNT_CONTAINER_PATH)
+                        .build());
 
-        S3FilesVolumeConfiguration.Builder s3FilesConfig = S3FilesVolumeConfiguration.builder()
-                .fileSystemArn(clusterSettings.s3FilesFileSystemArn());
-        if (clusterSettings.s3FilesRootDirectory() != null) {
-            s3FilesConfig.rootDirectory(clusterSettings.s3FilesRootDirectory());
-        }
-        if (clusterSettings.s3FilesAccessPointArn() != null) {
-            s3FilesConfig.accessPointArn(clusterSettings.s3FilesAccessPointArn());
-        }
-        Volume s3FilesVolume = Volume.builder()
-                .name(S3_FILES_VOLUME_NAME)
-                .s3filesVolumeConfiguration(s3FilesConfig.build())
-                .build();
+        Volume mountVolume = buildMountVolume(clusterSettings);
 
         RegisterTaskDefinitionRequest.Builder requestBuilder = RegisterTaskDefinitionRequest.builder()
                 .family(family)
                 .networkMode(NetworkMode.AWSVPC)
-                .requiresCompatibilities(Compatibility.FARGATE)
+                .requiresCompatibilities(requiresCompatibility(clusterSettings.launchType()))
                 .cpu(containerSettings.cpu())
                 .memory(containerSettings.memory())
                 .executionRoleArn(clusterSettings.executionRoleArn())
                 .taskRoleArn(clusterSettings.taskRoleArn())
-                .containerDefinitions(containerDefinition)
-                .volumes(s3FilesVolume)
+                .containerDefinitions(containerDefinitionBuilder.build())
+                .volumes(mountVolume)
                 .tags(Tag.builder().key(CONFIG_HASH_TAG_KEY).value(configHash).build());
 
         if (buildKind.requiresArchitecture()) {
@@ -183,11 +184,52 @@ public final class TaskDefinitionRegistrar {
                     .operatingSystemFamily("LINUX")
                     .build());
         }
-        if (containerSettings.ephemeralStorageGiB() > 0) {
+        // ephemeralStorage is Fargate-only: it's not a valid parameter for MANAGED_INSTANCES tasks
+        // (confirmed against AWS's task-definition-differences documentation) and has no meaning
+        // for EC2 tasks, which use the container instance's own disk.
+        if (clusterSettings.launchType() == EcsLaunchType.FARGATE
+                && containerSettings.ephemeralStorageGiB() > 0) {
             requestBuilder.ephemeralStorage(
                     EphemeralStorage.builder().sizeInGiB(containerSettings.ephemeralStorageGiB()).build());
         }
         return requestBuilder.build();
+    }
+
+    private static Compatibility requiresCompatibility(EcsLaunchType launchType) {
+        return switch (launchType) {
+            case FARGATE -> Compatibility.FARGATE;
+            case MANAGED_INSTANCES -> Compatibility.MANAGED_INSTANCES;
+            case EC2 -> Compatibility.EC2;
+        };
+    }
+
+    /**
+     * {@code FARGATE}/{@code MANAGED_INSTANCES} use an S3 Files volume, mounted by ECS itself.
+     * {@code EC2} instead bind-mounts a host path where Mountpoint for Amazon S3 has already been
+     * mounted by the container instance's user-data — S3 Files is not supported on the raw EC2
+     * launch type (confirmed against AWS's docs: a task configured with one fails at launch there).
+     */
+    private static Volume buildMountVolume(EcsClusterSettings clusterSettings) {
+        if (clusterSettings.launchType().usesS3Files()) {
+            S3FilesVolumeConfiguration.Builder s3FilesConfig = S3FilesVolumeConfiguration.builder()
+                    .fileSystemArn(clusterSettings.s3FilesFileSystemArn());
+            if (clusterSettings.s3FilesRootDirectory() != null) {
+                s3FilesConfig.rootDirectory(clusterSettings.s3FilesRootDirectory());
+            }
+            if (clusterSettings.s3FilesAccessPointArn() != null) {
+                s3FilesConfig.accessPointArn(clusterSettings.s3FilesAccessPointArn());
+            }
+            return Volume.builder()
+                    .name(MOUNT_VOLUME_NAME)
+                    .s3filesVolumeConfiguration(s3FilesConfig.build())
+                    .build();
+        }
+        return Volume.builder()
+                .name(MOUNT_VOLUME_NAME)
+                .host(HostVolumeProperties.builder()
+                        .sourcePath(clusterSettings.ec2HostMountPath())
+                        .build())
+                .build();
     }
 
     private String taskDefinitionFamily(BuildKind buildKind, Architecture architecture) {
@@ -211,11 +253,13 @@ public final class TaskDefinitionRegistrar {
         parts.add("buildKind=" + buildKind);
         parts.add("cpuArchitecture="
                 + (buildKind.requiresArchitecture() ? architecture.ecsCpuArchitecture() : "n/a"));
+        parts.add("launchType=" + clusterSettings.launchType());
         parts.add("executionRoleArn=" + clusterSettings.executionRoleArn());
         parts.add("taskRoleArn=" + clusterSettings.taskRoleArn());
         parts.add("s3FilesFileSystemArn=" + clusterSettings.s3FilesFileSystemArn());
         parts.add("s3FilesRootDirectory=" + clusterSettings.s3FilesRootDirectory());
         parts.add("s3FilesAccessPointArn=" + clusterSettings.s3FilesAccessPointArn());
+        parts.add("ec2HostMountPath=" + clusterSettings.ec2HostMountPath());
         parts.add("logGroupName=" + clusterSettings.logGroupName());
         parts.add("region=" + clusterSettings.region());
 

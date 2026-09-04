@@ -16,8 +16,9 @@ import cloud.plasticity.jobrunr.build.StagingLayout;
 import cloud.plasticity.jobrunr.maven.ecs.AgentContainerSettings;
 import cloud.plasticity.jobrunr.maven.ecs.CloudWatchLogTailer;
 import cloud.plasticity.jobrunr.maven.ecs.EcsClusterSettings;
-import cloud.plasticity.jobrunr.maven.ecs.FargateTaskLauncher;
-import cloud.plasticity.jobrunr.maven.ecs.FargateTaskSupervisor;
+import cloud.plasticity.jobrunr.maven.ecs.EcsLaunchType;
+import cloud.plasticity.jobrunr.maven.ecs.EcsTaskLauncher;
+import cloud.plasticity.jobrunr.maven.ecs.EcsTaskSupervisor;
 import cloud.plasticity.jobrunr.maven.ecs.TaskDefinitionRegistrar;
 import cloud.plasticity.jobrunr.maven.planner.InputPlanningException;
 import cloud.plasticity.jobrunr.maven.planner.NativeImageInputPlan;
@@ -64,7 +65,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  * <p>Every requested cell whose architecture matches the host runs directly, in-process, via
  * {@link NativeImageBuildExecutor} — no AWS involved. Cells that don't match the host (and every
  * {@link BuildKind#JVM} cell needs no build at all — it is the project's already-packaged jar) each
- * get their own {@code RunTask} call and their own {@link FargateTaskSupervisor}, run concurrently
+ * get their own {@code RunTask} call and their own {@link EcsTaskSupervisor}, run concurrently
  * on a bounded thread pool sized to the number of remote cells.
  */
 @Mojo(name = "build", defaultPhase = LifecyclePhase.PACKAGE, requiresDependencyResolution = ResolutionScope.RUNTIME)
@@ -143,6 +144,18 @@ public class BuildMojo extends AbstractMojo {
 
     // --- Remote orchestration configuration; only required if any cell cannot run locally. ---
 
+    /**
+     * Which ECS compute model remote cells run on: {@code FARGATE} (default), {@code
+     * MANAGED_INSTANCES} (ECS Managed Instances), or {@code EC2} (raw EC2 launch type). Determines
+     * which of the launch-type-specific parameters below are required — see {@code
+     * docs/PURE_ECS_ALTERNATIVE.md} §0 for the tradeoffs, most importantly that {@code FARGATE}/
+     * {@code MANAGED_INSTANCES} stage via an S3 Files volume while {@code EC2} instead bind-mounts
+     * a host path where Mountpoint for Amazon S3 must already be mounted by the container
+     * instance's user-data (S3 Files is not supported on the raw EC2 launch type).
+     */
+    @Parameter(property = "aws-ecs.launchType", defaultValue = "FARGATE")
+    private String launchType;
+
     @Parameter(property = "aws-ecs.s3Bucket")
     private String s3Bucket;
     @Parameter(property = "aws-ecs.clusterArn")
@@ -157,12 +170,30 @@ public class BuildMojo extends AbstractMojo {
     private String executionRoleArn;
     @Parameter(property = "aws-ecs.taskRoleArn")
     private String taskRoleArn;
+    /** Required for {@code launchType} {@code FARGATE}/{@code MANAGED_INSTANCES}; unused for {@code EC2}. */
     @Parameter(property = "aws-ecs.s3FilesFileSystemArn")
     private String s3FilesFileSystemArn;
     @Parameter(property = "aws-ecs.s3FilesRootDirectory")
     private String s3FilesRootDirectory;
     @Parameter(property = "aws-ecs.s3FilesAccessPointArn")
     private String s3FilesAccessPointArn;
+    /**
+     * Absolute path on the EC2 container instance where Mountpoint for Amazon S3 has already been
+     * mounted by the instance's user-data, e.g. {@code /mnt/build}. Required for {@code launchType}
+     * {@code EC2}; unused for {@code FARGATE}/{@code MANAGED_INSTANCES}. The plugin does not set up
+     * this mount itself — see {@code docs/PURE_ECS_ALTERNATIVE.md} §0 for the user-data snippet.
+     */
+    @Parameter(property = "aws-ecs.ec2HostMountPath")
+    private String ec2HostMountPath;
+    /**
+     * Name of the pre-provisioned capacity provider to target via {@code capacityProviderStrategy}.
+     * Required for {@code launchType} {@code MANAGED_INSTANCES}. Optional for {@code EC2} — when
+     * unset, tasks launch with {@code launchType: EC2} directly against unmanaged container
+     * instances already registered on the cluster. Unused for {@code FARGATE}, which always
+     * targets the AWS-managed {@code FARGATE}/{@code FARGATE_SPOT} providers.
+     */
+    @Parameter(property = "aws-ecs.capacityProviderName")
+    private String capacityProviderName;
     @Parameter(property = "aws-ecs.logGroupName")
     private String logGroupName;
     @Parameter(property = "aws-ecs.region")
@@ -444,19 +475,19 @@ public class BuildMojo extends AbstractMojo {
                                 String buildId, S3Client s3Client, EcsClient ecsClient,
                                 CloudWatchLogsClient logsClient)
             throws IOException, MojoExecutionException, MojoFailureException, InterruptedException {
-        EcsClusterSettings clusterSettings = new EcsClusterSettings(clusterArn, subnetIds,
-                securityGroupIds, assignPublicIp, executionRoleArn, taskRoleArn,
-                s3FilesFileSystemArn, s3FilesRootDirectory, s3FilesAccessPointArn, logGroupName,
-                region);
+        EcsClusterSettings clusterSettings = new EcsClusterSettings(resolveLaunchType(), clusterArn,
+                subnetIds, securityGroupIds, assignPublicIp, executionRoleArn, taskRoleArn,
+                s3FilesFileSystemArn, s3FilesRootDirectory, s3FilesAccessPointArn, ec2HostMountPath,
+                capacityProviderName, logGroupName, region);
         AgentContainerSettings containerSettings =
                 new AgentContainerSettings(agentImageUri, agentCpu, agentMemory,
                         agentEphemeralStorageGiB);
 
         S3StagingSink stagingSink = new S3StagingSink(s3Client, s3Bucket);
         TaskDefinitionRegistrar registrar = new TaskDefinitionRegistrar(ecsClient);
-        FargateTaskLauncher launcher = new FargateTaskLauncher(ecsClient);
+        EcsTaskLauncher launcher = new EcsTaskLauncher(ecsClient);
         CloudWatchLogTailer logTailer = new CloudWatchLogTailer(logsClient);
-        FargateTaskSupervisor supervisor = new FargateTaskSupervisor(launcher, logTailer, ecsClient);
+        EcsTaskSupervisor supervisor = new EcsTaskSupervisor(launcher, logTailer, ecsClient);
 
         // Stage every cell's inputs and register its task definition up front, sequentially --
         // both are cheap and this keeps the concurrent section below to just the part that
@@ -498,7 +529,7 @@ public class BuildMojo extends AbstractMojo {
      */
     private List<String> superviseAllCellsConcurrently(List<CellLaunchPlan> launchPlans,
                                                         EcsClusterSettings clusterSettings,
-                                                        FargateTaskSupervisor supervisor,
+                                                        EcsTaskSupervisor supervisor,
                                                         String buildId, NativeImageInputPlan plan,
                                                         S3Client s3Client)
             throws MojoExecutionException, InterruptedException {
@@ -534,17 +565,17 @@ public class BuildMojo extends AbstractMojo {
      *         its artifact has already been attached to the reactor)
      */
     private String superviseOneCell(CellLaunchPlan launchPlan, EcsClusterSettings clusterSettings,
-                                     FargateTaskSupervisor supervisor, String buildId,
+                                     EcsTaskSupervisor supervisor, String buildId,
                                      NativeImageInputPlan plan, S3Client s3Client)
             throws InterruptedException {
         MatrixCell cell = launchPlan.cell();
-        FargateTaskSupervisor.SupervisionOptions options = FargateTaskSupervisor.SupervisionOptions
+        EcsTaskSupervisor.SupervisionOptions options = EcsTaskSupervisor.SupervisionOptions
                 .defaults()
                 .pollInterval(Duration.ofSeconds(Math.max(1, pollIntervalSeconds)))
                 .overallTimeout(Duration.ofMinutes(Math.max(1, overallTimeoutMinutes)))
                 .maxSpotInterruptionsBeforeOnDemand(Math.max(0, maxSpotInterruptionsBeforeOnDemand));
 
-        FargateTaskSupervisor.SupervisionResult result = supervisor.supervise(clusterSettings,
+        EcsTaskSupervisor.SupervisionResult result = supervisor.supervise(clusterSettings,
                 launchPlan.taskDefinitionArn(), launchPlan.environment(), LOG_STREAM_PREFIX,
                 line -> getLog().info("[" + cell + "] " + line), options);
 
@@ -603,7 +634,7 @@ public class BuildMojo extends AbstractMojo {
                                                              NativeImageInputPlan plan,
                                                              String profileRelativePath) {
         List<KeyValuePair> environment = new ArrayList<>();
-        environment.add(env("JOBRUNR_BUILD_MOUNT_ROOT", "/mnt/build"));
+        environment.add(env("JOBRUNR_BUILD_MOUNT_ROOT", TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH));
         environment.add(env("JOBRUNR_BUILD_ID", buildId));
         environment.add(env("JOBRUNR_BUILD_KIND", cell.buildKind.configValue()));
         environment.add(env("JOBRUNR_BUILD_ARCH", cell.architecture.name()));
@@ -630,7 +661,21 @@ public class BuildMojo extends AbstractMojo {
         return KeyValuePair.builder().name(name).value(value).build();
     }
 
+    private EcsLaunchType resolveLaunchType() throws MojoFailureException {
+        // Falls back to FARGATE (matching the @Parameter's defaultValue) when null, since tests
+        // that construct BuildMojo directly and set fields via reflection bypass Maven's plexus
+        // injector and its defaultValue handling entirely.
+        String value = launchType == null || launchType.isBlank() ? "FARGATE" : launchType;
+        try {
+            return EcsLaunchType.valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw new MojoFailureException("Invalid aws-ecs.launchType '" + launchType
+                    + "'; must be one of " + java.util.Arrays.toString(EcsLaunchType.values()));
+        }
+    }
+
     private void requireRemoteConfig() throws MojoFailureException {
+        EcsLaunchType resolvedLaunchType = resolveLaunchType();
         List<String> missing = new ArrayList<>();
         if (isBlank(s3Bucket)) {
             missing.add("aws-ecs.s3Bucket");
@@ -650,8 +695,15 @@ public class BuildMojo extends AbstractMojo {
         if (isBlank(taskRoleArn)) {
             missing.add("aws-ecs.taskRoleArn");
         }
-        if (isBlank(s3FilesFileSystemArn)) {
-            missing.add("aws-ecs.s3FilesFileSystemArn");
+        if (resolvedLaunchType.usesS3Files()) {
+            if (isBlank(s3FilesFileSystemArn)) {
+                missing.add("aws-ecs.s3FilesFileSystemArn");
+            }
+        } else if (isBlank(ec2HostMountPath)) {
+            missing.add("aws-ecs.ec2HostMountPath");
+        }
+        if (resolvedLaunchType == EcsLaunchType.MANAGED_INSTANCES && isBlank(capacityProviderName)) {
+            missing.add("aws-ecs.capacityProviderName");
         }
         if (isBlank(logGroupName)) {
             missing.add("aws-ecs.logGroupName");

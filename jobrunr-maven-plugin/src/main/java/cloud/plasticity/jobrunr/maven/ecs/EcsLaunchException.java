@@ -4,15 +4,15 @@
 package cloud.plasticity.jobrunr.maven.ecs;
 
 /** Raised when ECS reports a {@code RunTask} failure, e.g. no capacity available. */
-public class FargateLaunchException extends RuntimeException {
+public class EcsLaunchException extends RuntimeException {
 
     private static final long serialVersionUID = 1L;
 
-    public FargateLaunchException(String message) {
+    public EcsLaunchException(String message) {
         super(message);
     }
 
-    public FargateLaunchException(String message, Throwable cause) {
+    public EcsLaunchException(String message, Throwable cause) {
         super(message, cause);
     }
 }

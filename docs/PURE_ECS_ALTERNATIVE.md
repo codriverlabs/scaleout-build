@@ -9,27 +9,99 @@ necessary, or does calling ECS directly suffice?
 **Short answer: pure ECS suffices, and for a small fixed matrix it's simpler.** This document is
 the tradeoff analysis; §5 says which one to actually use and when to switch.
 
-## 0. Naming: `aws-ecs`, not `fargate`
+## 0. Three launch types, two staging mechanisms
 
 The goal is `aws-ecs:build` (parameters `aws-ecs.*`), not `fargate:build`. This is a deliberate
-choice, not cosmetic: Fargate is one *launch type* within Amazon ECS, and the roadmap includes
-broadening beyond it — most immediately **ECS Managed Instances**, which already supports EC2 Spot
-capacity (`capacityOptionType: SPOT` on the managed-instance capacity provider, GA) and, unlike the
-raw EC2 launch type, stays compatible with S3 Files for staging (see the caveat below). Naming
-everything after "Fargate" would have described less and less of what the plugin does as more
-launch types are added under the same ECS cluster/task-definition model. A bare `ecs` prefix was
-considered and rejected as too short/generic for a goal prefix meant to be unambiguous in a
-`pom.xml` or CLI transcript read out of context.
+choice, not cosmetic: Fargate is one *launch type* within Amazon ECS. This plugin now supports all
+three ECS compute models via `aws-ecs.launchType` (`FARGATE` default, `MANAGED_INSTANCES`, `EC2`),
+which split into two staging mechanisms rather than three, because of one concrete constraint
+confirmed against AWS's docs:
 
-**A real constraint for any future EC2 launch type work, confirmed against AWS's docs, not
-assumed:** S3 Files volumes — the mechanism this whole staging design (`S3StagingSink`/
-`S3ArtifactRetriever`, the agent's S3 Files mount) depends on — are GA on **Fargate** and
-**ECS Managed Instances**, but explicitly **not supported on the raw EC2 launch type**: "If you
-configure an S3 file system in a task definition and attempt to run it on the Amazon EC2 launch
-type, the task will fail at launch." So ECS Managed Instances is a straightforward next launch type
-to add (same staging mechanism, just a different capacity provider); the raw EC2 launch type is not
-— it would need a different staging mechanism (e.g. EBS-backed local disk, or reintroducing direct
-S3 SDK calls inside the agent for that one launch type) before it could work at all.
+**S3 Files volumes — the mechanism `S3StagingSink`/`S3ArtifactRetriever` and the agent's mount
+depend on — are GA on Fargate and ECS Managed Instances, but explicitly not supported on the raw
+EC2 launch type:** "If you configure an S3 file system in a task definition and attempt to run it
+on the Amazon EC2 launch type, the task will fail at launch." So:
+
+| Launch type | `aws-ecs.launchType` | Staging mechanism | Capacity |
+|---|---|---|---|
+| Fargate | `FARGATE` (default) | S3 Files volume, mounted by ECS itself | `FARGATE_SPOT`/`FARGATE`, AWS-managed, weighted (§2) |
+| ECS Managed Instances | `MANAGED_INSTANCES` | S3 Files volume, mounted by ECS itself | Named `aws-ecs.capacityProviderName`, provisioned out of band |
+| Raw EC2 | `EC2` | Host bind-mount volume, pointing at a path Mountpoint for Amazon S3 already mounted via the container instance's user-data | Named `aws-ecs.capacityProviderName`, or `launchType: EC2` directly if unset |
+
+### ECS Managed Instances
+
+Stages exactly like Fargate — same `s3FilesFileSystemArn`/`s3FilesRootDirectory`/
+`s3FilesAccessPointArn` parameters, same `TaskDefinitionRegistrar` code path, just a different
+`requiresCompatibilities` value (`MANAGED_INSTANCES`) and a different `capacityProviderStrategy`
+target. What's different, and provisioned entirely out of band (this plugin never calls
+`CreateCapacityProvider`): a Managed Instances capacity provider needs its own IAM infrastructure
+role and an EC2 instance profile, e.g.:
+
+```json
+{
+  "name": "managed-instances-cp",
+  "cluster": "my-cluster",
+  "managedInstancesProvider": {
+    "infrastructureRoleArn": "arn:aws:iam::123456789012:role/ecsInfrastructureRole",
+    "instanceLaunchTemplate": {
+      "ec2InstanceProfileArn": "arn:aws:iam::123456789012:instance-profile/ecsInstanceRole",
+      "networkConfiguration": { "subnets": ["subnet-..."], "securityGroups": ["sg-..."] },
+      "storageConfiguration": { "storageSizeGiB": 100 }
+    }
+  }
+}
+```
+
+Set `aws-ecs.capacityProviderName` to that provider's name. One task-definition-level constraint
+worth knowing (confirmed against AWS's docs, not assumed): `ephemeralStorage` is **not** a valid
+parameter for `MANAGED_INSTANCES` tasks — `TaskDefinitionRegistrar` omits it for this launch type
+even if `aws-ecs.agentEphemeralStorageGiB` is set.
+
+### Raw EC2 — Mountpoint for Amazon S3, mounted by user-data, not by the container
+
+S3 Files being unsupported on EC2 doesn't rule out S3-backed staging on EC2 — it rules out using
+*ECS's own* volume-management feature for it. Mountpoint for Amazon S3 (a standalone open source
+FUSE client, independent of ECS's S3 Files feature entirely) works here, and specifically fits the
+agent's actual I/O pattern: AWS's own docs state it "can list and read existing files, and it can
+create new ones. It cannot modify existing files." The agent only ever reads pre-staged, immutable
+inputs (`native-image.args`, jars) and writes exactly one new output file, sequentially, once —
+`native-image`'s own scratch/temp traffic (the actual heavy, in-place-rewrite-prone I/O) is already
+kept off the shared mount and onto local ephemeral storage, which is exactly what makes Mountpoint's
+limitations irrelevant here.
+
+**The mount is set up at the EC2 host level, by the container instance's user-data, before ECS ever
+places a task on it — not inside the agent's container.** This is a deliberate choice over mounting
+Mountpoint inside the container: the in-container approach needs `SYS_ADMIN`, a `/dev/fuse` device
+mapping, and a custom entrypoint wrapping `AgentMain` (all real, verified requirements — see the
+ECS `LinuxParameters`/`Device`/`KernelCapabilities` SDK model), none of which is needed at all once
+the mount already exists on the host: the task definition just bind-mounts that host path in via a
+plain `host` volume, exactly the way any other EC2-backed ECS bind mount works. Example user-data
+(exact `mount-s3` flags depend on the AMI and how the container instance authenticates to S3; this
+is illustrative, not copy-paste-ready):
+
+```bash
+#!/bin/bash
+# Runs once at instance launch, before the ECS agent registers the instance.
+mkdir -p /mnt/build
+mount-s3 my-staging-bucket /mnt/build --allow-delete --uid 1001 --gid 1001
+```
+
+Set `aws-ecs.ec2HostMountPath` to wherever user-data mounted it (e.g. `/mnt/build`); the plugin
+bind-mounts exactly that host path into the container at the same path the agent expects
+(`AgentConfig`'s `JOBRUNR_BUILD_MOUNT_ROOT` default, also `/mnt/build`) via `TaskDefinitionRegistrar`.
+**The plugin does not set up this mount itself** — same "pre-provisioned input" boundary already
+established for the cluster, VPC, and IAM roles; provisioning the container instances' user-data is
+the caller's responsibility, the same way provisioning the cluster itself is.
+
+One real unknown, not papered over: AWS's docs confirm Mountpoint can read, list, and create files,
+but don't explicitly confirm `mkdir` semantics for the `output/` directory the agent creates before
+writing the binary. This has moderate-not-verified confidence — directory creation is basic enough
+that AWS would likely flag it if unsupported, the way the other limitations are flagged — but it
+has not been proven against a real mount. Verify this for real (mount a bucket with `mount-s3`, run
+the agent's directory-creation path against it) before relying on the EC2 launch type in production.
+
+A bare `ecs` prefix was considered and rejected as too short/generic for a goal prefix meant to be
+unambiguous in a `pom.xml` or CLI transcript read out of context — `aws-ecs` was chosen instead.
 
 ## 1. Progress streaming was never a Step Functions feature
 
@@ -43,15 +115,21 @@ logs get streamed back. Dropping Step Functions costs nothing here.
 
 Three things Step Functions's ASL expressed declaratively become code again:
 
-1. **Launch.** `FargateTaskLauncher.runTask` — a direct `RunTask` call with a `capacityProviderStrategy`
-   preferring `FARGATE_SPOT`, task overrides carrying the cell's environment variables. This is the
-   same class (revived, largely unchanged) that existed before the Step Functions redesign.
+1. **Launch.** `EcsTaskLauncher.runTask` — a direct `RunTask` call, with a `capacityProviderStrategy`
+   or `launchType` depending on `aws-ecs.launchType` (§0), task overrides carrying the cell's
+   environment variables. For `FARGATE`, this prefers `FARGATE_SPOT` with an on-demand `FARGATE`
+   fallback expressed as capacity provider `base`/`weight` rather than separate retry logic — ECS
+   itself falls back to on-demand capacity when Spot capacity is unavailable for the higher-weighted
+   strategy item. `MANAGED_INSTANCES`/`EC2` target a single named capacity provider instead (or
+   `launchType: EC2` directly for EC2 with none configured) — there is no AWS-managed Spot/
+   on-demand pair to weight between for those, since Spot vs. on-demand is a property of the named
+   capacity provider's own configuration, provisioned out of band.
 2. **Fan-out across cells.** With no Map state doing this for us, `BuildMojo` launches and
    supervises every remote cell on its own thread from a fixed-size `ExecutorService` sized to the
    number of remote cells — bounded concurrency without needing a `MaxConcurrency` setting, since
    this plugin never launches more tasks in one invocation than that.
-3. **Relaunch on Spot interruption.** `FargateTaskSupervisor` polls `DescribeTasks` and relaunches
-   when a stop looks like a genuine Spot reclaim.
+3. **Relaunch on Spot interruption.** `EcsTaskSupervisor` polls `DescribeTasks` and relaunches
+   when a stop looks like a genuine Spot reclaim — for `FARGATE` only, see §3.
 
 By default, a cell whose target architecture matches the machine running `mvn` builds locally with
 no AWS calls at all (`BuildMojo.splitLocalAndRemote`) — only the non-matching architecture's cell
@@ -59,7 +137,7 @@ goes remote. Set `aws-ecs.forceRemote=true` to send every non-JVM cell to ECS re
 match, e.g. to keep the local toolchain out of the loop entirely or to exercise the remote path for
 an architecture that happens to match the host.
 
-## 3. Spot interruption detection is a real, verified gap
+## 3. Spot interruption detection is a real, verified gap — and Fargate-only today
 
 This is the part worth being precise about rather than assuming. ECS's `stopCode` field is a
 **strict enum** (confirmed against the SDK model) of exactly three values:
@@ -68,10 +146,20 @@ for a Spot reclaim.**
 
 AWS's documented signal instead is the free-text `stoppedReason` field. For a genuine Fargate Spot
 interruption, its value is specifically the string `"Your Spot Task was interrupted."` — confirmed
-against AWS's own troubleshooting guidance and support threads, not guessed. `FargateTaskSupervisor`
+against AWS's own troubleshooting guidance and support threads, not guessed. `EcsTaskSupervisor`
 matches this string case-sensitively and verbatim, deliberately not with a loose substring check,
 so an unrelated `stoppedReason` that happens to share words is never mistaken for an interruption
-(see `FargateTaskSupervisorTest#doesNotTreatAnUnrelatedStoppedReasonAsASpotInterruption`).
+(see `EcsTaskSupervisorTest#doesNotTreatAnUnrelatedStoppedReasonAsASpotInterruption`).
+
+**This detection is scoped to `FARGATE` only.** The exact `stoppedReason` wording ECS uses for a
+`MANAGED_INSTANCES`/`EC2` Spot reclaim has not been verified against AWS's docs — reusing the
+Fargate-Spot string for those launch types would either silently never match (an EC2/Managed
+Instances Spot reclaim treated as an ordinary terminal failure instead of retried) or, worse, be
+presented as verified when it is not. `EcsTaskSupervisorTest#managedInstancesNeverTreatsAStopAsA
+SpotInterruptionEvenWithTheFargateSpotWording` is a regression guard for exactly this. Automatic
+Spot-interruption retry for `MANAGED_INSTANCES`/`EC2` is a real follow-up, not yet implemented —
+find and verify the correct `stoppedReason` (or other signal) for those launch types before adding
+it.
 
 This is strictly less robust than Step Functions' `Retry`/`ErrorEquals`, which matches on typed,
 stable error names Step Functions itself defines. A wording change on AWS's side to this specific
@@ -79,7 +167,7 @@ message would silently break pure-ECS interruption detection with no compile-tim
 warning — it would just stop relaunching on Spot reclaims and start reporting them as build
 failures instead. Also worth knowing: a stopped task's details, including `stoppedReason`, are only
 queryable via `DescribeTasks` for **one hour** after the task stops — not a concern for
-`FargateTaskSupervisor`'s own tight poll loop (which reads the detail immediately), but relevant if
+`EcsTaskSupervisor`'s own tight poll loop (which reads the detail immediately), but relevant if
 this detection logic is ever reused against an already-stopped task discovered later.
 
 ## 4. What each approach costs and buys
@@ -89,10 +177,10 @@ this detection logic is ever reused against an already-stopped task discovered l
 | Infrastructure to deploy | State machine + its execution role | None beyond what ECS already needs |
 | IAM surface | `states:StartExecution`/`DescribeExecution` on the plugin; `ecs:RunTask`/`StopTask`/`iam:PassRole` on the state machine's *own* role | `ecs:RunTask`/`StopTask`/`DescribeTasks` directly on the plugin's principal |
 | Fan-out over N cells | Declarative (`Map` state, `MaxConcurrency`) | Explicit thread pool in `BuildMojo` |
-| Spot interruption detection | Typed `Retry`/`ErrorEquals` | Free-text `stoppedReason` string match (§3) |
+| Spot interruption detection | Typed `Retry`/`ErrorEquals` | Free-text `stoppedReason` string match, Fargate-only today (§3) |
 | Execution history | 90 days, queryable via `DescribeExecution`/`GetExecutionHistory` | Whatever CloudWatch Logs retention is configured; ECS's own stopped-task detail expires after 1 hour |
 | Scaling to a larger matrix (JVM/PGO variants) | Free — same `Map` state, larger `cells` array | Every additional cell is still just another thread in the pool; no *new* code needed, but no built-in aggregation/tolerance semantics either |
-| Code to maintain | `BuildMatrixStateMachineDefinition` (ASL), `StateMachineManager`, `StepFunctionsExecutionSupervisor` | `FargateTaskLauncher`, `FargateTaskSupervisor` |
+| Code to maintain | `BuildMatrixStateMachineDefinition` (ASL), `StateMachineManager`, `StepFunctionsExecutionSupervisor` | `EcsTaskLauncher`, `EcsTaskSupervisor` |
 
 ## 5. When to use which
 
@@ -106,11 +194,15 @@ version a state machine for it. This is the simpler, more direct choice for that
 90-day execution history matter more than the extra infrastructure. Nothing about the matrix
 computation, staging (`S3StagingSink`/`S3ArtifactRetriever`), task definition registration
 (`TaskDefinitionRegistrar`), or the agent (`AgentMain`) differs between the two branches — only the
-orchestration layer above `RunTask` changes.
+orchestration layer above `RunTask` changes. (The Step Functions branch has not yet been updated
+with the `MANAGED_INSTANCES`/`EC2` launch-type support described in §0 — it currently only targets
+Fargate.)
 
 ## 6. Not yet validated against live AWS
 
-Same caveat as both prior designs: no ECS cluster, VPC, or S3 Files filesystem has been
-provisioned. `FargateTaskSupervisor`'s Spot-interruption detection in particular has only been
-exercised against a mocked `stoppedReason` string matching AWS's documentation — it has not been
-observed against a real Spot reclaim.
+Same caveat as both prior designs: no ECS cluster, VPC, S3 Files filesystem, EC2 container
+instances, or Mountpoint-for-S3 user-data mount has been provisioned. `EcsTaskSupervisor`'s Spot-
+interruption detection in particular has only been exercised against a mocked `stoppedReason`
+string matching AWS's documentation — it has not been observed against a real Spot reclaim. The
+`mkdir` semantics question raised in §0 for the EC2/Mountpoint path is a real open item, not a
+formality — verify it before relying on that launch type in production.
