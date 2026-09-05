@@ -39,3 +39,4 @@ target/
 # CDK (jobrunr-test-infra)
 cdk.out/
 cdk.context.json
+dependency-reduced-pom.xml
