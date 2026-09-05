@@ -22,6 +22,7 @@
         <module>jobrunr-build-shared</module>
         <module>jobrunr-maven-plugin</module>
         <module>jobrunr-build-agent</module>
+        <module>jobrunr-test-infra</module>
     </modules>
 
     <properties>

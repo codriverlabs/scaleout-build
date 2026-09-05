@@ -35,3 +35,7 @@ target/
 # IntelliJ IDEA
 .idea/
 *.iml
+
+# CDK (jobrunr-test-infra)
+cdk.out/
+cdk.context.json

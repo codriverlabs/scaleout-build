@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ Copyright © 2026 Plasticity.Cloud and CoDriverLabs. All rights reserved.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>cloud.plasticity</groupId>
+        <artifactId>jobrunr-build-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>jobrunr-test-infra</artifactId>
+    <packaging>jar</packaging>
+
+    <name>AWS ECS Parallel Build Test Infrastructure (CDK)</name>
+    <description>
+        AWS CDK (Java) app that provisions a minimal, disposable AWS environment for exercising
+        aws-ecs:build against real AWS: VPC, ECS cluster, S3 bucket, S3 Files file system + mount
+        targets, ECR repository for the agent image, IAM roles (including the S3 Files task-role
+        policy split out in docs/PURE_ECS_ALTERNATIVE.md §0/§6), and a CloudWatch Logs group. Not
+        part of the plugin's release artifact -- deploy/destroy only for manual, ad hoc testing.
+        See jobrunr-test-infra/README.md.
+    </description>
+
+    <properties>
+        <!-- Matches the CDK CLI version resolvable in this environment (check with the "cdk"
+             CLI's version flag); keep these in step, since a CLI/library major-version mismatch
+             is a common source of "cdk synth" failures that have nothing to do with the app code
+             itself. -->
+        <aws-cdk-lib.version>2.263.0</aws-cdk-lib.version>
+        <constructs.version>10.4.2</constructs.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>software.amazon.awscdk</groupId>
+            <artifactId>aws-cdk-lib</artifactId>
+            <version>${aws-cdk-lib.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.constructs</groupId>
+            <artifactId>constructs</artifactId>
+            <version>${constructs.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>jobrunr-test-infra</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.1</version>
+                <configuration>
+                    <mainClass>cloud.plasticity.jobrunr.infra.InfraApp</mainClass>
+                    <classpathScope>compile</classpathScope>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>${maven-shade-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>cloud.plasticity.jobrunr.infra.InfraApp</mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
