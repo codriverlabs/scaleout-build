@@ -1,0 +1,59 @@
+version: 2
+updates:
+  # --- Maven: one entry per module, since Dependabot's Maven support does not aggregate a
+  # multi-module reactor from the root -- each pom.xml (including child modules) is scanned
+  # independently for its own <dependencies>/<dependencyManagement>. All version numbers this
+  # project actually manages live in the root pom's <properties> (awssdk.version,
+  # jackson.version, junit.version, mockito.version, assertj.version, maven-*-plugin.version,
+  # etc.), so grouping by dependency family here collapses what would otherwise be many
+  # single-dependency PRs (root pom + every child inheriting the same BOM) into far fewer,
+  # coherent ones.
+  - package-ecosystem: "maven"
+    directories:
+      - "/"
+      - "/jobrunr-build-shared"
+      - "/jobrunr-maven-plugin"
+      - "/jobrunr-build-agent"
+      - "/jobrunr-test-infra"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      aws-sdk:
+        patterns:
+          - "software.amazon.awssdk:*"
+          - "software.amazon.awscdk:*"
+          - "software.constructs:*"
+      jackson:
+        patterns:
+          - "com.fasterxml.jackson*:*"
+      test-frameworks:
+        patterns:
+          - "org.junit*:*"
+          - "org.mockito:*"
+          - "org.assertj:*"
+          - "org.testcontainers:*"
+      maven-build-plugins:
+        patterns:
+          - "org.apache.maven*:*"
+      logging:
+        patterns:
+          - "org.slf4j:*"
+    open-pull-requests-limit: 10
+
+  # --- Docker: the agent's builder image (jobrunr-build-agent/Dockerfile). Kept on its own,
+  # slower cadence -- a base-image bump here is a real GraalVM/Mandrel toolchain change, not a
+  # routine library patch, and deserves deliberate review rather than being swept into the
+  # weekly Maven noise.
+  - package-ecosystem: "docker"
+    directory: "/jobrunr-build-agent"
+    schedule:
+      interval: "monthly"
+
+  # --- GitHub Actions: kept ready for when CI workflows are added under .github/workflows/.
+  # Harmless and a no-op today (no workflow files exist yet), and it's easy to forget to add
+  # once workflows do land, so it's enabled now rather than deferred.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
