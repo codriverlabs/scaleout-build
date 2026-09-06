@@ -9,6 +9,12 @@ necessary, or does calling ECS directly suffice?
 **Short answer: pure ECS suffices, and for a small fixed matrix it's simpler.** This document is
 the tradeoff analysis; §5 says which one to actually use and when to switch.
 
+This document covers the *compute/orchestration* axis — Step Functions vs. pure ECS, and which
+ECS launch type. `docs/STAGING_ALTERNATIVES.md` covers the separate, orthogonal *staging* axis —
+how build inputs and outputs actually move between the plugin and the remote builder, what's
+implemented, and why every alternative considered (S3 Files, EFS, Mountpoint, `git archive`, EBS
+io2+rsync, Lambda) wasn't adopted for that job. Neither document depends on the other's answer.
+
 ## 0. Three launch types, two staging mechanisms
 
 The goal is `aws-ecs:build` (parameters `aws-ecs.*`), not `fargate:build`. This is a deliberate
@@ -17,10 +23,14 @@ three ECS compute models via `aws-ecs.launchType` (`FARGATE` default, `MANAGED_I
 which split into two staging mechanisms rather than three, because of one concrete constraint
 confirmed against AWS's docs:
 
-**S3 Files volumes — the mechanism `S3StagingSink`/`S3ArtifactRetriever` and the agent's mount
-depend on — are GA on Fargate and ECS Managed Instances, but explicitly not supported on the raw
+**S3 Files volumes — the mechanism the agent's mount depends on, mounted by ECS itself into the
+container — are GA on Fargate and ECS Managed Instances, but explicitly not supported on the raw
 EC2 launch type:** "If you configure an S3 file system in a task definition and attempt to run it
-on the Amazon EC2 launch type, the task will fail at launch." So:
+on the Amazon EC2 launch type, the task will fail at launch." This is specifically about how the
+*agent, inside the container*, reads staged files — not about `S3StagingSink`/`S3ArtifactRetriever`,
+which run on the plugin's own machine as plain `S3Client` calls (`HeadObject`/`PutObject`/
+`CopyObject`/`GetObject`) and are identical across every launch type; see
+`docs/STAGING_ALTERNATIVES.md` §1 for exactly what those two classes do. So:
 
 | Launch type | `aws-ecs.launchType` | Staging mechanism | Capacity |
 |---|---|---|---|
