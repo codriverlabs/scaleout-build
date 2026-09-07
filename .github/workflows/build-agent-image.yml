@@ -1,22 +1,17 @@
 name: Build and push agent image
 
 # Builds jobrunr-build-agent's image for both linux/amd64 and linux/arm64 and publishes a single
-# multi-arch manifest to ECR. Each architecture builds on a *native* runner (ubuntu-latest for
-# amd64, ubuntu-24.04-arm for arm64 — confirmed current via GitHub's own hosted-runners reference,
-# GA and free on both public and private repos) rather than via QEMU emulation on a single runner,
-# the same way docker/setup-qemu-action would. See build-local.sh for the equivalent local
-# (single-arch) build.
+# multi-arch manifest to GHCR (ghcr.io/<owner>/jobrunr-build-agent). Each architecture builds on a
+# *native* runner (ubuntu-latest for amd64, ubuntu-24.04-arm for arm64 — confirmed current via
+# GitHub's own hosted-runners reference, GA and free on both public and private repos) rather than
+# via QEMU emulation on a single runner. See build-local.sh for the equivalent local build,
+# including a --multi-arch mode that pushes to ECR instead (real ECR access already exists for
+# this project; GHCR is used here in CI since it needs no IAM role, no OIDC provider, and no AWS
+# credentials at all — auth is the workflow's own built-in GITHUB_TOKEN).
 #
-# Prerequisite this workflow does not provision, and must exist before this runs:
-#   - An IAM OIDC identity provider trusting token.actions.githubusercontent.com, and an IAM role
-#     with a trust policy scoped to this repository (and, ideally, to the branches/tags that should
-#     be allowed to assume it), granted ecr:GetAuthorizationToken plus ecr:BatchCheckLayerAvailability
-#     /ecr:PutImage/ecr:InitiateLayerUpload/ecr:UploadLayerPart/ecr:CompleteLayerUpload/
-#     ecr:BatchGetImage on the target repository (e.g. the AgentRepository ECR repo jobrunr-test-infra
-#     provisions). No long-lived AWS access keys are used here — see AWS's own OIDC-for-GitHub-Actions
-#     guidance for how to set this role up.
-#   - The AWS_ROLE_ARN and ECR_REPOSITORY_URI repository variables (Settings > Secrets and
-#     variables > Actions > Variables), and AWS_REGION.
+# No prerequisites beyond what's already true for any GitHub Actions workflow in this repo:
+# GITHUB_TOKEN is minted automatically per run, and the packages: write permission below is
+# sufficient to push to this repo's own GHCR namespace.
 
 on:
   push:
@@ -27,9 +22,12 @@ on:
       - '.github/workflows/build-agent-image.yml'
   workflow_dispatch: {}
 
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/jobrunr-build-agent
+
 permissions:
-  id-token: write   # required for OIDC (aws-actions/configure-aws-credentials)
   contents: read
+  packages: write
 
 jobs:
   build-agent-jar:
@@ -76,12 +74,11 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: docker/login-action@v3
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - uses: aws-actions/amazon-ecr-login@v2
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push ${{ matrix.arch }} image
         uses: docker/build-push-action@v6
@@ -92,18 +89,17 @@ jobs:
           build-args: |
             BASE_IMAGE=${{ matrix.base_image }}
           push: true
-          tags: ${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}-${{ matrix.arch }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
 
   push-manifest:
     needs: build-and-push-image
     runs-on: ubuntu-latest
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: docker/login-action@v3
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - uses: aws-actions/amazon-ecr-login@v2
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Assembles the two per-architecture images already pushed above into one multi-arch
       # manifest list, tagged both with the immutable commit SHA and a floating `latest`. This is
@@ -115,7 +111,7 @@ jobs:
       - name: Create and push multi-arch manifest
         run: |
           docker buildx imagetools create \
-            -t "${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}" \
-            -t "${{ vars.ECR_REPOSITORY_URI }}:latest" \
-            "${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}-amd64" \
-            "${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}-arm64"
+            -t "${{ env.IMAGE }}:${{ github.sha }}" \
+            -t "${{ env.IMAGE }}:latest" \
+            "${{ env.IMAGE }}:${{ github.sha }}-amd64" \
+            "${{ env.IMAGE }}:${{ github.sha }}-arm64"
