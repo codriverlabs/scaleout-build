@@ -12,8 +12,11 @@
 #   docker build --build-arg BASE_IMAGE=quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 \
 #       -t jobrunr-build-agent:arm64 -f jobrunr-build-agent/Dockerfile .
 #
-# (Both tags above are the amd64 and arm64 variants of the same Mandrel jdk-25 release; which one
-# you pull is determined by the platform you build/run on, not by the tag name itself.)
+# (Verified via `docker buildx imagetools inspect`: both tags above are themselves already
+# multi-arch OCI image indexes covering linux/amd64 and linux/arm64/v8 — either one works as
+# BASE_IMAGE for a single-arch *or* a multi-platform buildx build; docker/buildx resolves the
+# matching platform manifest automatically per build leg. There is no meaningful difference
+# between the two tags for this Dockerfile's purposes; either is fine as the default.)
 
 ARG BASE_IMAGE=quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25
 FROM ${BASE_IMAGE}
