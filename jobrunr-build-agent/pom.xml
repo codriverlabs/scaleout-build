@@ -35,6 +35,23 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
         </dependency>
+        <!--
+          Enables the agent's direct-S3-calls I/O mode (JOBRUNR_BUILD_S3_BUCKET set): the agent
+          downloads its staged inputs and uploads produced artifacts itself, via plain GetObject/
+          PutObject/ListObjectsV2 calls, instead of relying on an ECS-mounted view of the bucket
+          (S3 Files on FARGATE/MANAGED_INSTANCES, Mountpoint-via-user-data on EC2). Both I/O modes
+          coexist — see AgentConfig and S3Io's class Javadoc for how the mode is selected and why
+          both are kept rather than one replacing the other.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

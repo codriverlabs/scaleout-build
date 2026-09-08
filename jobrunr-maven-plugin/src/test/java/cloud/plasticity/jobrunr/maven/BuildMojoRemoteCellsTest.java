@@ -139,6 +139,76 @@ class BuildMojoRemoteCellsTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void omitsTheS3BucketOverrideByDefault() throws Exception {
+        var captor = stubForOneSuccessfulLaunchAndCaptureRunTaskRequest();
+
+        NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),
+                "-o\noutput/test-app\n", List.of("test-app"));
+        mojo.runRemoteCells(List.of(newCell(BuildKind.NATIVE, Architecture.ARM64)), generatedPlan,
+                "b1", s3Client, ecsClient, logsClient);
+
+        List<software.amazon.awssdk.services.ecs.model.KeyValuePair> environment =
+                capturedEnvironment(captor);
+        assertThat(environment).noneMatch(kv -> "JOBRUNR_BUILD_S3_BUCKET".equals(kv.name()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void setsTheS3BucketOverrideWhenDirectS3IoIsEnabled() throws Exception {
+        setField(mojo, "agentUsesDirectS3Io", true);
+        var captor = stubForOneSuccessfulLaunchAndCaptureRunTaskRequest();
+
+        NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),
+                "-o\noutput/test-app\n", List.of("test-app"));
+        mojo.runRemoteCells(List.of(newCell(BuildKind.NATIVE, Architecture.ARM64)), generatedPlan,
+                "b1", s3Client, ecsClient, logsClient);
+
+        List<software.amazon.awssdk.services.ecs.model.KeyValuePair> environment =
+                capturedEnvironment(captor);
+        assertThat(environment)
+                .anyMatch(kv -> "JOBRUNR_BUILD_S3_BUCKET".equals(kv.name())
+                        && "test-bucket".equals(kv.value()));
+    }
+
+    @SuppressWarnings("unchecked")
+    private org.mockito.ArgumentCaptor<software.amazon.awssdk.services.ecs.model.RunTaskRequest>
+            stubForOneSuccessfulLaunchAndCaptureRunTaskRequest() {
+        when(ecsClient.describeTaskDefinition(any(Consumer.class)))
+                .thenThrow(ClientException.builder().message("not found").build());
+        when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
+                .thenReturn(RegisterTaskDefinitionResponse.builder()
+                        .taskDefinition(TaskDefinition.builder()
+                                .taskDefinitionArn("arn:...:task-definition/agent-native-arm64:1")
+                                .build())
+                        .build());
+        var captor = org.mockito.ArgumentCaptor
+                .forClass(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class);
+        when(ecsClient.runTask(captor.capture())).thenReturn(RunTaskResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").build()).build());
+        when(ecsClient.describeTasks(any(Consumer.class))).thenReturn(DescribeTasksResponse.builder()
+                .tasks(Task.builder().taskArn("arn:...:task/1").lastStatus("STOPPED")
+                        .stoppedReason("Essential container in task exited")
+                        .containers(Container.builder().exitCode(0).build()).build())
+                .build());
+        when(s3Client.headObject(any(Consumer.class)))
+                .thenReturn(HeadObjectResponse.builder().contentLength(4L).build());
+        when(s3Client.getObject(any(GetObjectRequest.class), any(Path.class)))
+                .thenAnswer(invocation -> {
+                    Path destination = invocation.getArgument(1);
+                    Files.writeString(destination, "bin");
+                    return null;
+                });
+        return captor;
+    }
+
+    private static List<software.amazon.awssdk.services.ecs.model.KeyValuePair> capturedEnvironment(
+            org.mockito.ArgumentCaptor<software.amazon.awssdk.services.ecs.model.RunTaskRequest>
+                    captor) {
+        return captor.getValue().overrides().containerOverrides().get(0).environment();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void reportsAFailureWhenTheContainerExitsNonZero() throws Exception {
         when(ecsClient.describeTaskDefinition(any(Consumer.class)))
                 .thenThrow(ClientException.builder().message("not found").build());

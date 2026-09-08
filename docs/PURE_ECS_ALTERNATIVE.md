@@ -111,6 +111,42 @@ correctly rejecting only genuine conflicts (`EEXIST` when a file or directory al
 that path) rather than rejecting directory creation outright. Combined with the read/write pattern
 already covered above, there is no remaining gap for the agent's actual usage.
 
+### A fourth option, orthogonal to launch type: the agent's own direct S3 calls
+
+`aws-ecs.agentUsesDirectS3Io` (default `false`) selects a different axis entirely from the three
+launch types above — not a fourth staging *mechanism* tied to a launch type, but a way to skip
+mount infrastructure altogether, on any of the three. When set, the agent downloads its staged
+inputs and uploads produced artifacts itself, via plain `GetObject`/`PutObject`/`ListObjectsV2`
+calls against `JOBRUNR_BUILD_S3_BUCKET` (see `cloud.plasticity.jobrunr.build.agent.S3Io`), instead
+of reading/writing through the S3 Files or Mountpoint mount the launch type would otherwise need.
+`BuildEnvironment`/`NativeImageBuildExecutor` are completely unaware of the difference — the agent
+downloads inputs to a synthetic local "mount root" under ephemeral storage first, runs the exact
+same build against it, then uploads `output/` back to the same key the plugin's
+`S3ArtifactRetriever` already looks under.
+
+This is a genuine tradeoff against the mount-based modes, not a strict improvement, and both are
+kept rather than one replacing the other:
+
+- **No mount infrastructure needed at all** — no S3 Files file system, mount targets, or
+  user-data-installed Mountpoint, on any launch type, including EC2 (where S3 Files isn't an option
+  regardless). Simpler to provision.
+- **Every byte crosses the network twice** — once down before the build, once up after — rather
+  than being read/written lazily through a FUSE-backed mount that only transfers what
+  `native-image` actually touches. For a large classpath this mode downloads all of it upfront
+  even if only some of it is read.
+- **A genuinely new IAM requirement, not yet provisioned anywhere**: the task role needs its own
+  `s3:GetObject`/`s3:ListBucket` (to download inputs) and `s3:PutObject` (to upload artifacts) on
+  the staging bucket. `jobrunr-test-infra`'s CDK stack's task role today grants only
+  `s3:GetObject`/`s3:GetObjectVersion`/`s3:ListBucket` — deliberately no write access, since
+  `S3StagingSink`/`S3ArtifactRetriever` run under the *plugin's* credentials, not the task's, in
+  the mount-based modes. Enabling `agentUsesDirectS3Io` against that stack's role as it stands
+  today would fail every upload with `AccessDenied` — this is a known, flagged gap, not
+  automated yet.
+- Verified for real, end to end, against a live S3-protocol server (SeaweedFS, via Testcontainers,
+  not a same-vendor emulator): `S3IoTest` and `AgentMainDirectS3IoTest` in `jobrunr-build-agent`
+  cover download-preserves-structure, upload-preserves-structure, the full
+  download→build→upload round trip, and that a failed build correctly skips the upload.
+
 A bare `ecs` prefix was considered and rejected as too short/generic for a goal prefix meant to be
 unambiguous in a `pom.xml` or CLI transcript read out of context — `aws-ecs` was chosen instead.
 

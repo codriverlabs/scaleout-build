@@ -200,6 +200,16 @@ public class BuildMojo extends AbstractMojo {
     private String region;
     @Parameter(property = "aws-ecs.agentImageUri")
     private String agentImageUri;
+    /**
+     * Selects the agent's I/O mode. When {@code true}, the agent downloads staged inputs and
+     * uploads produced artifacts itself via plain S3 calls, and no mount infrastructure (S3 Files
+     * volume, or Mountpoint-via-user-data on EC2) is required. When {@code false} (default), the
+     * agent reads and writes through whichever mount the launch type provides. See
+     * {@code cloud.plasticity.jobrunr.build.agent.S3Io}'s class Javadoc for the tradeoffs between
+     * the two modes.
+     */
+    @Parameter(property = "aws-ecs.agentUsesDirectS3Io", defaultValue = "false")
+    private boolean agentUsesDirectS3Io;
     @Parameter(property = "aws-ecs.agentCpu", defaultValue = "4096")
     private String agentCpu;
     @Parameter(property = "aws-ecs.agentMemory", defaultValue = "16384")
@@ -635,6 +645,9 @@ public class BuildMojo extends AbstractMojo {
                                                              String profileRelativePath) {
         List<KeyValuePair> environment = new ArrayList<>();
         environment.add(env("JOBRUNR_BUILD_MOUNT_ROOT", TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH));
+        if (agentUsesDirectS3Io) {
+            environment.add(env("JOBRUNR_BUILD_S3_BUCKET", s3Bucket));
+        }
         environment.add(env("JOBRUNR_BUILD_ID", buildId));
         environment.add(env("JOBRUNR_BUILD_KIND", cell.buildKind.configValue()));
         environment.add(env("JOBRUNR_BUILD_ARCH", cell.architecture.name()));

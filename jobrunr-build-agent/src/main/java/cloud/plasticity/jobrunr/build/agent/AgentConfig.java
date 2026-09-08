@@ -17,9 +17,9 @@ import java.util.Optional;
  * Agent configuration, read from the environment.
  *
  * <p>Environment variables rather than command-line arguments because the container's entrypoint is
- * overridden to a fixed {@code java -jar} invocation, while the Step Functions state machine's
- * {@code RunTask.sync} state supplies per-cell values via ECS task overrides. See
- * {@code docs/DESIGN.md} §5 for the task-override contract this mirrors.
+ * overridden to a fixed {@code java -jar} invocation, while {@code BuildMojo} supplies per-cell
+ * values via ECS task overrides on its own {@code RunTask} call (see
+ * {@code BuildMojo.buildTaskOverrideEnvironment}).
  *
  * <p>The agent is single-shot: it reads its one assigned cell, runs it, and exits. There is no
  * polling loop and no job store — the cell's parameters arrive directly as environment variables
@@ -29,7 +29,12 @@ import java.util.Optional;
  *   <caption>Recognised variables</caption>
  *   <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_MOUNT_ROOT}</td><td>{@code /mnt/build}</td>
- *       <td>Root of the S3 Files mount; the staging path resolves against it</td></tr>
+ *       <td>Root of the S3 Files/Mountpoint mount; ignored when {@code JOBRUNR_BUILD_S3_BUCKET} is
+ *           set, since inputs are downloaded to a local directory instead of read off a mount</td></tr>
+ *   <tr><td>{@code JOBRUNR_BUILD_S3_BUCKET}</td><td>none</td>
+ *       <td>Selects the agent's direct-S3-calls I/O mode when set: inputs are downloaded and
+ *           artifacts uploaded via plain S3 calls instead of a mount. See {@link S3Io}'s class
+ *           Javadoc for why both I/O modes exist</td></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_ID}</td><td>none, required</td>
  *       <td>Identifier shared by every cell of the triggering plugin invocation</td></tr>
  *   <tr><td>{@code JOBRUNR_BUILD_KIND}</td><td>none, required</td>
@@ -60,6 +65,7 @@ import java.util.Optional;
 public final class AgentConfig {
 
     static final String ENV_MOUNT_ROOT = "JOBRUNR_BUILD_MOUNT_ROOT";
+    static final String ENV_S3_BUCKET = "JOBRUNR_BUILD_S3_BUCKET";
     static final String ENV_BUILD_ID = "JOBRUNR_BUILD_ID";
     static final String ENV_BUILD_KIND = "JOBRUNR_BUILD_KIND";
     static final String ENV_ARCH = "JOBRUNR_BUILD_ARCH";
@@ -78,6 +84,7 @@ public final class AgentConfig {
     private static final String DEFAULT_ARG_FILE_NAME = "native-image.args";
 
     private final Path mountRoot;
+    private final String s3Bucket;
     private final String buildId;
     private final BuildKind buildKind;
     private final Architecture architecture;
@@ -90,11 +97,13 @@ public final class AgentConfig {
     private final List<String> nativeImageCommand;
     private final Path tempDirectory;
 
-    private AgentConfig(Path mountRoot, String buildId, BuildKind buildKind, Architecture architecture,
-                        String stagingRelativePath, String argFileName, String profileRelativePath,
-                        List<String> expectedArtifacts, List<String> extraNativeImageArgs,
-                        int timeoutMinutes, List<String> nativeImageCommand, Path tempDirectory) {
+    private AgentConfig(Path mountRoot, String s3Bucket, String buildId, BuildKind buildKind,
+                        Architecture architecture, String stagingRelativePath, String argFileName,
+                        String profileRelativePath, List<String> expectedArtifacts,
+                        List<String> extraNativeImageArgs, int timeoutMinutes,
+                        List<String> nativeImageCommand, Path tempDirectory) {
         this.mountRoot = mountRoot;
+        this.s3Bucket = s3Bucket;
         this.buildId = buildId;
         this.buildKind = buildKind;
         this.architecture = architecture;
@@ -123,6 +132,7 @@ public final class AgentConfig {
         Objects.requireNonNull(environment, "environment");
 
         Path mountRoot = path(environment, ENV_MOUNT_ROOT, DEFAULT_MOUNT_ROOT);
+        String s3Bucket = value(environment, ENV_S3_BUCKET);
         String buildId = requireValue(environment, ENV_BUILD_ID);
         BuildKind buildKind = buildKind(environment);
         Architecture architecture = architecture(environment, buildKind);
@@ -141,13 +151,23 @@ public final class AgentConfig {
         List<String> nativeImageCommand = command(environment);
         Path tempDirectory = path(environment, ENV_TEMP_DIR, DEFAULT_TEMP_DIR);
 
-        return new AgentConfig(mountRoot, buildId, buildKind, architecture, stagingRelativePath,
-                argFileName, profileRelativePath, expectedArtifacts, extraNativeImageArgs,
-                timeoutMinutes, nativeImageCommand, tempDirectory);
+        return new AgentConfig(mountRoot, s3Bucket, buildId, buildKind, architecture,
+                stagingRelativePath, argFileName, profileRelativePath, expectedArtifacts,
+                extraNativeImageArgs, timeoutMinutes, nativeImageCommand, tempDirectory);
     }
 
     public Path mountRoot() {
         return mountRoot;
+    }
+
+    /** S3 bucket for the agent's direct-S3-calls I/O mode, or {@code null} to use the mount. */
+    public String s3Bucket() {
+        return s3Bucket;
+    }
+
+    /** Whether {@code JOBRUNR_BUILD_S3_BUCKET} was set, selecting the direct-S3-calls I/O mode. */
+    public boolean usesDirectS3Io() {
+        return s3Bucket != null;
     }
 
     public String buildId() {
@@ -197,6 +217,7 @@ public final class AgentConfig {
     @Override
     public String toString() {
         return "AgentConfig{mountRoot=" + mountRoot
+                + ", s3Bucket=" + s3Bucket
                 + ", buildId=" + buildId
                 + ", buildKind=" + buildKind
                 + ", architecture=" + architecture

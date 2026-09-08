@@ -10,19 +10,32 @@ import cloud.plasticity.jobrunr.build.BuildFailedException;
 import cloud.plasticity.jobrunr.build.BuildLog;
 import cloud.plasticity.jobrunr.build.BuildResult;
 import cloud.plasticity.jobrunr.build.NativeImageBuildExecutor;
+import cloud.plasticity.jobrunr.build.StagingLayout;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import software.amazon.awssdk.services.s3.S3Client;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Entry point for the worker mounted into the builder image.
+ * Entry point for the worker mounted into (or, in direct-S3-calls mode, otherwise given credentials
+ * for) the builder image.
  *
  * <p>Single-shot: read the one matrix cell this task was launched for (via environment variables
- * set as ECS task overrides by the Step Functions state machine's {@code RunTask.sync} state, see
- * {@code docs/DESIGN.md} §5), run it, exit. No polling loop and no job store — there is nothing to
- * claim, since the state machine already decided which cell this specific task runs.
+ * set as ECS task overrides by {@code BuildMojo}'s own {@code RunTask} call), run it, exit. No
+ * polling loop and no job store — there is nothing to claim, since the plugin already decided which
+ * cell this specific task runs.
  *
- * <p>A Fargate Spot interruption simply kills this process; Step Functions' {@code Retry} on the
- * calling state relaunches a replacement task for the same cell, per §5.
+ * <p>Two I/O modes, selected by {@link AgentConfig#usesDirectS3Io()} (see {@link S3Io}'s class
+ * Javadoc for the tradeoffs): a mount-based mode, where {@link BuildEnvironment} reads and writes
+ * directly against an already-mounted {@code mountRoot}, and a direct-S3-calls mode, where this
+ * class downloads inputs to a local temp directory, runs the same {@link BuildEnvironment} against
+ * that local directory instead, and uploads produced artifacts back to S3 itself afterward.
+ *
+ * <p>A Fargate Spot interruption simply kills this process; {@code BuildMojo}'s own supervision loop
+ * relaunches a replacement task for the same cell.
  */
 public final class AgentMain {
 
@@ -45,11 +58,16 @@ public final class AgentMain {
             return;
         }
         LOG.info("Starting build agent with {}", config);
-        System.exit(run(config, BuildLog.defaultLog()));
+        BuildLog buildLog = BuildLog.defaultLog();
+        int exitCode = config.usesDirectS3Io()
+                ? runWithDirectS3Io(config, buildLog, S3Client.create())
+                : run(config, buildLog);
+        System.exit(exitCode);
     }
 
     /**
-     * Runs the one configured build cell to completion.
+     * Runs the one configured build cell to completion, against an already-mounted
+     * {@code mountRoot}.
      *
      * <p>Separated from {@link #main(String[])} so the whole agent path can be exercised without a
      * container.
@@ -61,6 +79,64 @@ public final class AgentMain {
                 .nativeImageCommand(config.nativeImageCommand())
                 .tempDirectory(config.tempDirectory())
                 .build();
+        return runAgainst(config, buildLog, environment);
+    }
+
+    /**
+     * Runs the one configured build cell to completion using the direct-S3-calls I/O mode:
+     * downloads staged inputs to a local temp directory, builds against that directory with the
+     * same {@link BuildEnvironment}/{@link NativeImageBuildExecutor} the mount mode uses unchanged,
+     * then uploads produced artifacts back to S3 under the same {@code output/} key the plugin's
+     * {@code S3ArtifactRetriever} already looks for — that class needs no changes for this mode.
+     *
+     * <p>Separated from {@link #main(String[])} so it can be exercised against a fake/local S3
+     * endpoint in tests, the same way {@link #run(AgentConfig, BuildLog)} is exercised without a
+     * container.
+     *
+     * @return process exit code
+     */
+    public static int runWithDirectS3Io(AgentConfig config, BuildLog buildLog, S3Client s3Client) {
+        S3Io s3Io = new S3Io(s3Client, config.s3Bucket());
+        // A synthetic local "mount root": BuildEnvironment.resolveStagingRoot() resolves
+        // stagingRelativePath against whatever root it's given, so downloading straight into
+        // localMountRoot.resolve(stagingRelativePath) makes it land exactly where that resolution
+        // will independently look -- no path translation needed, and BuildEnvironment/
+        // NativeImageBuildExecutor run completely unaware this root is a temp download rather than
+        // an ECS mount.
+        Path localMountRoot =
+                config.tempDirectory().resolve("s3-staging").resolve(config.buildId());
+        Path localStagingDir = localMountRoot.resolve(config.stagingRelativePath());
+        try {
+            s3Io.downloadStagingDirectory(config.stagingRelativePath(), localStagingDir);
+
+            BuildEnvironment environment = BuildEnvironment.builder(localMountRoot)
+                    .nativeImageCommand(config.nativeImageCommand())
+                    .tempDirectory(config.tempDirectory())
+                    .build();
+            int exitCode = runAgainst(config, buildLog, environment);
+
+            if (exitCode == EXIT_SUCCESS) {
+                Path localOutputDir = localStagingDir.resolve(StagingLayout.OUTPUT_DIR_NAME);
+                String outputKeyPrefix = joinKey(config.stagingRelativePath(),
+                        StagingLayout.OUTPUT_DIR_NAME);
+                s3Io.uploadOutputDirectory(localOutputDir, outputKeyPrefix);
+            } else {
+                LOG.info("Build did not succeed (exit {}); skipping artifact upload. The agent's own "
+                        + "log output above (captured by CloudWatch Logs) is the record of what "
+                        + "happened, same as it would be after a mount-mode failure.", exitCode);
+            }
+            return exitCode;
+        } catch (IOException e) {
+            LOG.error("Direct-S3-calls I/O failed for build {}: {}", config.buildId(), e.getMessage(),
+                    e);
+            return EXIT_BUILD_FAILED;
+        } finally {
+            deleteRecursively(localMountRoot);
+        }
+    }
+
+    private static int runAgainst(AgentConfig config, BuildLog buildLog,
+                                   BuildEnvironment environment) {
         BuildExecutor executor = new NativeImageBuildExecutor(environment);
 
         BuildCellRequest request = BuildCellRequest.builder()
@@ -87,8 +163,30 @@ public final class AgentMain {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.warn("Interrupted while building {} — likely a Spot interruption; "
-                    + "Step Functions will relaunch this cell", config.buildId());
+                    + "BuildMojo will relaunch this cell", config.buildId());
             return EXIT_BUILD_FAILED;
+        }
+    }
+
+    private static String joinKey(String prefix, String relativePath) {
+        return prefix.endsWith("/") ? prefix + relativePath : prefix + "/" + relativePath;
+    }
+
+    private static void deleteRecursively(Path root) {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (var stream = Files.walk(root)) {
+            stream.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException e) {
+                    LOG.debug("Failed to delete {} during local staging cleanup: {}", path,
+                            e.getMessage());
+                }
+            });
+        } catch (IOException e) {
+            LOG.debug("Failed to walk {} during local staging cleanup: {}", root, e.getMessage());
         }
     }
 }
