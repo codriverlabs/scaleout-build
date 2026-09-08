@@ -58,9 +58,15 @@ import software.constructs.Construct;
  *       (read + write, since the agent both reads staged inputs and writes its output through the
  *       mount), plus {@code s3:GetObject}/{@code s3:GetObjectVersion}/{@code s3:ListBucket} scoped
  *       to the staging bucket for direct S3 reads. The task role does not need broader S3 write
- *       access to the bucket directly — {@code S3StagingSink}/{@code S3ArtifactRetriever} run with
- *       the <em>plugin's</em> credentials, not the task's; the task only ever reads/writes through
- *       the S3 Files mount.
+ *       access to the bucket directly for the mount-based launch types —
+ *       {@code S3StagingSink}/{@code S3ArtifactRetriever} run with the <em>plugin's</em>
+ *       credentials, not the task's; the task only ever reads/writes through the S3 Files mount
+ *       there. A separate, narrowly scoped {@code s3:PutObject} statement is granted in addition,
+ *       specifically for {@code aws-ecs.agentUsesDirectS3Io=true}: in that mode the agent uploads
+ *       produced artifacts itself, directly, under this role's own credentials, rather than
+ *       through a mount — see {@code createTaskRole}'s Javadoc and
+ *       {@code docs/PURE_ECS_ALTERNATIVE.md}'s "agent's own direct S3 calls" section for why this
+ *       is a genuinely separate requirement from the S3 Files prerequisites above it.
  * </ul>
  */
 public class BuildTestInfraStack extends Stack {
@@ -222,9 +228,12 @@ public class BuildTestInfraStack extends Stack {
     }
 
     /**
-     * The ECS task role's two-part policy, matching AWS's "Prerequisites for S3 Files"
-     * documentation exactly (see the class javadoc for why the task role doesn't also need direct
-     * S3 write access to the bucket).
+     * The ECS task role's policy: the two-part S3 Files policy matching AWS's "Prerequisites for
+     * S3 Files" documentation exactly (see the class javadoc for why the task role doesn't also
+     * need direct S3 write access to the bucket <em>for the mount-based launch types</em>), plus a
+     * separate {@code s3:PutObject} statement needed only when {@code aws-ecs.agentUsesDirectS3Io}
+     * is enabled -- see the class javadoc's third bullet for exactly why this is a genuinely new
+     * requirement, not already covered by the S3 Files policy above it.
      */
     private Role createTaskRole(Bucket stagingBucket) {
         Role taskRole = Role.Builder.create(this, "TaskRole")
@@ -243,6 +252,20 @@ public class BuildTestInfraStack extends Stack {
                 .effect(Effect.ALLOW)
                 .actions(List.of("s3:ListBucket"))
                 .resources(List.of(stagingBucket.getBucketArn()))
+                .build());
+        // Only needed for aws-ecs.agentUsesDirectS3Io=true: S3Io.uploadOutputDirectory() calls
+        // PutObject directly from inside the container, under this role's credentials, rather than
+        // writing through the S3 Files mount the way the mount-based modes do (where the *agent's*
+        // writes go through the mount, and S3StagingSink/S3ArtifactRetriever's own S3 writes run
+        // under the plugin's credentials, not this role's). Granted unconditionally rather than
+        // gated behind a stack parameter: it's a narrow, object-scoped permission addition on a
+        // disposable test bucket, and keeping both mount-based and direct-S3-calls testing possible
+        // against the same deployed stack is more useful than minimizing this one extra statement.
+        taskRole.addToPolicy(PolicyStatement.Builder.create()
+                .sid("S3ObjectWriteAccessForDirectS3IoMode")
+                .effect(Effect.ALLOW)
+                .actions(List.of("s3:PutObject"))
+                .resources(List.of(stagingBucket.arnForObjects("*")))
                 .build());
         return taskRole;
     }

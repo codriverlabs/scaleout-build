@@ -64,7 +64,43 @@ class BuildTestInfraStackTest {
                         Map.of("Sid", "S3ObjectReadAccess", "Effect", "Allow",
                                 "Action", java.util.List.of("s3:GetObject", "s3:GetObjectVersion")),
                         Map.of("Sid", "S3BucketListAccess", "Effect", "Allow",
-                                "Action", "s3:ListBucket")))));
+                                "Action", "s3:ListBucket"),
+                        Map.of("Sid", "S3ObjectWriteAccessForDirectS3IoMode", "Effect", "Allow",
+                                "Action", "s3:PutObject")))));
+    }
+
+    @Test
+    void taskRoleS3PutObjectPermissionIsScopedToTheStagingBucketObjectsOnly() {
+        Template template = synthesize();
+        // Regression guard against a future edit accidentally widening this to the bucket ARN
+        // itself (bucket-level, not object-level) or to "*": scans the actual synthesized policy
+        // document for the statement by its Sid, then checks its Resource is the same
+        // arnForObjects("*")-shaped Fn::Join every other object-scoped statement in this stack
+        // uses (S3ObjectReadAccess), not the bucket-level ARN S3BucketListAccess uses.
+        Map<String, Map<String, Object>> policies = template.findResources("AWS::IAM::Policy");
+        boolean foundCorrectlyScopedStatement = policies.values().stream()
+                .map(resource -> (Map<String, Object>) resource.get("Properties"))
+                .map(properties -> (Map<String, Object>) properties.get("PolicyDocument"))
+                .flatMap(doc -> ((java.util.List<Map<String, Object>>) doc.get("Statement")).stream())
+                .filter(statement -> "S3ObjectWriteAccessForDirectS3IoMode"
+                        .equals(statement.get("Sid")))
+                .anyMatch(statement -> isObjectScopedResource(statement.get("Resource")));
+        assertThat(foundCorrectlyScopedStatement).isTrue();
+    }
+
+    /**
+     * True for a {@code Resource} value shaped like {@code arnForObjects("*")}'s synthesized
+     * {@code Fn::Join} (ends in {@code "/*"}), false for a bare bucket ARN reference or a wildcard
+     * resource string.
+     */
+    @SuppressWarnings("unchecked")
+    private static boolean isObjectScopedResource(Object resource) {
+        if (!(resource instanceof Map<?, ?> map) || !map.containsKey("Fn::Join")) {
+            return false;
+        }
+        java.util.List<Object> join = (java.util.List<Object>) map.get("Fn::Join");
+        java.util.List<Object> parts = (java.util.List<Object>) join.get(1);
+        return "/*".equals(parts.get(parts.size() - 1));
     }
 
     @Test

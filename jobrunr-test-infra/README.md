@@ -27,9 +27,13 @@ architecture, and not part of the plugin's release artifact.
   two-part policy AWS's "Prerequisites for S3 Files" documentation specifies:
   `AmazonS3FilesClientFullAccess` (mount + read + write against the file system) plus a separate
   scoped inline policy granting `s3:GetObject`/`s3:GetObjectVersion`/`s3:ListBucket` directly on the
-  staging bucket. The task role does **not** get broader S3 write access to the bucket — the
-  plugin's own credentials do the direct S3 staging/retrieval (`S3StagingSink`/
-  `S3ArtifactRetriever`); the task only ever reads/writes through the S3 Files mount.
+  staging bucket. For the mount-based launch types, the task role does **not** need broader S3
+  write access to the bucket — the plugin's own credentials do the direct S3 staging/retrieval
+  (`S3StagingSink`/`S3ArtifactRetriever`); the task only ever reads/writes through the S3 Files
+  mount. A third, narrowly scoped statement grants `s3:PutObject` on the bucket's objects in
+  addition, specifically for `aws-ecs.agentUsesDirectS3Io=true`: in that mode the agent uploads
+  produced artifacts itself, directly, under this role's own credentials — see
+  `docs/PURE_ECS_ALTERNATIVE.md`'s "agent's own direct S3 calls" section for the full tradeoff.
 
 Every resource is tagged for easy teardown (`RemovalPolicy.DESTROY`, `autoDeleteObjects`/
 `emptyOnDelete` on the bucket/repository) — this stack is meant to be deployed, used for one or a

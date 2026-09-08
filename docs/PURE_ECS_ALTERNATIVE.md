@@ -134,14 +134,12 @@ kept rather than one replacing the other:
   than being read/written lazily through a FUSE-backed mount that only transfers what
   `native-image` actually touches. For a large classpath this mode downloads all of it upfront
   even if only some of it is read.
-- **A genuinely new IAM requirement, not yet provisioned anywhere**: the task role needs its own
+- **A genuinely new IAM requirement, now provisioned**: the task role needs its own
   `s3:GetObject`/`s3:ListBucket` (to download inputs) and `s3:PutObject` (to upload artifacts) on
-  the staging bucket. `jobrunr-test-infra`'s CDK stack's task role today grants only
-  `s3:GetObject`/`s3:GetObjectVersion`/`s3:ListBucket` — deliberately no write access, since
-  `S3StagingSink`/`S3ArtifactRetriever` run under the *plugin's* credentials, not the task's, in
-  the mount-based modes. Enabling `agentUsesDirectS3Io` against that stack's role as it stands
-  today would fail every upload with `AccessDenied` — this is a known, flagged gap, not
-  automated yet.
+  the staging bucket. `jobrunr-test-infra`'s CDK stack's task role grants the read/list pair
+  already (needed for the mount-based modes' own prerequisites) plus a separate, narrowly scoped
+  `s3:PutObject` statement added specifically for this mode — deliberately unconditional rather
+  than gated behind a stack parameter, so the same deployed stack can test either I/O mode.
 - Verified for real, end to end, against a live S3-protocol server (SeaweedFS, via Testcontainers,
   not a same-vendor emulator): `S3IoTest` and `AgentMainDirectS3IoTest` in `jobrunr-build-agent`
   cover download-preserves-structure, upload-preserves-structure, the full
