@@ -15,7 +15,6 @@ import java.util.Objects;
  * <p>Layout:
  * <pre>
  * cas/{sha256}                              content-addressed blobs, shared across builds, kinds and architectures
- * agent/{version}/agent.jar                 the worker jar mounted into the builder container
  * builds/{buildId}/{buildKind}/{arch}/      staging root for one matrix cell, and the process working directory
  *     native-image.args
  *     &lt;runner&gt;.jar
@@ -37,24 +36,20 @@ public final class StagingLayout {
     public static final String DEFAULT_ARGS_FILE_NAME = "native-image.args";
     public static final String OUTPUT_DIR_NAME = "output";
     public static final String LIB_DIR_NAME = "lib";
-    public static final String AGENT_JAR_NAME = "agent.jar";
 
     private static final String DEFAULT_BUILDS_PREFIX = "builds";
     private static final String DEFAULT_CAS_PREFIX = "cas";
-    private static final String DEFAULT_AGENT_PREFIX = "agent";
 
     private final String buildsPrefix;
     private final String casPrefix;
-    private final String agentPrefix;
 
-    public StagingLayout(String buildsPrefix, String casPrefix, String agentPrefix) {
+    public StagingLayout(String buildsPrefix, String casPrefix) {
         this.buildsPrefix = normalizePrefix(buildsPrefix, DEFAULT_BUILDS_PREFIX);
         this.casPrefix = normalizePrefix(casPrefix, DEFAULT_CAS_PREFIX);
-        this.agentPrefix = normalizePrefix(agentPrefix, DEFAULT_AGENT_PREFIX);
     }
 
     public static StagingLayout defaults() {
-        return new StagingLayout(DEFAULT_BUILDS_PREFIX, DEFAULT_CAS_PREFIX, DEFAULT_AGENT_PREFIX);
+        return new StagingLayout(DEFAULT_BUILDS_PREFIX, DEFAULT_CAS_PREFIX);
     }
 
     /** Prefix holding everything for one build, across all architectures. */
@@ -84,14 +79,6 @@ public final class StagingLayout {
             throw new IllegalArgumentException("sha256Hex must not be blank");
         }
         return casPrefix + "/" + sha256Hex;
-    }
-
-    /** Key of the mounted agent jar for a given agent version. */
-    public String agentJarKey(String agentVersion) {
-        if (agentVersion == null || agentVersion.isBlank()) {
-            throw new IllegalArgumentException("agentVersion must not be blank");
-        }
-        return agentPrefix + "/" + agentVersion + "/" + AGENT_JAR_NAME;
     }
 
     private static String requireId(String buildId) {

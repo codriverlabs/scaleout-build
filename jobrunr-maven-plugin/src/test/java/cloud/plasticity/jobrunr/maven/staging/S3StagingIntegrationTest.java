@@ -112,21 +112,6 @@ class S3StagingIntegrationTest {
     }
 
     @Test
-    void uploadsTheAgentJarOnlyOnce(@TempDir Path dir) throws IOException {
-        Path agentJar = dir.resolve("agent.jar");
-        Files.writeString(agentJar, "fake-agent-jar-bytes");
-
-        S3StagingSink sink = new S3StagingSink(s3Client, BUCKET);
-
-        boolean firstUpload = sink.ensureAgentJarUploaded(agentJar, "1.0.0-test");
-        boolean secondUpload = sink.ensureAgentJarUploaded(agentJar, "1.0.0-test");
-
-        assertThat(firstUpload).isTrue();
-        assertThat(secondUpload).isFalse();
-        assertObjectExists(StagingLayout.defaults().agentJarKey("1.0.0-test"));
-    }
-
-    @Test
     void retrievesAnExpectedArtifactByName(@TempDir Path destinationDir) {
         String key = "builds/build-3/native/x86_64/output/my-app";
         s3Client.putObject(b -> b.bucket(BUCKET).key(key), RequestBody.fromString("binary-content"));

@@ -44,10 +44,10 @@ import software.amazon.awssdk.services.ecs.model.Volume;
  *
  * <p>The task definition carries no per-build environment variables — those (build kind,
  * architecture, staging paths, the {@code .iprof} path for {@code NATIVE_PGO_OPTIMIZE}) are supplied
- * per-cell as ECS task overrides by the Step Functions state machine's {@code RunTask.sync} state
- * (see {@code docs/DESIGN.md} §5), not baked into the definition itself. That is what lets one task
- * definition per (build kind, architecture) combination serve every build, rather than needing a new
- * revision per invocation.
+ * per-cell as ECS task overrides by {@code BuildMojo}'s own {@code RunTask} call (via
+ * {@link EcsTaskLauncher}, see {@code BuildMojo.buildTaskOverrideEnvironment}), not baked into the
+ * definition itself. That is what lets one task definition per (build kind, architecture)
+ * combination serve every build, rather than needing a new revision per invocation.
  */
 public final class TaskDefinitionRegistrar {
 

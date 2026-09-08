@@ -110,20 +110,6 @@ public final class S3StagingSink implements StagingSink {
         return alreadyPresent ? 0 : fileSize;
     }
 
-    /** Uploads the container agent jar for {@code agentVersion} if not already present. */
-    public boolean ensureAgentJarUploaded(Path agentJarPath, String agentVersion) throws IOException {
-        Objects.requireNonNull(agentJarPath, "agentJarPath");
-        requireNonBlank(agentVersion, "agentVersion");
-        String key = layout.agentJarKey(agentVersion);
-        if (objectExists(key)) {
-            LOG.debug("Agent jar for version {} already present at {}", agentVersion, key);
-            return false;
-        }
-        LOG.info("Uploading agent jar for version {} to {}", agentVersion, key);
-        putObject(key, RequestBody.fromFile(agentJarPath));
-        return true;
-    }
-
     private boolean objectExists(String key) {
         try {
             s3Client.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
