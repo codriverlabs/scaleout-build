@@ -15,12 +15,7 @@ name: Build and push agent image
 
 on:
   push:
-    # TEMPORARY: feature/pure-ecs-build-matrix is added here solely so this workflow can be
-    # exercised for real before it merges to main (GitHub Actions only discovers/registers
-    # workflow_dispatch-triggered workflows from files already on the default branch, so
-    # push-to-this-branch is the only way to get a real run pre-merge). Remove this branch entry
-    # once verified and/or once this branch merges to main.
-    branches: [main, feature/pure-ecs-build-matrix]
+    branches: [main]
     paths:
       - 'jobrunr-build-agent/**'
       - 'jobrunr-build-shared/**'
