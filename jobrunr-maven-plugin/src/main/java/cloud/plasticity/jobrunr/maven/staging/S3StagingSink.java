@@ -19,8 +19,6 @@ import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
-import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
-import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import org.slf4j.Logger;
@@ -86,9 +84,26 @@ public final class S3StagingSink implements StagingSink {
      * Uploads {@code file} into the content-addressed store if not already present, then makes a
      * server-side copy at {@code destinationKey}.
      *
-     * @return bytes actually uploaded: the file's size if this is the first time this content has
-     *         been seen, or zero if the blob already existed and only the (free, server-side) copy
-     *         was needed
+     * <p>Uses S3's own conditional-write support ({@code If-None-Match: *} on {@code PutObject},
+     * GA since August 2024 — confirmed against AWS's own conditional-writes documentation, not
+     * assumed) rather than a check-then-act {@code HeadObject}-then-{@code PutObject} pair. That
+     * matters under concurrency: with two separate calls (one to check, one to act), two callers
+     * racing to stage the very same not-yet-uploaded content can both observe "not present yet"
+     * and both perform a full upload — S3 accepting both writes is harmless (they write identical
+     * bytes to the same content-addressed key), but it silently defeats the dedup this store
+     * exists for, and neither the caller's "bytes transferred" accounting nor its "was this a
+     * cache hit" signal is accurate anymore. A single conditional {@code PutObject} closes that
+     * window atomically and cross-process (not just within one JVM — a per-process/in-memory lock
+     * would do nothing for two separate {@code mvn} invocations racing against the same shared
+     * bucket): S3 guarantees "the first write operation to finish succeeds… [and] fails subsequent
+     * writes with a 412 Precondition Failed response" for the same key, so at most one caller ever
+     * actually uploads, and every other concurrent or later caller for the same content reliably
+     * observes the failure and treats it as a cache hit.
+     *
+     * @return bytes actually uploaded: the file's size if this call performed the real upload
+     *         (S3 accepted the conditional {@code PutObject}), or zero if the blob already existed
+     *         — whether from an earlier build entirely or from another caller racing for the same
+     *         content right now — and only the (free, server-side) copy was needed
      */
     private long stageThroughContentAddressedStore(StagedFile file, String destinationKey)
             throws IOException {
@@ -96,31 +111,41 @@ public final class S3StagingSink implements StagingSink {
         String casKey = layout.casKey(sha256Hex);
         long fileSize = Files.size(file.source());
 
-        boolean alreadyPresent = objectExists(casKey);
-        if (!alreadyPresent) {
-            LOG.debug("Uploading new blob {} ({} bytes) for {}", casKey, fileSize,
+        boolean uploaded = putIfAbsent(casKey, RequestBody.fromFile(file.source()));
+        if (uploaded) {
+            LOG.debug("Uploaded new blob {} ({} bytes) for {}", casKey, fileSize,
                     file.relativePath());
-            putObject(casKey, RequestBody.fromFile(file.source()));
         } else {
-            LOG.debug("Blob {} already present, skipping upload for {}", casKey,
-                    file.relativePath());
+            LOG.debug("Blob {} already present (uploaded by this call or a concurrent one), "
+                    + "skipping upload for {}", casKey, file.relativePath());
         }
 
         copyObject(casKey, destinationKey);
-        return alreadyPresent ? 0 : fileSize;
+        return uploaded ? fileSize : 0;
     }
 
-    private boolean objectExists(String key) {
+    /**
+     * Attempts a conditional {@code PutObject} with {@code If-None-Match: *}, succeeding only if
+     * no object exists at {@code key} yet.
+     *
+     * @return {@code true} if this call's upload was the one S3 accepted, {@code false} if an
+     *         object already existed at {@code key} (S3 responded {@code 412 Precondition
+     *         Failed}), whether uploaded by an earlier, unrelated call or by another caller racing
+     *         for the same key right now
+     */
+    private boolean putIfAbsent(String key, RequestBody body) throws IOException {
         try {
-            s3Client.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
+            s3Client.putObject(
+                    PutObjectRequest.builder().bucket(bucket).key(key).ifNoneMatch("*").build(),
+                    body);
             return true;
-        } catch (NoSuchKeyException e) {
-            return false;
         } catch (S3Exception e) {
-            if (e.statusCode() == 404) {
+            if (e.statusCode() == 412) {
                 return false;
             }
-            throw e;
+            throw new IOException("Failed to conditionally upload s3://" + bucket + "/" + key, e);
+        } catch (SdkException e) {
+            throw new IOException("Failed to conditionally upload s3://" + bucket + "/" + key, e);
         }
     }
 

@@ -32,11 +32,29 @@ the derived-mode path would for any given project.
 mechanism.** `S3StagingSink.stageThroughContentAddressedStore()`:
 
 1. SHA-256-hashes each classpath jar locally.
-2. Checks `cas/{sha256}` via `HeadObject`. If that exact content exists anywhere in the bucket
-   already (from *any* prior build, any project, any architecture), **no upload happens** — zero
-   bytes transferred.
+2. Attempts a conditional `PutObject` to `cas/{sha256}` with `If-None-Match: *` (S3's own
+   conditional-write support, GA since August 2024 — confirmed against AWS's own
+   conditional-writes documentation, not assumed). If that exact content exists anywhere in the
+   bucket already (from *any* prior build, any project, any architecture), S3 rejects the write
+   with `412 Precondition Failed` and **no upload happens** — zero bytes transferred; otherwise
+   the upload succeeds and this call becomes the one that populated that key.
 3. Either way, a server-side `CopyObject` materializes that blob into the build's own
    `builds/{buildId}/{kind}/{arch}/lib/` key — free, no data movement, S3-internal reference only.
+
+**This is deliberately not a check-then-act `HeadObject`-then-`PutObject` pair**, which would have
+a real race window under concurrency: two callers racing to stage the very same not-yet-uploaded
+content could both observe "not present yet" and both perform a full upload — S3 accepting both
+writes is harmless (both write identical bytes to the same content-addressed key), but it silently
+defeats the dedup this store exists for. A single conditional `PutObject` closes that window
+atomically, and — unlike an in-process lock — cross-process too: S3 guarantees "the first write
+operation to finish succeeds… [and] fails subsequent writes with a 412 Precondition Failed
+response" for the same key, so at most one caller ever actually uploads, no matter how many
+processes or JVMs are racing. Verified for real, not just reasoned about: `S3StagingIntegrationTest`
+runs four concurrent, `CyclicBarrier`-synchronized "cells" (mirroring a realistic single
+invocation's matrix — `NATIVE`/`NATIVE_PGO_INSTRUMENT`/`NATIVE_PGO_OPTIMIZE` for one architecture
+plus `NATIVE` for a second) all racing to stage the same shared classpath jars for the first time,
+against SeaweedFS's real S3 gateway, and asserts the aggregate bytes transferred across all four
+equals exactly one copy of the shared content plus each cell's own unique argfile — not more.
 
 The generated `native-image.args` file is the one thing *not* deduplicated — uploaded fresh, in
 full, every build. It's small (a few KB at most), so this is a deliberate simplification.

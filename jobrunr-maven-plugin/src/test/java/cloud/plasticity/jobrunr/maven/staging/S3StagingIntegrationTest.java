@@ -6,6 +6,7 @@ package cloud.plasticity.jobrunr.maven.staging;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import cloud.plasticity.jobrunr.build.Architecture;
+import cloud.plasticity.jobrunr.build.BuildKind;
 import cloud.plasticity.jobrunr.build.StagingLayout;
 import cloud.plasticity.jobrunr.maven.planner.NativeImageInputPlan;
 import cloud.plasticity.jobrunr.maven.planner.StagedFile;
@@ -13,9 +14,17 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -112,6 +121,98 @@ class S3StagingIntegrationTest {
     }
 
     @Test
+    void deduplicatesTheSameClasspathAcrossFourConcurrentCellsRacingForTheFirstUpload()
+            throws Exception {
+        // Simulates a realistic single plugin invocation's matrix: four cells that would really
+        // share the same resolved classpath -- NATIVE/PGO_INSTRUMENT/PGO_OPTIMIZE for one
+        // architecture are independently-triggerable builds of the same project (see BuildKind's
+        // own class Javadoc), and the same project's classpath doesn't change by target
+        // architecture either. Each cell still gets its own staging prefix and its own generated
+        // argfile content (real build-kind-specific native-image flags aren't identical either),
+        // exactly like BuildMojo.runRemoteCells actually assembles.
+        //
+        // Deliberately staged through *separate* S3StagingSink instances (rather than one shared
+        // instance called from many threads) -- the class itself is stateless per call, so a
+        // shared-vs-per-cell instance should behave identically, and using separate instances is a
+        // closer match to how superviseAllCellsConcurrently's per-cell threads each work against
+        // shared AWS clients but don't share any sink-side cache.
+        String dependencyContent = "shared-dependency-bytes-" + "x".repeat(4096); // larger payload
+        String appContent = "shared-app-bytes-" + "y".repeat(1024);
+        Path dependency = Files.createTempFile("dep", ".jar");
+        Path app = Files.createTempFile("app", ".jar");
+        Files.writeString(dependency, dependencyContent);
+        Files.writeString(app, appContent);
+
+        record Cell(BuildKind buildKind, Architecture architecture, String argfileContent) {
+        }
+        List<Cell> cells = List.of(
+                new Cell(BuildKind.NATIVE, Architecture.X86_64, "-cp\napp.jar:lib/dep.jar\n-o\noutput/app\n"),
+                new Cell(BuildKind.NATIVE_PGO_INSTRUMENT, Architecture.X86_64,
+                        "-cp\napp.jar:lib/dep.jar\n--pgo-instrument\n-o\noutput/app\n"),
+                new Cell(BuildKind.NATIVE_PGO_OPTIMIZE, Architecture.X86_64,
+                        "-cp\napp.jar:lib/dep.jar\n--pgo=default.iprof\n-o\noutput/app\n"),
+                new Cell(BuildKind.NATIVE, Architecture.ARM64, "-cp\napp.jar:lib/dep.jar\n-o\noutput/app\n"));
+
+        // A CyclicBarrier forces all four threads to call stage() at the same instant rather than
+        // hoping timing lines up -- this maximises the chance of exposing a real race in the
+        // HeadObject-then-PutObject dedup check (two threads both observing "not present yet" for
+        // the same not-yet-uploaded content and both uploading), rather than the test passing only
+        // because one thread happened to finish before another started.
+        CyclicBarrier barrier = new CyclicBarrier(cells.size());
+        ExecutorService executor = Executors.newFixedThreadPool(cells.size());
+        try {
+            List<Future<Long>> futures = cells.stream().map(cell -> executor.submit(() -> {
+                NativeImageInputPlan plan = NativeImageInputPlan.generated(
+                        List.of(new StagedFile("app.jar", app),
+                                new StagedFile("lib/dep.jar", dependency)),
+                        cell.argfileContent(), List.of("app"));
+                S3StagingSink sink = new S3StagingSink(s3Client, BUCKET);
+                String stagingPath = StagingLayout.defaults()
+                        .stagingPath("build-concurrent", cell.buildKind(), cell.architecture());
+                barrier.await(10, TimeUnit.SECONDS);
+                return sink.stage(plan, stagingPath);
+            })).toList();
+
+            long totalTransferred = 0;
+            for (Future<Long> future : futures) {
+                totalTransferred += future.get(30, TimeUnit.SECONDS);
+            }
+
+            // The two shared blobs (dependency, app) must each have been uploaded exactly once in
+            // aggregate across all four cells, no matter how their HeadObject checks interleaved --
+            // this is the actual dedup claim under concurrency, not just "the final state looks
+            // right by luck". Each cell's own unique argfile content is never deduped (it's never
+            // seen before, by construction), so it's real, expected transfer on top of that.
+            long expectedArgfileBytes = cells.stream()
+                    .mapToLong(cell -> cell.argfileContent().getBytes(StandardCharsets.UTF_8).length)
+                    .sum();
+            long expectedSharedBlobBytes = Files.size(dependency) + Files.size(app);
+            assertThat(totalTransferred).isEqualTo(expectedSharedBlobBytes + expectedArgfileBytes);
+
+            // Every cell's own files still land at its own distinct prefix, with correct content --
+            // dedup must not mean "some cells silently missed their copy".
+            for (Cell cell : cells) {
+                String stagingPath = StagingLayout.defaults()
+                        .stagingPath("build-concurrent", cell.buildKind(), cell.architecture());
+                assertThat(getObjectAsString(stagingPath + "/app.jar")).isEqualTo(appContent);
+                assertThat(getObjectAsString(stagingPath + "/lib/dep.jar")).isEqualTo(dependencyContent);
+                assertThat(getObjectAsString(stagingPath + "/native-image.args"))
+                        .isEqualTo(cell.argfileContent());
+            }
+
+            // The underlying CAS blobs themselves are real, singular objects with the expected
+            // content -- not four half-written or conflicting copies under one key.
+            String dependencyCasKey =
+                    StagingLayout.defaults().casKey(sha256Hex(dependencyContent));
+            String appCasKey = StagingLayout.defaults().casKey(sha256Hex(appContent));
+            assertThat(getObjectAsString(dependencyCasKey)).isEqualTo(dependencyContent);
+            assertThat(getObjectAsString(appCasKey)).isEqualTo(appContent);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void retrievesAnExpectedArtifactByName(@TempDir Path destinationDir) {
         String key = "builds/build-3/native/x86_64/output/my-app";
         s3Client.putObject(b -> b.bucket(BUCKET).key(key), RequestBody.fromString("binary-content"));
@@ -142,6 +243,21 @@ class S3StagingIntegrationTest {
 
     private static void assertObjectExists(String key) {
         assertThat(s3Client.headObject(b -> b.bucket(BUCKET).key(key)).contentLength()).isNotNegative();
+    }
+
+    private static String getObjectAsString(String key) {
+        return s3Client.getObjectAsBytes(b -> b.bucket(BUCKET).key(key)).asUtf8String();
+    }
+
+    /** Mirrors {@code S3StagingSink}'s own content-hash computation, so the CAS key this test
+     * checks is derived the same way the sink itself derives it, not independently guessed. */
+    private static String sha256Hex(String content) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(content.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
     }
 
     private static <T> T assertDoesNotThrow(Callable<T> callable) {
