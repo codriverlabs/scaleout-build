@@ -122,6 +122,18 @@ class BuildTestInfraStackTest {
     }
 
     @Test
+    void clusterHasFargateAndFargateSpotCapacityProvidersAssociated() {
+        // Regression guard for a real, live-deployment-caught gap: without this, ECS rejects
+        // EcsTaskLauncher's default weighted FARGATE/FARGATE_SPOT capacityProviderStrategy with
+        // "capacity provider that is not associated with the cluster" -- confirmed by actually
+        // hitting the error running aws-ecs:build against a real deployment of this stack, not
+        // just reasoned about.
+        Template template = synthesize();
+        template.hasResourceProperties("AWS::ECS::ClusterCapacityProviderAssociations", Map.of(
+                "CapacityProviders", java.util.List.of("FARGATE", "FARGATE_SPOT")));
+    }
+
+    @Test
     void vpcHasDnsHostnamesAndDnsSupportEnabled() {
         Template template = synthesize();
         template.hasResourceProperties("AWS::EC2::VPC", Map.of(

@@ -141,6 +141,14 @@ public class BuildTestInfraStack extends Stack {
                 .vpc(vpc)
                 .clusterName("jobrunr-build-test")
                 .containerInsightsV2(software.amazon.awscdk.services.ecs.ContainerInsights.ENABLED)
+                // Required for aws-ecs.launchType=FARGATE (the default): the FARGATE/FARGATE_SPOT
+                // capacity providers are available to every account but are NOT associated with a
+                // cluster automatically just because it exists -- confirmed for real by hitting
+                // this exact gap deploying this stack and running aws-ecs:build against it: ECS
+                // rejected EcsTaskLauncher's capacityProviderStrategy with "capacity provider that
+                // is not associated with the cluster" until this flag was added. Also documented in
+                // AWS's own aws_ecs CDK README ("Fargate Capacity Providers" section).
+                .enableFargateCapacityProviders(true)
                 .build();
 
         Repository agentRepository = Repository.Builder.create(this, "AgentRepository")
