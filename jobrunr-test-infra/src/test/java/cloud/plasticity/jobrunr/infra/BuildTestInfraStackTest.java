@@ -15,12 +15,23 @@ import software.amazon.awscdk.assertions.Template;
  * effort exists to get right are actually present with the expected shape — a real regression
  * guard against, e.g., a future edit accidentally dropping the mount targets, the bucket's
  * required versioning, or the task role's S3 Files policy.
+ *
+ * <p>Covers both {@code includeS3Files} modes: the default-{@code true} tests below exercise the
+ * mount-based mechanism (the two-arg constructor's default, kept for source compatibility); the
+ * {@code includeS3Files=false} tests further down exercise the settled plain-S3 mechanism new
+ * deployments actually use — see {@link BuildTestInfraStack}'s class Javadoc.
  */
 class BuildTestInfraStackTest {
 
     private static Template synthesize() {
         App app = new App();
         BuildTestInfraStack stack = new BuildTestInfraStack(app, "TestStack", null);
+        return Template.fromStack(stack);
+    }
+
+    private static Template synthesizeWithoutS3Files() {
+        App app = new App();
+        BuildTestInfraStack stack = new BuildTestInfraStack(app, "TestStack", null, false);
         return Template.fromStack(stack);
     }
 
@@ -125,5 +136,59 @@ class BuildTestInfraStackTest {
         assertThat(outputs).containsKeys("ClusterArn", "SubnetIds", "SecurityGroupId",
                 "ExecutionRoleArn", "TaskRoleArn", "S3FilesFileSystemArn", "LogGroupName",
                 "S3Bucket", "AgentRepositoryUri", "Region");
+    }
+
+    // --- includeS3Files=false: the settled, plain-S3, direct-S3-calls staging mechanism ---
+
+    @Test
+    void withoutS3FilesProvisionsNoS3FilesResourcesAtAll() {
+        Template template = synthesizeWithoutS3Files();
+        template.resourceCountIs("AWS::S3Files::FileSystem", 0);
+        template.resourceCountIs("AWS::S3Files::MountTarget", 0);
+    }
+
+    @Test
+    void withoutS3FilesTaskRoleHasNoS3FilesManagedPolicyButKeepsScopedS3Permissions() {
+        Template template = synthesizeWithoutS3Files();
+        Map<String, Map<String, Object>> roles = template.findResources("AWS::IAM::Role");
+        boolean anyRoleHasS3FilesManagedPolicy = roles.values().stream()
+                .map(resource -> (Map<String, Object>) resource.get("Properties"))
+                .anyMatch(properties -> properties.containsKey("ManagedPolicyArns")
+                        && properties.get("ManagedPolicyArns").toString()
+                                .contains("AmazonS3FilesClientFullAccess"));
+        assertThat(anyRoleHasS3FilesManagedPolicy).isFalse();
+
+        // The scoped read/list/write statements are unaffected by includeS3Files -- they're needed
+        // either way (plain S3StagingSink/S3ArtifactRetriever reads, and the agent's own
+        // direct-S3-calls reads/writes), so this mirrors
+        // taskRoleHasS3FilesClientAccessAndScopedS3ReadPermissions's inline-policy assertion
+        // exactly, just without the managed-policy check.
+        template.hasResourceProperties("AWS::IAM::Policy", Map.of(
+                "PolicyDocument", Map.of("Statement", java.util.List.of(
+                        Map.of("Sid", "S3ObjectReadAccess", "Effect", "Allow",
+                                "Action", java.util.List.of("s3:GetObject", "s3:GetObjectVersion")),
+                        Map.of("Sid", "S3BucketListAccess", "Effect", "Allow",
+                                "Action", "s3:ListBucket"),
+                        Map.of("Sid", "S3ObjectWriteAccessForDirectS3IoMode", "Effect", "Allow",
+                                "Action", "s3:PutObject")))));
+    }
+
+    @Test
+    void withoutS3FilesStillCreatesTheClusterEcrRepositoryAndVersionedBucket() {
+        Template template = synthesizeWithoutS3Files();
+        template.resourceCountIs("AWS::ECS::Cluster", 1);
+        template.resourceCountIs("AWS::ECR::Repository", 1);
+        template.hasResourceProperties("AWS::S3::Bucket", Map.of(
+                "VersioningConfiguration", Map.of("Status", "Enabled")));
+    }
+
+    @Test
+    void withoutS3FilesOmitsTheS3FilesFileSystemArnOutputButKeepsEverythingElse() {
+        Template template = synthesizeWithoutS3Files();
+        Map<String, Map<String, Object>> outputs = template.findOutputs("*");
+        assertThat(outputs).containsKeys("ClusterArn", "SubnetIds", "SecurityGroupId",
+                "ExecutionRoleArn", "TaskRoleArn", "LogGroupName", "S3Bucket",
+                "AgentRepositoryUri", "Region");
+        assertThat(outputs).doesNotContainKey("S3FilesFileSystemArn");
     }
 }

@@ -34,39 +34,47 @@ import software.amazon.awscdk.services.s3files.CfnMountTarget;
 import software.constructs.Construct;
 
 /**
- * Minimal, disposable AWS environment for exercising {@code aws-ecs:build}'s {@code FARGATE}
- * launch type with S3 Files staging against real AWS.
+ * Minimal, disposable AWS environment for exercising {@code aws-ecs:build} against real AWS.
  *
  * <p>Deliberately narrow in scope — this is a test harness, not a production reference
  * architecture: public subnets with no NAT gateway (keeps cost near zero and avoids NAT setup;
  * requires {@code aws-ecs.assignPublicIp=true}), one AZ's worth of resources kept to the minimum
  * needed to run one task, one week of log retention, and every resource tagged/named so it's
  * obvious this stack is disposable. Everything a live {@code aws-ecs:build} invocation needs is
- * emitted as a {@link CfnOutput} — see {@code jobrunr-test-infra/README.md} for how to feed them
- * into the plugin's parameters.
+ * emitted as a {@link CfnOutput} — see {@code jobrunr-test-infra/README.md} for how to deploy and
+ * how to feed them into the plugin's parameters.
+ *
+ * <p>{@code includeS3Files} (constructor parameter, default {@code true} for the two-arg
+ * constructor for source compatibility with existing callers) controls which staging mechanism
+ * this stack provisions:
+ *
+ * <ul>
+ *   <li>{@code true}: provisions an S3 Files file system, its mount targets, and the task role's
+ *       {@code AmazonS3FilesClientFullAccess} managed policy — the mount-based staging mechanism
+ *       {@code aws-ecs.launchType=FARGATE}/{@code MANAGED_INSTANCES} use by default (see §0 of
+ *       {@code docs/PURE_ECS_ALTERNATIVE.md}).
+ *   <li>{@code false}: skips all of that — the settled staging design for new deployments of this
+ *       stack is plain S3 with content-hash dedup (see {@code docs/STAGING_ALTERNATIVES.md}),
+ *       either via the plugin's own {@code S3StagingSink}/{@code S3ArtifactRetriever} (which run
+ *       under the plugin's credentials regardless of this flag — they never depend on S3 Files
+ *       either way) paired with {@code aws-ecs.agentUsesDirectS3Io=true} for the agent's own
+ *       reads/writes too, avoiding mount infrastructure entirely.
+ * </ul>
  *
  * <p>Every IAM permission here traces to a specific, verified source rather than a guess:
  *
  * <ul>
- *   <li>The S3 Files service role's trust policy and permissions (S3 bucket access, plus the
- *       {@code events:*} permissions for the {@code DO-NOT-DELETE-S3-Files*} rules S3 Files
- *       creates to detect object changes) are copied directly from AWS's own {@code CfnFileSystem}
- *       CDK documentation example — not reconstructed from general S3/EventBridge knowledge.
- *   <li>The ECS task role's two-part policy (S3 Files client access, plus a separate inline S3
- *       read policy) matches AWS's "Prerequisites for S3 Files" documentation exactly: {@code
- *       AmazonS3FilesClientFullAccess} for connecting to and interacting with the file system
- *       (read + write, since the agent both reads staged inputs and writes its output through the
- *       mount), plus {@code s3:GetObject}/{@code s3:GetObjectVersion}/{@code s3:ListBucket} scoped
- *       to the staging bucket for direct S3 reads. The task role does not need broader S3 write
- *       access to the bucket directly for the mount-based launch types —
- *       {@code S3StagingSink}/{@code S3ArtifactRetriever} run with the <em>plugin's</em>
- *       credentials, not the task's; the task only ever reads/writes through the S3 Files mount
- *       there. A separate, narrowly scoped {@code s3:PutObject} statement is granted in addition,
- *       specifically for {@code aws-ecs.agentUsesDirectS3Io=true}: in that mode the agent uploads
- *       produced artifacts itself, directly, under this role's own credentials, rather than
- *       through a mount — see {@code createTaskRole}'s Javadoc and
- *       {@code docs/PURE_ECS_ALTERNATIVE.md}'s "agent's own direct S3 calls" section for why this
- *       is a genuinely separate requirement from the S3 Files prerequisites above it.
+ *   <li>When {@code includeS3Files} is {@code true}: the S3 Files service role's trust policy and
+ *       permissions (S3 bucket access, plus the {@code events:*} permissions for the
+ *       {@code DO-NOT-DELETE-S3-Files*} rules S3 Files creates to detect object changes) are
+ *       copied directly from AWS's own {@code CfnFileSystem} CDK documentation example — not
+ *       reconstructed from general S3/EventBridge knowledge. The ECS task role's two-part policy
+ *       (S3 Files client access, plus a separate inline S3 read policy) matches AWS's
+ *       "Prerequisites for S3 Files" documentation exactly.
+ *   <li>Regardless of {@code includeS3Files}: the task role always gets
+ *       {@code s3:GetObject}/{@code s3:GetObjectVersion}/{@code s3:ListBucket} scoped to the
+ *       staging bucket, plus a separate, narrowly scoped {@code s3:PutObject} statement — see
+ *       {@code createTaskRole}'s Javadoc for exactly which mode needs which permission and why.
  * </ul>
  */
 public class BuildTestInfraStack extends Stack {
@@ -74,7 +82,13 @@ public class BuildTestInfraStack extends Stack {
     private static final String CONTAINER_NAME = "jobrunr-build-agent";
     private static final String LOG_GROUP_NAME = "/jobrunr/build-agent";
 
+    /** Equivalent to {@code BuildTestInfraStack(scope, id, props, true)} for source compatibility. */
     public BuildTestInfraStack(Construct scope, String id, StackProps props) {
+        this(scope, id, props, true);
+    }
+
+    public BuildTestInfraStack(Construct scope, String id, StackProps props,
+                               boolean includeS3Files) {
         super(scope, id, props);
 
         Vpc vpc = Vpc.Builder.create(this, "Vpc")
@@ -82,7 +96,9 @@ public class BuildTestInfraStack extends Stack {
                 .natGateways(0)
                 // S3 Files mounting fails to resolve its DNS name without these -- confirmed as a
                 // real, distinct failure mode ("DNS name resolution fails") separate from security
-                // group misconfiguration, not assumed to already be CDK's default.
+                // group misconfiguration, not assumed to already be CDK's default. Harmless to keep
+                // enabled when includeS3Files is false too -- these are ordinary, sensible VPC
+                // defaults regardless of staging mechanism.
                 .enableDnsHostnames(true)
                 .enableDnsSupport(true)
                 .subnetConfiguration(List.of(software.amazon.awscdk.services.ec2.SubnetConfiguration
@@ -93,27 +109,33 @@ public class BuildTestInfraStack extends Stack {
                 .build();
 
         Bucket stagingBucket = Bucket.Builder.create(this, "StagingBucket")
-                // Required, not optional: S3 Files relies on object versions for consistency
-                // (confirmed against AWS's own CfnFileSystem CDK documentation example).
+                // Required, not optional, when includeS3Files is true: S3 Files relies on object
+                // versions for consistency (confirmed against AWS's own CfnFileSystem CDK
+                // documentation example). Kept on unconditionally rather than made conditional too
+                // -- versioning is a reasonable default for a staging bucket regardless, and this
+                // stack is disposable either way (autoDeleteObjects handles version cleanup).
                 .versioned(true)
                 .removalPolicy(RemovalPolicy.DESTROY)
                 .autoDeleteObjects(true)
                 .build();
 
-        CfnFileSystem fileSystem = createS3FilesFileSystem(stagingBucket);
-        SecurityGroup mountTargetSg = createMountTargets(vpc, fileSystem);
-
+        CfnFileSystem fileSystem = null;
         SecurityGroup taskSecurityGroup = SecurityGroup.Builder.create(this, "TaskSecurityGroup")
                 .vpc(vpc)
                 .description("Fargate task ENIs for aws-ecs:build test runs")
                 .allowAllOutbound(true)
                 .build();
-        // Mount target SG must accept inbound TCP 2049 from the task SG (confirmed as the exact,
-        // specific port S3 Files mounting uses -- "Connection timeout is the #1 mount failure",
-        // per AWS's own troubleshooting guidance -- not the transitEncryptionPort default (2999)
-        // seen in an unrelated task-definition example, which is a different setting entirely).
-        mountTargetSg.addIngressRule(Peer.securityGroupId(taskSecurityGroup.getSecurityGroupId()),
-                Port.tcp(2049), "NFS (2049) from the Fargate task security group");
+        if (includeS3Files) {
+            fileSystem = createS3FilesFileSystem(stagingBucket);
+            SecurityGroup mountTargetSg = createMountTargets(vpc, fileSystem);
+            // Mount target SG must accept inbound TCP 2049 from the task SG (confirmed as the
+            // exact, specific port S3 Files mounting uses -- "Connection timeout is the #1 mount
+            // failure", per AWS's own troubleshooting guidance -- not the transitEncryptionPort
+            // default (2999) seen in an unrelated task-definition example, which is a different
+            // setting entirely).
+            mountTargetSg.addIngressRule(Peer.securityGroupId(taskSecurityGroup.getSecurityGroupId()),
+                    Port.tcp(2049), "NFS (2049) from the Fargate task security group");
+        }
 
         Cluster cluster = Cluster.Builder.create(this, "Cluster")
                 .vpc(vpc)
@@ -139,7 +161,7 @@ public class BuildTestInfraStack extends Stack {
                         "service-role/AmazonECSTaskExecutionRolePolicy")))
                 .build();
 
-        Role taskRole = createTaskRole(stagingBucket);
+        Role taskRole = createTaskRole(stagingBucket, includeS3Files);
 
         List<ISubnet> publicSubnets = vpc.getPublicSubnets();
         String subnetIds = publicSubnets.stream().map(ISubnet::getSubnetId)
@@ -151,8 +173,10 @@ public class BuildTestInfraStack extends Stack {
                 .value(taskSecurityGroup.getSecurityGroupId()).build();
         CfnOutput.Builder.create(this, "ExecutionRoleArn").value(executionRole.getRoleArn()).build();
         CfnOutput.Builder.create(this, "TaskRoleArn").value(taskRole.getRoleArn()).build();
-        CfnOutput.Builder.create(this, "S3FilesFileSystemArn")
-                .value(fileSystem.getAttrFileSystemArn()).build();
+        if (includeS3Files) {
+            CfnOutput.Builder.create(this, "S3FilesFileSystemArn")
+                    .value(fileSystem.getAttrFileSystemArn()).build();
+        }
         CfnOutput.Builder.create(this, "LogGroupName").value(logGroup.getLogGroupName()).build();
         CfnOutput.Builder.create(this, "S3Bucket").value(stagingBucket.getBucketName()).build();
         CfnOutput.Builder.create(this, "AgentRepositoryUri")
@@ -228,19 +252,24 @@ public class BuildTestInfraStack extends Stack {
     }
 
     /**
-     * The ECS task role's policy: the two-part S3 Files policy matching AWS's "Prerequisites for
-     * S3 Files" documentation exactly (see the class javadoc for why the task role doesn't also
-     * need direct S3 write access to the bucket <em>for the mount-based launch types</em>), plus a
-     * separate {@code s3:PutObject} statement needed only when {@code aws-ecs.agentUsesDirectS3Io}
-     * is enabled -- see the class javadoc's third bullet for exactly why this is a genuinely new
-     * requirement, not already covered by the S3 Files policy above it.
+     * The ECS task role's policy. When {@code includeS3Files} is {@code true}, the S3 Files
+     * client managed policy is attached, matching AWS's "Prerequisites for S3 Files" documentation
+     * exactly (see the class Javadoc for why the task role doesn't also need direct S3 write
+     * access to the bucket <em>for the mount-based launch types</em>). Regardless of
+     * {@code includeS3Files}, the scoped read/list/write statements below are always granted: the
+     * read/list pair is needed either way (the plugin's own {@code S3StagingSink}/
+     * {@code S3ArtifactRetriever} never depend on S3 Files, and the agent's direct-S3-calls mode
+     * needs its own read access too), and the {@code s3:PutObject} statement is needed only for
+     * {@code aws-ecs.agentUsesDirectS3Io=true} — see its own comment for exactly why.
      */
-    private Role createTaskRole(Bucket stagingBucket) {
-        Role taskRole = Role.Builder.create(this, "TaskRole")
-                .assumedBy(new ServicePrincipal("ecs-tasks.amazonaws.com"))
-                .managedPolicies(List.of(
-                        ManagedPolicy.fromAwsManagedPolicyName("AmazonS3FilesClientFullAccess")))
-                .build();
+    private Role createTaskRole(Bucket stagingBucket, boolean includeS3Files) {
+        Role.Builder taskRoleBuilder = Role.Builder.create(this, "TaskRole")
+                .assumedBy(new ServicePrincipal("ecs-tasks.amazonaws.com"));
+        if (includeS3Files) {
+            taskRoleBuilder.managedPolicies(List.of(
+                    ManagedPolicy.fromAwsManagedPolicyName("AmazonS3FilesClientFullAccess")));
+        }
+        Role taskRole = taskRoleBuilder.build();
         taskRole.addToPolicy(PolicyStatement.Builder.create()
                 .sid("S3ObjectReadAccess")
                 .effect(Effect.ALLOW)
