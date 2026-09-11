@@ -30,6 +30,15 @@ import java.util.Objects;
  *       on the cluster, rather than through a capacity provider.
  * </ul>
  *
+ * <p><b>{@code agentUsesDirectS3Io=true} overrides all of the mount-related requirements above,
+ * for every launch type</b>: when the agent makes its own direct S3 calls instead of reading and
+ * writing through a mount, no mount infrastructure exists to require — {@code
+ * s3FilesFileSystemArn}/{@code s3FilesRootDirectory}/{@code s3FilesAccessPointArn}/{@code
+ * ec2HostMountPath} are all simply unused and may be {@code null} regardless of {@code
+ * launchType}. {@code capacityProviderName}'s requiredness is unaffected — that's an orthogonal,
+ * launch-type-driven capacity concern, not a staging-mechanism one. See {@code
+ * docs/PURE_ECS_ALTERNATIVE.md}'s "agent's own direct S3 calls" section for the full rationale.
+ *
  * @param launchType           which ECS compute model the task runs on
  * @param clusterArn           ECS cluster the tasks run in
  * @param subnetIds            subnets for the task's {@code awsvpc} network configuration
@@ -40,15 +49,19 @@ import java.util.Objects;
  * @param taskRoleArn          role the running container itself assumes (S3, S3 Files, etc.)
  * @param s3FilesFileSystemArn ARN of the pre-provisioned S3 Files file system, e.g.
  *                             {@code arn:aws:s3files:region:account:file-system/fs-xxxxx};
- *                             required for {@code FARGATE}/{@code MANAGED_INSTANCES}, must be
- *                             {@code null} for {@code EC2}
+ *                             required for {@code FARGATE}/{@code MANAGED_INSTANCES} unless
+ *                             {@code agentUsesDirectS3Io} is {@code true}, must be {@code null}
+ *                             for {@code EC2}
  * @param s3FilesRootDirectory optional root directory within the S3 Files file system, or
- *                             {@code null} to mount its root; unused for {@code EC2}
+ *                             {@code null} to mount its root; unused for {@code EC2} or when
+ *                             {@code agentUsesDirectS3Io} is {@code true}
  * @param s3FilesAccessPointArn optional S3 access point ARN scoping the mount, or {@code null};
- *                             unused for {@code EC2}
+ *                             unused for {@code EC2} or when {@code agentUsesDirectS3Io} is
+ *                             {@code true}
  * @param ec2HostMountPath     absolute path on the EC2 container instance where Mountpoint for
  *                             Amazon S3 has already been mounted by the instance's user-data;
- *                             required for {@code EC2}, must be {@code null} otherwise
+ *                             required for {@code EC2} unless {@code agentUsesDirectS3Io} is
+ *                             {@code true}, must be {@code null} otherwise
  * @param capacityProviderName name of the pre-provisioned capacity provider to target via
  *                             {@code capacityProviderStrategy}; required for
  *                             {@code MANAGED_INSTANCES}, optional for {@code EC2} ({@code null}
@@ -57,6 +70,8 @@ import java.util.Objects;
  *                             {@code FARGATE}/{@code FARGATE_SPOT} providers)
  * @param logGroupName         CloudWatch Logs group the agent's stdout/stderr is sent to
  * @param region               AWS region everything above lives in
+ * @param agentUsesDirectS3Io  whether the agent makes its own S3 calls instead of reading/writing
+ *                             through a mount — see the class Javadoc's override note above
  */
 public record EcsClusterSettings(
         EcsLaunchType launchType,
@@ -72,14 +87,16 @@ public record EcsClusterSettings(
         String ec2HostMountPath,
         String capacityProviderName,
         String logGroupName,
-        String region) {
+        String region,
+        boolean agentUsesDirectS3Io) {
 
     public EcsClusterSettings(EcsLaunchType launchType, String clusterArn, List<String> subnetIds,
                               List<String> securityGroupIds, boolean assignPublicIp,
                               String executionRoleArn, String taskRoleArn,
                               String s3FilesFileSystemArn, String s3FilesRootDirectory,
                               String s3FilesAccessPointArn, String ec2HostMountPath,
-                              String capacityProviderName, String logGroupName, String region) {
+                              String capacityProviderName, String logGroupName, String region,
+                              boolean agentUsesDirectS3Io) {
         this.launchType = Objects.requireNonNull(launchType, "launchType");
         this.clusterArn = requireNonBlank(clusterArn, "clusterArn");
         this.subnetIds = requireNonEmpty(subnetIds, "subnetIds");
@@ -89,8 +106,23 @@ public record EcsClusterSettings(
         this.taskRoleArn = requireNonBlank(taskRoleArn, "taskRoleArn");
         this.logGroupName = requireNonBlank(logGroupName, "logGroupName");
         this.region = requireNonBlank(region, "region");
+        this.agentUsesDirectS3Io = agentUsesDirectS3Io;
 
-        if (launchType.usesS3Files()) {
+        if (agentUsesDirectS3Io) {
+            // No mount infrastructure needed at all, on any launch type -- see the class Javadoc's
+            // override note. Still enforce the null-elsewhere direction (whichever fields the
+            // *other* branch would have nulled out) so a caller can't accidentally combine
+            // agentUsesDirectS3Io=true with, e.g., an EC2 host mount path that would then be
+            // silently ignored rather than rejected.
+            requireNull(s3FilesFileSystemArn, "s3FilesFileSystemArn", launchType);
+            requireNull(s3FilesRootDirectory, "s3FilesRootDirectory", launchType);
+            requireNull(s3FilesAccessPointArn, "s3FilesAccessPointArn", launchType);
+            requireNull(ec2HostMountPath, "ec2HostMountPath", launchType);
+            this.s3FilesFileSystemArn = null;
+            this.s3FilesRootDirectory = null;
+            this.s3FilesAccessPointArn = null;
+            this.ec2HostMountPath = null;
+        } else if (launchType.usesS3Files()) {
             this.s3FilesFileSystemArn = requireNonBlank(s3FilesFileSystemArn, "s3FilesFileSystemArn");
             this.s3FilesRootDirectory = s3FilesRootDirectory;
             this.s3FilesAccessPointArn = s3FilesAccessPointArn;

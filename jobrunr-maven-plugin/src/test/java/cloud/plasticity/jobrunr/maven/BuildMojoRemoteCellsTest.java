@@ -156,6 +156,10 @@ class BuildMojoRemoteCellsTest {
     @SuppressWarnings("unchecked")
     void setsTheS3BucketOverrideWhenDirectS3IoIsEnabled() throws Exception {
         setField(mojo, "agentUsesDirectS3Io", true);
+        // Direct-S3-calls mode needs no mount infrastructure at all -- clearing this proves
+        // EcsClusterSettings genuinely doesn't require it here anymore, rather than happening to
+        // pass only because setUp() already populated it for the mount-based default case.
+        setField(mojo, "s3FilesFileSystemArn", null);
         var captor = stubForOneSuccessfulLaunchAndCaptureRunTaskRequest();
 
         NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),

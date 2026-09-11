@@ -53,7 +53,8 @@ class TaskDefinitionRegistrarTest {
                 null,
                 null,
                 "/jobrunr/build-agent",
-                "us-east-1");
+                "us-east-1",
+                false);
         containerSettings = AgentContainerSettings.of(
                 "quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25", "4096", "16384");
     }
@@ -191,6 +192,40 @@ class TaskDefinitionRegistrarTest {
     }
 
     @Test
+    void directS3IoModeRegistersNoVolumeAndNoMountPointAtAll() {
+        EcsClusterSettings directS3IoSettings = new EcsClusterSettings(
+                EcsLaunchType.FARGATE,
+                "arn:aws:ecs:us-east-1:123456789012:cluster/jobrunr-build",
+                List.of("subnet-1", "subnet-2"), List.of("sg-1"), false,
+                "arn:aws:iam::123456789012:role/jobrunr-build-execution",
+                "arn:aws:iam::123456789012:role/jobrunr-build-task",
+                null, null, null, null, null, "/jobrunr/build-agent", "us-east-1", true);
+        when(ecsClient.describeTaskDefinition(any(java.util.function.Consumer.class)))
+                .thenThrow(ClientException.builder().message("not found").build());
+        when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
+                .thenReturn(RegisterTaskDefinitionResponse.builder()
+                        .taskDefinition(TaskDefinition.builder()
+                                .taskDefinitionArn("arn:...:task-definition/x:1").build())
+                        .build());
+
+        registrar.registerIfChanged(directS3IoSettings, containerSettings, BuildKind.NATIVE,
+                Architecture.X86_64);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(RegisterTaskDefinitionRequest.class);
+        verify(ecsClient).registerTaskDefinition(captor.capture());
+        RegisterTaskDefinitionRequest request = captor.getValue();
+
+        // No task-level volume, and no container mountPoints -- there is genuinely nothing to
+        // mount when the agent makes its own S3 calls (S3Io) instead of reading/writing through a
+        // mount. hasSize(0)/isEmpty rather than isNull, since the SDK builder may return an empty
+        // list rather than a null field either way -- this asserts the observable, meaningful
+        // outcome (no volumes present) regardless of which one it turns out to be.
+        assertThat(request.volumes()).isEmpty();
+        assertThat(request.containerDefinitions()).hasSize(1);
+        assertThat(request.containerDefinitions().get(0).mountPoints()).isEmpty();
+    }
+
+    @Test
     void managedInstancesUsesAnS3FilesVolumeAndTheManagedInstancesCompatibility() {
         EcsClusterSettings managedInstancesSettings = new EcsClusterSettings(
                 EcsLaunchType.MANAGED_INSTANCES,
@@ -199,7 +234,7 @@ class TaskDefinitionRegistrarTest {
                 "arn:aws:iam::123456789012:role/jobrunr-build-execution",
                 "arn:aws:iam::123456789012:role/jobrunr-build-task",
                 "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null, null,
-                "managed-instances-cp", "/jobrunr/build-agent", "us-east-1");
+                "managed-instances-cp", "/jobrunr/build-agent", "us-east-1", false);
         when(ecsClient.describeTaskDefinition(any(java.util.function.Consumer.class)))
                 .thenThrow(ClientException.builder().message("not found").build());
         when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))
@@ -236,7 +271,7 @@ class TaskDefinitionRegistrarTest {
                 "arn:aws:iam::123456789012:role/jobrunr-build-execution",
                 "arn:aws:iam::123456789012:role/jobrunr-build-task",
                 null, null, null,
-                "/mnt/build", "ec2-asg-cp", "/jobrunr/build-agent", "us-east-1");
+                "/mnt/build", "ec2-asg-cp", "/jobrunr/build-agent", "us-east-1", false);
         when(ecsClient.describeTaskDefinition(any(java.util.function.Consumer.class)))
                 .thenThrow(ClientException.builder().message("not found").build());
         when(ecsClient.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class)))

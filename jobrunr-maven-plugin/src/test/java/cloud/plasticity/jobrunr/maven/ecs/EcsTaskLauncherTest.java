@@ -55,7 +55,8 @@ class EcsTaskLauncherTest {
                 "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123",
                 null, null, null, null,
                 "/jobrunr/build-agent",
-                "us-east-1");
+                "us-east-1",
+                false);
     }
 
     private static EcsClusterSettings managedInstancesSettings() {
@@ -71,7 +72,8 @@ class EcsTaskLauncherTest {
                 null, null, null,
                 "managed-instances-cp",
                 "/jobrunr/build-agent",
-                "us-east-1");
+                "us-east-1",
+                false);
     }
 
     private static EcsClusterSettings ec2SettingsWithCapacityProvider() {
@@ -87,7 +89,8 @@ class EcsTaskLauncherTest {
                 "/mnt/build",
                 "ec2-asg-cp",
                 "/jobrunr/build-agent",
-                "us-east-1");
+                "us-east-1",
+                false);
     }
 
     private static EcsClusterSettings ec2SettingsWithoutCapacityProvider() {
@@ -103,7 +106,8 @@ class EcsTaskLauncherTest {
                 "/mnt/build",
                 null,
                 "/jobrunr/build-agent",
-                "us-east-1");
+                "us-east-1",
+                false);
     }
 
     @Test

@@ -488,7 +488,7 @@ public class BuildMojo extends AbstractMojo {
         EcsClusterSettings clusterSettings = new EcsClusterSettings(resolveLaunchType(), clusterArn,
                 subnetIds, securityGroupIds, assignPublicIp, executionRoleArn, taskRoleArn,
                 s3FilesFileSystemArn, s3FilesRootDirectory, s3FilesAccessPointArn, ec2HostMountPath,
-                capacityProviderName, logGroupName, region);
+                capacityProviderName, logGroupName, region, agentUsesDirectS3Io);
         AgentContainerSettings containerSettings =
                 new AgentContainerSettings(agentImageUri, agentCpu, agentMemory,
                         agentEphemeralStorageGiB);
@@ -708,12 +708,14 @@ public class BuildMojo extends AbstractMojo {
         if (isBlank(taskRoleArn)) {
             missing.add("aws-ecs.taskRoleArn");
         }
-        if (resolvedLaunchType.usesS3Files()) {
-            if (isBlank(s3FilesFileSystemArn)) {
-                missing.add("aws-ecs.s3FilesFileSystemArn");
+        if (!agentUsesDirectS3Io) {
+            if (resolvedLaunchType.usesS3Files()) {
+                if (isBlank(s3FilesFileSystemArn)) {
+                    missing.add("aws-ecs.s3FilesFileSystemArn");
+                }
+            } else if (isBlank(ec2HostMountPath)) {
+                missing.add("aws-ecs.ec2HostMountPath");
             }
-        } else if (isBlank(ec2HostMountPath)) {
-            missing.add("aws-ecs.ec2HostMountPath");
         }
         if (resolvedLaunchType == EcsLaunchType.MANAGED_INSTANCES && isBlank(capacityProviderName)) {
             missing.add("aws-ecs.capacityProviderName");

@@ -58,7 +58,7 @@ class EcsTaskSupervisorTest {
                 List.of("subnet-1"), List.of("sg-1"), false,
                 "arn:aws:iam::123456789012:role/exec", "arn:aws:iam::123456789012:role/task",
                 "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null, null, null,
-                "/jobrunr/build-agent", "us-east-1");
+                "/jobrunr/build-agent", "us-east-1", false);
         environment = List.of(KeyValuePair.builder().name("JOBRUNR_BUILD_ARCH").value("ARM64").build());
         logLines = new java.util.ArrayList<>();
 
@@ -246,7 +246,7 @@ class EcsTaskSupervisorTest {
                 List.of("subnet-1"), List.of("sg-1"), false,
                 "arn:aws:iam::123456789012:role/exec", "arn:aws:iam::123456789012:role/task",
                 "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null, null,
-                "managed-instances-cp", "/jobrunr/build-agent", "us-east-1");
+                "managed-instances-cp", "/jobrunr/build-agent", "us-east-1", false);
         when(ecsClient.runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class))).thenReturn(RunTaskResponse.builder()
                 .tasks(Task.builder().taskArn("arn:...:task/1").build()).build());
         when(ecsClient.describeTasks(any(Consumer.class))).thenReturn(DescribeTasksResponse.builder()

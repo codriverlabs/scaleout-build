@@ -153,18 +153,7 @@ public final class TaskDefinitionRegistrar {
                                 "awslogs-group", clusterSettings.logGroupName(),
                                 "awslogs-region", clusterSettings.region(),
                                 "awslogs-stream-prefix", LOG_STREAM_PREFIX))
-                        .build())
-                // Every launch type mounts the staging volume at the same container path the agent
-                // expects (AgentConfig's default JOBRUNR_BUILD_MOUNT_ROOT) -- without this, the
-                // `volumes` entry below declares the volume at the task level but never actually
-                // mounts it into the container, leaving the agent writing to an ordinary, empty,
-                // non-shared container-filesystem directory instead.
-                .mountPoints(MountPoint.builder()
-                        .sourceVolume(MOUNT_VOLUME_NAME)
-                        .containerPath(MOUNT_CONTAINER_PATH)
                         .build());
-
-        Volume mountVolume = buildMountVolume(clusterSettings);
 
         RegisterTaskDefinitionRequest.Builder requestBuilder = RegisterTaskDefinitionRequest.builder()
                 .family(family)
@@ -174,9 +163,25 @@ public final class TaskDefinitionRegistrar {
                 .memory(containerSettings.memory())
                 .executionRoleArn(clusterSettings.executionRoleArn())
                 .taskRoleArn(clusterSettings.taskRoleArn())
-                .containerDefinitions(containerDefinitionBuilder.build())
-                .volumes(mountVolume)
                 .tags(Tag.builder().key(CONFIG_HASH_TAG_KEY).value(configHash).build());
+
+        if (clusterSettings.agentUsesDirectS3Io()) {
+            // No mount at all -- the agent reads/writes S3 directly (see S3Io's class Javadoc), so
+            // there is nothing to declare a task-level volume for or mount into the container.
+            requestBuilder.containerDefinitions(containerDefinitionBuilder.build());
+        } else {
+            // Every mount-based launch type mounts the staging volume at the same container path
+            // the agent expects (AgentConfig's default JOBRUNR_BUILD_MOUNT_ROOT) -- without this,
+            // the `volumes` entry below declares the volume at the task level but never actually
+            // mounts it into the container, leaving the agent writing to an ordinary, empty,
+            // non-shared container-filesystem directory instead.
+            containerDefinitionBuilder.mountPoints(MountPoint.builder()
+                    .sourceVolume(MOUNT_VOLUME_NAME)
+                    .containerPath(MOUNT_CONTAINER_PATH)
+                    .build());
+            requestBuilder.containerDefinitions(containerDefinitionBuilder.build())
+                    .volumes(buildMountVolume(clusterSettings));
+        }
 
         if (buildKind.requiresArchitecture()) {
             requestBuilder.runtimePlatform(RuntimePlatform.builder()
