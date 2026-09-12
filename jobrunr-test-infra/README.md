@@ -52,6 +52,26 @@ few test runs, and destroyed, not left running.
 
 ## Deploying
 
+The fastest path — deploys the stack and writes `deployment.properties` for
+[`docs/examples/jobrunr-example-app`](../docs/examples/jobrunr-example-app) directly from the real
+CloudFormation outputs, rather than transcribing `cdk deploy`'s console output by hand:
+
+```bash
+cd jobrunr-test-infra
+AWS_REGION=eu-west-1 ./deploy-and-capture-outputs.sh          # plain S3 (default)
+AWS_REGION=eu-west-1 ./deploy-and-capture-outputs.sh --include-s3-files  # mount-based mechanism instead
+```
+
+See `./deploy-and-capture-outputs.sh --help` for `--yes` (skip the interactive approval prompt,
+for CI), `--output <path>` (write elsewhere), and `--skip-deploy` (just re-capture outputs from an
+already-deployed stack, without deploying again). It reads stack outputs via
+`aws cloudformation describe-stacks`, not by parsing `cdk deploy`'s console output, and maps each
+one to the exact `deployment.properties` key the example app's `pom.xml` expects — see "Feeding
+the outputs into `aws-ecs:build`" below for that same mapping if you'd rather do it by hand, or are
+feeding the outputs into a different project's `pom.xml`.
+
+Or the plain CDK CLI directly, without output capture:
+
 ```bash
 # From the repo root, or from this directory directly.
 cd jobrunr-test-infra
@@ -67,9 +87,13 @@ cdk deploy -c includeS3Files=true
 
 `cdk.json` wires the CDK CLI to run the compiled Java app via `mvn ... exec:java` — no separate
 build step beyond `mvn compile` is required before `cdk synth`/`cdk deploy`. To target a specific
-region (e.g. `eu-west-1`), export `CDK_DEFAULT_REGION=eu-west-1` (and `CDK_DEFAULT_ACCOUNT` if not
-already implied by your active credentials) before running `cdk bootstrap`/`cdk deploy` — the app
-reads both from those standard CDK CLI environment variables, not from anything hardcoded.
+region (e.g. `eu-west-1`), export **`AWS_REGION=eu-west-1`** before running `cdk bootstrap`/
+`cdk deploy` — not `CDK_DEFAULT_REGION` directly: the CDK CLI computes its own
+`CDK_DEFAULT_ACCOUNT`/`CDK_DEFAULT_REGION` from the currently active AWS credentials/profile (via
+`AWS_REGION`/`AWS_DEFAULT_REGION`/the profile's configured region) and always injects its own
+resolved values into the app subprocess, overriding anything set directly in the parent shell —
+confirmed by hitting this directly: setting `CDK_DEFAULT_REGION` on the `cdk` invocation itself had
+no effect, while `AWS_REGION` did.
 
 With `includeS3Files=true`, deploy takes a few minutes longer than the default — most of that
 extra time is the S3 Files file system and its mount targets. If the S3 Files file system gets
@@ -82,7 +106,8 @@ plain-S3 mode).
 
 ## Feeding the outputs into `aws-ecs:build`
 
-`cdk deploy` prints every output the plugin needs directly:
+`cdk deploy` prints every output the plugin needs directly (or use `deploy-and-capture-outputs.sh`
+above to skip this table entirely and get a ready-to-use `deployment.properties` automatically):
 
 | CDK output | `aws-ecs.*` parameter |
 |---|---|

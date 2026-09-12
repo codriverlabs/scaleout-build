@@ -145,7 +145,7 @@
                     <assignPublicIp>true</assignPublicIp>
                     <executionRoleArn>${aws-ecs.executionRoleArn}</executionRoleArn>
                     <taskRoleArn>${aws-ecs.taskRoleArn}</taskRoleArn>
-                    <logGroupName>/jobrunr/build-agent</logGroupName>
+                    <logGroupName>${aws-ecs.logGroupName}</logGroupName>
                     <s3Bucket>${aws-ecs.s3Bucket}</s3Bucket>
 
                     <!-- Plain S3, direct-S3-calls agent I/O — jobrunr-test-infra's default

@@ -1,7 +1,8 @@
-# Copy this file to deployment.properties (gitignored) and fill in your own values, taken
-# directly from `cdk deploy`'s output when you deploy jobrunr-test-infra — see
-# jobrunr-test-infra/README.md's "Feeding the outputs into aws-ecs:build" table for exactly where
-# each value below comes from.
+# Copy this file to deployment.properties (gitignored) and fill in your own values — or, easier,
+# generate this file automatically by running jobrunr-test-infra/deploy-and-capture-outputs.sh,
+# which deploys the stack and writes deployment.properties for you directly from its real
+# CloudFormation outputs. See jobrunr-test-infra/README.md's "Feeding the outputs into
+# aws-ecs:build" table for exactly where each value below comes from if filling this in by hand.
 #
 # This file is deliberately NOT committed with real values: an account ID, IAM role ARNs, subnet/
 # security-group IDs, and a bucket name are specific to one AWS account and deployment, and would
@@ -22,6 +23,7 @@ aws-ecs.securityGroupId.1=sg-EXAMPLE
 aws-ecs.executionRoleArn=arn:aws:iam::ACCOUNT_ID:role/JobrunrBuildTestInfra-ExecutionRole-EXAMPLE
 aws-ecs.taskRoleArn=arn:aws:iam::ACCOUNT_ID:role/JobrunrBuildTestInfra-TaskRole-EXAMPLE
 
+aws-ecs.logGroupName=/jobrunr/build-agent
 aws-ecs.s3Bucket=jobrunrbuildtestinfra-stagingbucket-example
 
 # Built and pushed via build-local.sh --multi-arch <this value, without the :latest tag> from the
