@@ -32,7 +32,7 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <!-- Runtime dependencies -->
-        <awssdk.version>2.54.10</awssdk.version>
+        <awssdk.version>2.54.16</awssdk.version>
         <jackson.version>2.20.0</jackson.version>
         <slf4j.version>2.0.17</slf4j.version>
 

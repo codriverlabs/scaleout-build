@@ -31,8 +31,8 @@
              CLI's version flag); keep these in step, since a CLI/library major-version mismatch
              is a common source of "cdk synth" failures that have nothing to do with the app code
              itself. -->
-        <aws-cdk-lib.version>2.263.0</aws-cdk-lib.version>
-        <constructs.version>10.4.2</constructs.version>
+        <aws-cdk-lib.version>2.269.0</aws-cdk-lib.version>
+        <constructs.version>10.8.1</constructs.version>
     </properties>
 
     <dependencies>
