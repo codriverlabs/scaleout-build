@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Copyright © 2026 Plasticity.Cloud and CoDriverLabs. All rights reserved.
+# Copyright © 2026 Plasticity.Cloud Limited & CoDriverLabs Limited. All rights reserved.
 #
-# Builds the jobrunr-build-agent image locally with docker buildx, using
-# jobrunr-build-agent/Dockerfile (the same Dockerfile the CI workflow builds from — see
+# Builds the scaleout-build-agent image locally with docker buildx, using
+# scaleout-build-agent/Dockerfile (the same Dockerfile the CI workflow builds from — see
 # .github/workflows/build-agent-image.yml).
 #
 # By default, builds for the *host's own* architecture only and loads the result into the local
@@ -41,7 +41,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCKERFILE="${REPO_ROOT}/jobrunr-build-agent/Dockerfile"
+DOCKERFILE="${REPO_ROOT}/scaleout-build-agent/Dockerfile"
 
 PUSH=false
 MULTI_ARCH=false
@@ -52,12 +52,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --push)
             PUSH=true
-            IMAGE_URI="${2:?--push requires an image URI argument, e.g. --push 123456789012.dkr.ecr.us-east-1.amazonaws.com/jobrunr-build-agent}"
+            IMAGE_URI="${2:?--push requires an image URI argument, e.g. --push 123456789012.dkr.ecr.us-east-1.amazonaws.com/scaleout-build-agent}"
             shift 2
             ;;
         --multi-arch)
             MULTI_ARCH=true
-            IMAGE_URI="${2:?--multi-arch requires an image URI argument, e.g. --multi-arch 123456789012.dkr.ecr.us-east-1.amazonaws.com/jobrunr-build-agent}"
+            IMAGE_URI="${2:?--multi-arch requires an image URI argument, e.g. --multi-arch 123456789012.dkr.ecr.us-east-1.amazonaws.com/scaleout-build-agent}"
             shift 2
             ;;
         --platform)
@@ -119,10 +119,10 @@ case "$PLATFORM" in
     *) echo "Unsupported platform $PLATFORM (expected linux/amd64 or linux/arm64)" >&2; exit 1 ;;
 esac
 
-echo "==> Building the agent jar (mvn install, so jobrunr-build-shared is built first too)"
-mvn -q -pl jobrunr-build-shared,jobrunr-build-agent -am install -DskipTests
-[[ -f "${REPO_ROOT}/jobrunr-build-agent/target/agent.jar" ]] || {
-    echo "agent.jar was not produced at jobrunr-build-agent/target/agent.jar — build failed silently?" >&2
+echo "==> Building the agent jar (mvn install, so scaleout-build-shared is built first too)"
+mvn -q -pl scaleout-build-shared,scaleout-build-agent -am install -DskipTests
+[[ -f "${REPO_ROOT}/scaleout-build-agent/target/agent.jar" ]] || {
+    echo "agent.jar was not produced at scaleout-build-agent/target/agent.jar — build failed silently?" >&2
     exit 1
 }
 
@@ -158,7 +158,7 @@ elif $PUSH; then
     echo "      docker buildx imagetools create -t ${IMAGE_URI}:latest ${IMAGE_URI}:amd64 ${IMAGE_URI}:arm64"
     echo "    Or just use --multi-arch to do both arches and the manifest join in one command."
 else
-    TAG="jobrunr-build-agent:local-${PLATFORM#linux/}"
+    TAG="scaleout-build-agent:local-${PLATFORM#linux/}"
     echo "==> Building ${TAG} for platform ${PLATFORM} (base ${BASE_IMAGE}) and loading into the local Docker daemon"
     docker buildx build \
         --platform "$PLATFORM" \

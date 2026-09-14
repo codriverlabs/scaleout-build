@@ -36,7 +36,7 @@ target/
 .idea/
 *.iml
 
-# CDK (jobrunr-test-infra)
+# CDK (scaleout-test-infra)
 cdk.out/
 cdk.context.json
 dependency-reduced-pom.xml

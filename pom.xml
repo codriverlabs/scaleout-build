@@ -1,28 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  ~ Copyright © 2026 Plasticity.Cloud and CoDriverLabs. All rights reserved.
+  ~ Copyright © 2026 Plasticity.Cloud Limited & CoDriverLabs Limited. All rights reserved.
   -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>cloud.plasticity</groupId>
-    <artifactId>jobrunr-build-parent</artifactId>
+    <groupId>ai.codriverlabs</groupId>
+    <artifactId>scaleout-build-parent</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
-    <name>JobRunr Parallel Build (parent)</name>
+    <name>Scaleout Build (parent)</name>
     <description>
-        Maven plugin that computes a GraalVM/Mandrel build matrix and fans it out to AWS Fargate
-        Spot tasks via AWS Step Functions, one task per matrix cell.
+        Maven plugin that computes a GraalVM/Mandrel native-image build matrix and scales it out
+        across remote workers (AWS ECS Fargate today) for cells that don't match the local host's
+        architecture, one worker per matrix cell.
     </description>
 
     <modules>
-        <module>jobrunr-build-shared</module>
-        <module>jobrunr-maven-plugin</module>
-        <module>jobrunr-build-agent</module>
-        <module>jobrunr-test-infra</module>
+        <module>scaleout-build-shared</module>
+        <module>scaleout-build-maven-plugin</module>
+        <module>scaleout-build-agent</module>
+        <module>scaleout-test-infra</module>
     </modules>
 
     <properties>
@@ -58,8 +59,8 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>cloud.plasticity</groupId>
-                <artifactId>jobrunr-build-shared</artifactId>
+                <groupId>ai.codriverlabs</groupId>
+                <artifactId>scaleout-build-shared</artifactId>
                 <version>${project.version}</version>
             </dependency>
 

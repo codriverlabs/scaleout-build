@@ -117,7 +117,7 @@ already covered above, there is no remaining gap for the agent's actual usage.
 launch types above — not a fourth staging *mechanism* tied to a launch type, but a way to skip
 mount infrastructure altogether, on any of the three. When set, the agent downloads its staged
 inputs and uploads produced artifacts itself, via plain `GetObject`/`PutObject`/`ListObjectsV2`
-calls against `JOBRUNR_BUILD_S3_BUCKET` (see `cloud.plasticity.jobrunr.build.agent.S3Io`), instead
+calls against `JOBRUNR_BUILD_S3_BUCKET` (see `ai.codriverlabs.scaleoutbuild.build.agent.S3Io`), instead
 of reading/writing through the S3 Files or Mountpoint mount the launch type would otherwise need.
 `BuildEnvironment`/`NativeImageBuildExecutor` are completely unaware of the difference — the agent
 downloads inputs to a synthetic local "mount root" under ephemeral storage first, runs the exact
@@ -136,12 +136,12 @@ kept rather than one replacing the other:
   even if only some of it is read.
 - **A genuinely new IAM requirement, now provisioned**: the task role needs its own
   `s3:GetObject`/`s3:ListBucket` (to download inputs) and `s3:PutObject` (to upload artifacts) on
-  the staging bucket. `jobrunr-test-infra`'s CDK stack's task role grants the read/list pair
+  the staging bucket. `scaleout-test-infra`'s CDK stack's task role grants the read/list pair
   already (needed for the mount-based modes' own prerequisites) plus a separate, narrowly scoped
   `s3:PutObject` statement added specifically for this mode — deliberately unconditional rather
   than gated behind a stack parameter, so the same deployed stack can test either I/O mode.
 - Verified for real, end to end, against a live S3-protocol server (SeaweedFS, via Testcontainers,
-  not a same-vendor emulator): `S3IoTest` and `AgentMainDirectS3IoTest` in `jobrunr-build-agent`
+  not a same-vendor emulator): `S3IoTest` and `AgentMainDirectS3IoTest` in `scaleout-build-agent`
   cover download-preserves-structure, upload-preserves-structure, the full
   download→build→upload round trip, and that a failed build correctly skips the upload.
 

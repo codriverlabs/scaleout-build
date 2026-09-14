@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Copyright © 2026 Plasticity.Cloud Limited & CoDriverLabs Limited. All rights reserved.
+  -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ai.codriverlabs</groupId>
+        <artifactId>scaleout-build-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>scaleout-build-agent</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Scaleout Build (agent)</name>
+    <description>
+        Single-shot worker that runs the one matrix cell it was launched for, then exits. Ships
+        two ways: as a shaded jar mounted into an unmodified Mandrel builder image (the S3 Files/
+        Mountpoint-mounted path used by aws-ecs:build's FARGATE/MANAGED_INSTANCES/EC2 launch
+        types today), or as a self-contained image built by jib-maven-plugin (see the "jib" profile
+        below) with the agent's classes and dependencies layered directly onto the Mandrel base --
+        no shaded jar, no mount, no unmodified-base-image constraint.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>ai.codriverlabs</groupId>
+            <artifactId>scaleout-build-shared</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+        </dependency>
+        <!--
+          Enables the agent's direct-S3-calls I/O mode (JOBRUNR_BUILD_S3_BUCKET set): the agent
+          downloads its staged inputs and uploads produced artifacts itself, via plain GetObject/
+          PutObject/ListObjectsV2 calls, instead of relying on an ECS-mounted view of the bucket
+          (S3 Files on FARGATE/MANAGED_INSTANCES, Mountpoint-via-user-data on EC2). Both I/O modes
+          coexist — see AgentConfig and S3Io's class Javadoc for how the mode is selected and why
+          both are kept rather than one replacing the other.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              Shaded so the jar can be mounted into the builder image on its own: the image provides
+              only a JDK and native-image, and has no notion of our classpath. This is the path used
+              by the mount-based launch types (S3 Files on FARGATE/MANAGED_INSTANCES, Mountpoint on
+              EC2) — see docs/PURE_ECS_ALTERNATIVE.md and docs/STAGING_ALTERNATIVES.md.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <finalName>agent</finalName>
+                            <transformers>
+                                <transformer
+                                        implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>ai.codriverlabs.scaleoutbuild.build.agent.AgentMain</mainClass>
+                                </transformer>
+                                <transformer
+                                        implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!--
+          Builds the agent's classes and its resolved dependencies (scaleout-build-shared,
+          slf4j-simple) directly onto the Mandrel builder image, for both architectures it
+          publishes — confirmed via `docker buildx imagetools inspect
+          quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25`, which serves an OCI image
+          index with linux/amd64 and linux/arm64/v8 manifests under that one tag, not assumed.
+
+          Deliberately not bound to any lifecycle phase: a normal `mvn package`/`mvn install`
+          must not attempt a registry pull/push as a side effect. Invoke explicitly:
+
+              mvn -pl scaleout-build-agent jib:build \
+                  -Djib.to.image=<AgentRepositoryUri from scaleout-test-infra's CDK stack output>
+
+          Requires the amazon-ecr-credential-helper (docker-credential-ecr-login) on PATH to push
+          to ECR — Jib calls it directly, the same way it would call any other Docker credential
+          helper; no separate `docker login`/`aws ecr get-login-password` step is needed.
+
+          Uses Jib's default (exploded) containerizing mode — no shaded jar is used or needed
+          here; Jib resolves this module's own dependencies and constructs the classpath and
+          entrypoint (`java -cp <classpath> AgentMain`) itself, directly onto the Mandrel base.
+        -->
+        <profile>
+            <id>jib</id>
+            <activation>
+                <property><name>jib</name></property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.google.cloud.tools</groupId>
+                        <artifactId>jib-maven-plugin</artifactId>
+                        <version>${jib-maven-plugin.version}</version>
+                        <configuration>
+                            <from>
+                                <image>quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25</image>
+                                <platforms>
+                                    <platform>
+                                        <architecture>amd64</architecture>
+                                        <os>linux</os>
+                                    </platform>
+                                    <platform>
+                                        <architecture>arm64</architecture>
+                                        <os>linux</os>
+                                    </platform>
+                                </platforms>
+                            </from>
+                            <to>
+                                <!-- Overridden via -Djib.to.image at invocation time; see the
+                                     profile comment above for where the real value comes from. -->
+                                <image>REPLACE_WITH_AGENT_REPOSITORY_URI</image>
+                                <credHelper>ecr-login</credHelper>
+                            </to>
+                            <container>
+                                <mainClass>ai.codriverlabs.scaleoutbuild.build.agent.AgentMain</mainClass>
+                            </container>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

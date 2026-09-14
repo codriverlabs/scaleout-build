@@ -209,9 +209,9 @@ if that's the desired behavior for a given invocation.
 
 | Module | Contents |
 |---|---|
-| `jobrunr-build-shared` → renamed/repurposed | `Architecture`, `BuildKind` (new: `JVM`/`NATIVE`/`NATIVE_PGO_INSTRUMENT`/`NATIVE_PGO_OPTIMIZE`), `BuildExecutor`/`NativeImageBuildExecutor` (extended with `--pgo-instrument`/`--pgo=` flag support), `StagingLayout`. JobRunr, `WorkerRuntime`, `StorageProviderFactory`, and the DSQL layer are removed. |
-| `jobrunr-maven-plugin` → the orchestration owner | matrix computation from plugin config, local-first short-circuit, S3 staging (unchanged from the prior design), `TaskDefinitionRegistrar` (extended to key task definitions by build-kind+architecture), a new `StateMachineManager` (analogous role to `TaskDefinitionRegistrar`: generate/deploy/describe the Step Functions state machine idempotently, tagged with a config hash the same way task definitions are), `StepFunctionsExecutionSupervisor` (`StartExecution`, poll `DescribeExecution`, parse per-cell outcomes from the Map's output), artifact attachment with kind+arch classifiers. |
-| `jobrunr-build-agent` → simplified | reads `BUILD_KIND`/`BUILD_ARCH`/`S3_INPUT_PREFIX`/`S3_OUTPUT_PREFIX` env vars (task overrides, not a job payload), runs the corresponding build step once, writes output, exits. No polling loop, no worker runtime, no queue-claiming — the container's entire job is "do the one thing this task override says, then stop." |
+| `scaleout-build-shared` → renamed/repurposed | `Architecture`, `BuildKind` (new: `JVM`/`NATIVE`/`NATIVE_PGO_INSTRUMENT`/`NATIVE_PGO_OPTIMIZE`), `BuildExecutor`/`NativeImageBuildExecutor` (extended with `--pgo-instrument`/`--pgo=` flag support), `StagingLayout`. JobRunr, `WorkerRuntime`, `StorageProviderFactory`, and the DSQL layer are removed. |
+| `scaleout-build-maven-plugin` → the orchestration owner | matrix computation from plugin config, local-first short-circuit, S3 staging (unchanged from the prior design), `TaskDefinitionRegistrar` (extended to key task definitions by build-kind+architecture), a new `StateMachineManager` (analogous role to `TaskDefinitionRegistrar`: generate/deploy/describe the Step Functions state machine idempotently, tagged with a config hash the same way task definitions are), `StepFunctionsExecutionSupervisor` (`StartExecution`, poll `DescribeExecution`, parse per-cell outcomes from the Map's output), artifact attachment with kind+arch classifiers. |
+| `scaleout-build-agent` → simplified | reads `BUILD_KIND`/`BUILD_ARCH`/`S3_INPUT_PREFIX`/`S3_OUTPUT_PREFIX` env vars (task overrides, not a job payload), runs the corresponding build step once, writes output, exits. No polling loop, no worker runtime, no queue-claiming — the container's entire job is "do the one thing this task override says, then stop." |
 
 ## 7. Security posture
 
@@ -476,9 +476,9 @@ sequenceDiagram
 
 | Module | Contents |
 |---|---|
-| `jobrunr-build-shared` | `Architecture`, `BuildJobRequest` (JobRunr `JobRequest`), `BuildJobRequestHandler`, `BuildExecutor` + `NativeImageBuildExecutor`, `WorkerRuntime`, `StagingLayout`, `StorageProviderFactory` (`dsql` / `postgres` / `inmemory`) with the DSQL provider, retry decorator and pooling. |
-| `jobrunr-maven-plugin` | Goals `build`, `register-task-definitions`, `init-storage`; the input-staging planner; the supervisor loop; CloudWatch log tailing; artifact attachment. |
-| `jobrunr-build-agent` | Container `main()`: read env config, start a single-worker `BackgroundJobServer` against its architecture's schema, process one job, exit. Idle-exit timeout; SIGTERM to graceful shutdown so the job re-queues. Compiled for Java 17 so it runs on the image's JDK 25. |
+| `scaleout-build-shared` | `Architecture`, `BuildJobRequest` (JobRunr `JobRequest`), `BuildJobRequestHandler`, `BuildExecutor` + `NativeImageBuildExecutor`, `WorkerRuntime`, `StagingLayout`, `StorageProviderFactory` (`dsql` / `postgres` / `inmemory`) with the DSQL provider, retry decorator and pooling. |
+| `scaleout-build-maven-plugin` | Goals `build`, `register-task-definitions`, `init-storage`; the input-staging planner; the supervisor loop; CloudWatch log tailing; artifact attachment. |
+| `scaleout-build-agent` | Container `main()`: read env config, start a single-worker `BackgroundJobServer` against its architecture's schema, process one job, exit. Idle-exit timeout; SIGTERM to graceful shutdown so the job re-queues. Compiled for Java 17 so it runs on the image's JDK 25. |
 
 ### 10.6 Input staging: three cases
 

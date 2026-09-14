@@ -11,10 +11,10 @@ updates:
   - package-ecosystem: "maven"
     directories:
       - "/"
-      - "/jobrunr-build-shared"
-      - "/jobrunr-maven-plugin"
-      - "/jobrunr-build-agent"
-      - "/jobrunr-test-infra"
+      - "/scaleout-build-shared"
+      - "/scaleout-build-maven-plugin"
+      - "/scaleout-build-agent"
+      - "/scaleout-test-infra"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -41,12 +41,12 @@ updates:
           - "org.slf4j:*"
     open-pull-requests-limit: 10
 
-  # --- Docker: the agent's builder image (jobrunr-build-agent/Dockerfile). Kept on its own,
+  # --- Docker: the agent's builder image (scaleout-build-agent/Dockerfile). Kept on its own,
   # slower cadence -- a base-image bump here is a real GraalVM/Mandrel toolchain change, not a
   # routine library patch, and deserves deliberate review rather than being swept into the
   # weekly Maven noise.
   - package-ecosystem: "docker"
-    directory: "/jobrunr-build-agent"
+    directory: "/scaleout-build-agent"
     schedule:
       interval: "monthly"
 
