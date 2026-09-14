@@ -35,9 +35,9 @@ COPY --chown=1001:1001 scaleout-build-agent/target/agent.jar /home/quarkus/agent
 
 # native-image writes heavy scratch traffic to TMPDIR; keep it on the container's own writable
 # layer (backed by Fargate ephemeral storage) rather than on the S3 Files mount, which the runtime
-# JOBRUNR_BUILD_MOUNT_ROOT / JOBRUNR_BUILD_TEMP_DIR environment variables also control.
-ENV JOBRUNR_BUILD_TEMP_DIR=/tmp
-ENV JOBRUNR_BUILD_MOUNT_ROOT=/mnt/build
+# SCALEOUT_BUILD_MOUNT_ROOT / SCALEOUT_BUILD_TEMP_DIR environment variables also control.
+ENV SCALEOUT_BUILD_TEMP_DIR=/tmp
+ENV SCALEOUT_BUILD_MOUNT_ROOT=/mnt/build
 
 # ---------------------------------------------------------------------------------------------
 # IMPORTANT — S3 Files mount ownership (verified locally with a bind mount standing in for it):

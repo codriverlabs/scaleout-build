@@ -168,5 +168,5 @@ else
         --load \
         "$REPO_ROOT"
     echo "==> Built ${TAG}. Run it with, e.g.:"
-    echo "    docker run --rm -e JOBRUNR_BUILD_ID=test ${TAG}"
+    echo "    docker run --rm -e SCALEOUT_BUILD_ID=test ${TAG}"
 fi

@@ -28,55 +28,55 @@ import java.util.Optional;
  * <table border="1">
  *   <caption>Recognised variables</caption>
  *   <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_MOUNT_ROOT}</td><td>{@code /mnt/build}</td>
- *       <td>Root of the S3 Files/Mountpoint mount; ignored when {@code JOBRUNR_BUILD_S3_BUCKET} is
+ *   <tr><td>{@code SCALEOUT_BUILD_MOUNT_ROOT}</td><td>{@code /mnt/build}</td>
+ *       <td>Root of the S3 Files/Mountpoint mount; ignored when {@code SCALEOUT_BUILD_S3_BUCKET} is
  *           set, since inputs are downloaded to a local directory instead of read off a mount</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_S3_BUCKET}</td><td>none</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_S3_BUCKET}</td><td>none</td>
  *       <td>Selects the agent's direct-S3-calls I/O mode when set: inputs are downloaded and
  *           artifacts uploaded via plain S3 calls instead of a mount. See {@link S3Io}'s class
  *           Javadoc for why both I/O modes exist</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_ID}</td><td>none, required</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_ID}</td><td>none, required</td>
  *       <td>Identifier shared by every cell of the triggering plugin invocation</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_KIND}</td><td>none, required</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_KIND}</td><td>none, required</td>
  *       <td>One of {@code native}, {@code native-pgo-instrument}, {@code native-pgo-optimize}
  *           (never {@code jvm} — that build kind never launches a remote task)</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_ARCH}</td><td>host architecture</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_ARCH}</td><td>host architecture</td>
  *       <td>Architecture this cell targets; asserted against the container's actual architecture</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_STAGING_RELATIVE_PATH}</td><td>none, required</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_STAGING_RELATIVE_PATH}</td><td>none, required</td>
  *       <td>Staging root relative to the mount, and the {@code native-image} working directory</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_ARG_FILE_NAME}</td><td>{@code native-image.args}</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_ARG_FILE_NAME}</td><td>{@code native-image.args}</td>
  *       <td>Name of the argument file inside the staging root</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_PROFILE_RELATIVE_PATH}</td><td>none</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_PROFILE_RELATIVE_PATH}</td><td>none</td>
  *       <td>Path to the {@code .iprof} profile inside the staging root; required only for
  *           {@code native-pgo-optimize}</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_EXPECTED_ARTIFACTS}</td><td>none</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_EXPECTED_ARTIFACTS}</td><td>none</td>
  *       <td>Comma-separated artifact file names to look for; empty means discover by scanning</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_EXTRA_NATIVE_IMAGE_ARGS}</td><td>none</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_EXTRA_NATIVE_IMAGE_ARGS}</td><td>none</td>
  *       <td>Extra arguments appended after the argfile and build-kind flags, space-separated
  *           (so an argument containing a space cannot be expressed here)</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_TIMEOUT_MINUTES}</td><td>0 (no timeout)</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_TIMEOUT_MINUTES}</td><td>0 (no timeout)</td>
  *       <td>Soft timeout applied to the {@code native-image} process</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_NATIVE_IMAGE}</td><td>{@code native-image}</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_NATIVE_IMAGE}</td><td>{@code native-image}</td>
  *       <td>Command that runs native-image, space-separated</td></tr>
- *   <tr><td>{@code JOBRUNR_BUILD_TEMP_DIR}</td><td>{@code /tmp}</td>
+ *   <tr><td>{@code SCALEOUT_BUILD_TEMP_DIR}</td><td>{@code /tmp}</td>
  *       <td>Scratch directory, kept on ephemeral storage rather than the mount</td></tr>
  * </table>
  */
 public final class AgentConfig {
 
-    static final String ENV_MOUNT_ROOT = "JOBRUNR_BUILD_MOUNT_ROOT";
-    static final String ENV_S3_BUCKET = "JOBRUNR_BUILD_S3_BUCKET";
-    static final String ENV_BUILD_ID = "JOBRUNR_BUILD_ID";
-    static final String ENV_BUILD_KIND = "JOBRUNR_BUILD_KIND";
-    static final String ENV_ARCH = "JOBRUNR_BUILD_ARCH";
-    static final String ENV_STAGING_RELATIVE_PATH = "JOBRUNR_BUILD_STAGING_RELATIVE_PATH";
-    static final String ENV_ARG_FILE_NAME = "JOBRUNR_BUILD_ARG_FILE_NAME";
-    static final String ENV_PROFILE_RELATIVE_PATH = "JOBRUNR_BUILD_PROFILE_RELATIVE_PATH";
-    static final String ENV_EXPECTED_ARTIFACTS = "JOBRUNR_BUILD_EXPECTED_ARTIFACTS";
-    static final String ENV_EXTRA_NATIVE_IMAGE_ARGS = "JOBRUNR_BUILD_EXTRA_NATIVE_IMAGE_ARGS";
-    static final String ENV_TIMEOUT_MINUTES = "JOBRUNR_BUILD_TIMEOUT_MINUTES";
-    static final String ENV_NATIVE_IMAGE = "JOBRUNR_BUILD_NATIVE_IMAGE";
-    static final String ENV_TEMP_DIR = "JOBRUNR_BUILD_TEMP_DIR";
+    static final String ENV_MOUNT_ROOT = "SCALEOUT_BUILD_MOUNT_ROOT";
+    static final String ENV_S3_BUCKET = "SCALEOUT_BUILD_S3_BUCKET";
+    static final String ENV_BUILD_ID = "SCALEOUT_BUILD_ID";
+    static final String ENV_BUILD_KIND = "SCALEOUT_BUILD_KIND";
+    static final String ENV_ARCH = "SCALEOUT_BUILD_ARCH";
+    static final String ENV_STAGING_RELATIVE_PATH = "SCALEOUT_BUILD_STAGING_RELATIVE_PATH";
+    static final String ENV_ARG_FILE_NAME = "SCALEOUT_BUILD_ARG_FILE_NAME";
+    static final String ENV_PROFILE_RELATIVE_PATH = "SCALEOUT_BUILD_PROFILE_RELATIVE_PATH";
+    static final String ENV_EXPECTED_ARTIFACTS = "SCALEOUT_BUILD_EXPECTED_ARTIFACTS";
+    static final String ENV_EXTRA_NATIVE_IMAGE_ARGS = "SCALEOUT_BUILD_EXTRA_NATIVE_IMAGE_ARGS";
+    static final String ENV_TIMEOUT_MINUTES = "SCALEOUT_BUILD_TIMEOUT_MINUTES";
+    static final String ENV_NATIVE_IMAGE = "SCALEOUT_BUILD_NATIVE_IMAGE";
+    static final String ENV_TEMP_DIR = "SCALEOUT_BUILD_TEMP_DIR";
 
     private static final Path DEFAULT_MOUNT_ROOT = Paths.get("/mnt/build");
     private static final Path DEFAULT_TEMP_DIR = Paths.get("/tmp");
@@ -165,7 +165,7 @@ public final class AgentConfig {
         return s3Bucket;
     }
 
-    /** Whether {@code JOBRUNR_BUILD_S3_BUCKET} was set, selecting the direct-S3-calls I/O mode. */
+    /** Whether {@code SCALEOUT_BUILD_S3_BUCKET} was set, selecting the direct-S3-calls I/O mode. */
     public boolean usesDirectS3Io() {
         return s3Bucket != null;
     }

@@ -20,8 +20,8 @@ aws-ecs.subnetId.1=subnet-EXAMPLE1
 aws-ecs.subnetId.2=subnet-EXAMPLE2
 aws-ecs.securityGroupId.1=sg-EXAMPLE
 
-aws-ecs.executionRoleArn=arn:aws:iam::ACCOUNT_ID:role/JobrunrBuildTestInfra-ExecutionRole-EXAMPLE
-aws-ecs.taskRoleArn=arn:aws:iam::ACCOUNT_ID:role/JobrunrBuildTestInfra-TaskRole-EXAMPLE
+aws-ecs.executionRoleArn=arn:aws:iam::ACCOUNT_ID:role/ScaleoutBuildTestInfra-ExecutionRole-EXAMPLE
+aws-ecs.taskRoleArn=arn:aws:iam::ACCOUNT_ID:role/ScaleoutBuildTestInfra-TaskRole-EXAMPLE
 
 aws-ecs.logGroupName=/scaleout-build/build-agent
 aws-ecs.s3Bucket=scaleoutbuildtestinfra-stagingbucket-example

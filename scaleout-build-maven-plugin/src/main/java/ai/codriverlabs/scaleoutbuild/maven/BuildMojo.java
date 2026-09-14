@@ -608,8 +608,11 @@ public class BuildMojo extends AbstractMojo {
             attachArtifacts(cell, artifacts);
             return null;
         } catch (IOException e) {
+            String causeDetail = e.getCause() != null && e.getCause().getMessage() != null
+                    ? " (" + e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage() + ")"
+                    : "";
             return cell + " succeeded remotely but its artifact could not be downloaded: "
-                    + e.getMessage();
+                    + e.getMessage() + causeDetail;
         }
     }
 
@@ -644,28 +647,28 @@ public class BuildMojo extends AbstractMojo {
                                                              NativeImageInputPlan plan,
                                                              String profileRelativePath) {
         List<KeyValuePair> environment = new ArrayList<>();
-        environment.add(env("JOBRUNR_BUILD_MOUNT_ROOT", TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH));
+        environment.add(env("SCALEOUT_BUILD_MOUNT_ROOT", TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH));
         if (agentUsesDirectS3Io) {
-            environment.add(env("JOBRUNR_BUILD_S3_BUCKET", s3Bucket));
+            environment.add(env("SCALEOUT_BUILD_S3_BUCKET", s3Bucket));
         }
-        environment.add(env("JOBRUNR_BUILD_ID", buildId));
-        environment.add(env("JOBRUNR_BUILD_KIND", cell.buildKind.configValue()));
-        environment.add(env("JOBRUNR_BUILD_ARCH", cell.architecture.name()));
-        environment.add(env("JOBRUNR_BUILD_STAGING_RELATIVE_PATH", stagingRelativePath));
-        environment.add(env("JOBRUNR_BUILD_ARG_FILE_NAME", plan.argsFileName()));
+        environment.add(env("SCALEOUT_BUILD_ID", buildId));
+        environment.add(env("SCALEOUT_BUILD_KIND", cell.buildKind.configValue()));
+        environment.add(env("SCALEOUT_BUILD_ARCH", cell.architecture.name()));
+        environment.add(env("SCALEOUT_BUILD_STAGING_RELATIVE_PATH", stagingRelativePath));
+        environment.add(env("SCALEOUT_BUILD_ARG_FILE_NAME", plan.argsFileName()));
         if (profileRelativePath != null) {
-            environment.add(env("JOBRUNR_BUILD_PROFILE_RELATIVE_PATH", profileRelativePath));
+            environment.add(env("SCALEOUT_BUILD_PROFILE_RELATIVE_PATH", profileRelativePath));
         }
         if (!plan.expectedArtifacts().isEmpty()) {
-            environment.add(env("JOBRUNR_BUILD_EXPECTED_ARTIFACTS",
+            environment.add(env("SCALEOUT_BUILD_EXPECTED_ARTIFACTS",
                     String.join(",", plan.expectedArtifacts())));
         }
         if (extraNativeImageArgs != null && !extraNativeImageArgs.isEmpty()) {
-            environment.add(env("JOBRUNR_BUILD_EXTRA_NATIVE_IMAGE_ARGS",
+            environment.add(env("SCALEOUT_BUILD_EXTRA_NATIVE_IMAGE_ARGS",
                     String.join(" ", extraNativeImageArgs)));
         }
         if (timeoutMinutes > 0) {
-            environment.add(env("JOBRUNR_BUILD_TIMEOUT_MINUTES", String.valueOf(timeoutMinutes)));
+            environment.add(env("SCALEOUT_BUILD_TIMEOUT_MINUTES", String.valueOf(timeoutMinutes)));
         }
         return environment;
     }

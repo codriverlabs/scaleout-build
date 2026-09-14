@@ -98,7 +98,7 @@ mount-s3 my-staging-bucket /mnt/build --allow-delete --uid 1001 --gid 1001
 
 Set `aws-ecs.ec2HostMountPath` to wherever user-data mounted it (e.g. `/mnt/build`); the plugin
 bind-mounts exactly that host path into the container at the same path the agent expects
-(`AgentConfig`'s `JOBRUNR_BUILD_MOUNT_ROOT` default, also `/mnt/build`) via `TaskDefinitionRegistrar`.
+(`AgentConfig`'s `SCALEOUT_BUILD_MOUNT_ROOT` default, also `/mnt/build`) via `TaskDefinitionRegistrar`.
 **The plugin does not set up this mount itself** — same "pre-provisioned input" boundary already
 established for the cluster, VPC, and IAM roles; provisioning the container instances' user-data is
 the caller's responsibility, the same way provisioning the cluster itself is.
@@ -117,7 +117,7 @@ already covered above, there is no remaining gap for the agent's actual usage.
 launch types above — not a fourth staging *mechanism* tied to a launch type, but a way to skip
 mount infrastructure altogether, on any of the three. When set, the agent downloads its staged
 inputs and uploads produced artifacts itself, via plain `GetObject`/`PutObject`/`ListObjectsV2`
-calls against `JOBRUNR_BUILD_S3_BUCKET` (see `ai.codriverlabs.scaleoutbuild.build.agent.S3Io`), instead
+calls against `SCALEOUT_BUILD_S3_BUCKET` (see `ai.codriverlabs.scaleoutbuild.build.agent.S3Io`), instead
 of reading/writing through the S3 Files or Mountpoint mount the launch type would otherwise need.
 `BuildEnvironment`/`NativeImageBuildExecutor` are completely unaware of the difference — the agent
 downloads inputs to a synthetic local "mount root" under ephemeral storage first, runs the exact

@@ -149,7 +149,7 @@ class BuildMojoRemoteCellsTest {
 
         List<software.amazon.awssdk.services.ecs.model.KeyValuePair> environment =
                 capturedEnvironment(captor);
-        assertThat(environment).noneMatch(kv -> "JOBRUNR_BUILD_S3_BUCKET".equals(kv.name()));
+        assertThat(environment).noneMatch(kv -> "SCALEOUT_BUILD_S3_BUCKET".equals(kv.name()));
     }
 
     @Test
@@ -170,7 +170,7 @@ class BuildMojoRemoteCellsTest {
         List<software.amazon.awssdk.services.ecs.model.KeyValuePair> environment =
                 capturedEnvironment(captor);
         assertThat(environment)
-                .anyMatch(kv -> "JOBRUNR_BUILD_S3_BUCKET".equals(kv.name())
+                .anyMatch(kv -> "SCALEOUT_BUILD_S3_BUCKET".equals(kv.name())
                         && "test-bucket".equals(kv.value()));
     }
 

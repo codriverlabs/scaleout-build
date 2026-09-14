@@ -28,7 +28,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STACK_NAME="JobrunrBuildTestInfra"
+STACK_NAME="ScaleoutBuildTestInfra"
 DEFAULT_OUTPUT="${SCRIPT_DIR}/../docs/examples/scaleout-build-example-app/deployment.properties"
 
 INCLUDE_S3_FILES=false

@@ -40,7 +40,7 @@ class EcsTaskLauncherTest {
     void setUp() {
         launcher = new EcsTaskLauncher(ecsClient);
         fargateClusterSettings = fargateSettings();
-        environment = List.of(KeyValuePair.builder().name("JOBRUNR_BUILD_ARCH").value("ARM64").build());
+        environment = List.of(KeyValuePair.builder().name("SCALEOUT_BUILD_ARCH").value("ARM64").build());
     }
 
     private static EcsClusterSettings fargateSettings() {
@@ -140,7 +140,7 @@ class EcsTaskLauncherTest {
                 .containsExactly("FARGATE_SPOT", "FARGATE");
         assertThat(request.overrides().containerOverrides()).hasSize(1);
         assertThat(request.overrides().containerOverrides().get(0).environment())
-                .containsExactly(KeyValuePair.builder().name("JOBRUNR_BUILD_ARCH").value("ARM64")
+                .containsExactly(KeyValuePair.builder().name("SCALEOUT_BUILD_ARCH").value("ARM64")
                         .build());
     }
 

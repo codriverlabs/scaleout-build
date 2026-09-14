@@ -59,7 +59,7 @@ class EcsTaskSupervisorTest {
                 "arn:aws:iam::123456789012:role/exec", "arn:aws:iam::123456789012:role/task",
                 "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc123", null, null, null, null,
                 "/scaleout-build/build-agent", "us-east-1", false);
-        environment = List.of(KeyValuePair.builder().name("JOBRUNR_BUILD_ARCH").value("ARM64").build());
+        environment = List.of(KeyValuePair.builder().name("SCALEOUT_BUILD_ARCH").value("ARM64").build());
         logLines = new java.util.ArrayList<>();
 
         when(logsClient.filterLogEvents(any(Consumer.class)))

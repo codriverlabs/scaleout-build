@@ -241,6 +241,36 @@ class S3StagingIntegrationTest {
         assertThat(downloaded.get(0)).hasContent("arm64-binary");
     }
 
+    @Test
+    void retrievingTheSameArtifactTwiceIntoTheSameDestinationDirectoryDoesNotFail(
+            @TempDir Path destinationDir) {
+        // Regression test: S3Client#getObject(request, Path) throws if the destination file
+        // already exists (it does not overwrite, unlike `aws s3api get-object` or Transfer
+        // Manager's download) -- a real local `mvn package` re-run against a target/ directory
+        // left over from a previous successful run hit exactly this, surfaced as a misleadingly
+        // opaque "could not be downloaded" MojoFailureException with no real cause detail.
+        String key = "builds/build-5/native/x86_64/output/my-app";
+        s3Client.putObject(b -> b.bucket(BUCKET).key(key), RequestBody.fromString("first-run-content"));
+
+        S3ArtifactRetriever retriever = new S3ArtifactRetriever(s3Client, BUCKET);
+        List<Path> firstDownload = assertDoesNotThrow(() -> retriever.retrieve("build-5",
+                ai.codriverlabs.scaleoutbuild.build.BuildKind.NATIVE, Architecture.X86_64,
+                List.of("my-app"), destinationDir));
+        assertThat(firstDownload).hasSize(1);
+        assertThat(firstDownload.get(0)).hasContent("first-run-content");
+
+        // A second, later build overwrites the same object with new content (a real rebuild would
+        // produce a genuinely different binary) and is retrieved into the very same destination
+        // directory -- the second retrieve() must succeed and reflect the new content, not fail
+        // because the old file from the first retrieve() is still sitting there.
+        s3Client.putObject(b -> b.bucket(BUCKET).key(key), RequestBody.fromString("second-run-content"));
+        List<Path> secondDownload = assertDoesNotThrow(() -> retriever.retrieve("build-5",
+                ai.codriverlabs.scaleoutbuild.build.BuildKind.NATIVE, Architecture.X86_64,
+                List.of("my-app"), destinationDir));
+        assertThat(secondDownload).hasSize(1);
+        assertThat(secondDownload.get(0)).hasContent("second-run-content");
+    }
+
     private static void assertObjectExists(String key) {
         assertThat(s3Client.headObject(b -> b.bucket(BUCKET).key(key)).contentLength()).isNotNegative();
     }

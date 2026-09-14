@@ -48,7 +48,7 @@ public final class InfraApp {
         boolean includeS3Files = includeS3FilesContext != null
                 && Boolean.parseBoolean(includeS3FilesContext.toString());
 
-        new BuildTestInfraStack(app, "JobrunrBuildTestInfra", StackProps.builder()
+        new BuildTestInfraStack(app, "ScaleoutBuildTestInfra", StackProps.builder()
                 .env(envBuilder.build())
                 .description("Disposable test infra for aws-ecs:build (" 
                         + (includeS3Files ? "FARGATE + S3 Files" : "plain S3, direct-S3-calls agent I/O")

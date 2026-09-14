@@ -171,7 +171,7 @@ public final class TaskDefinitionRegistrar {
             requestBuilder.containerDefinitions(containerDefinitionBuilder.build());
         } else {
             // Every mount-based launch type mounts the staging volume at the same container path
-            // the agent expects (AgentConfig's default JOBRUNR_BUILD_MOUNT_ROOT) -- without this,
+            // the agent expects (AgentConfig's default SCALEOUT_BUILD_MOUNT_ROOT) -- without this,
             // the `volumes` entry below declares the volume at the task level but never actually
             // mounts it into the container, leaving the agent writing to an ordinary, empty,
             // non-shared container-filesystem directory instead.

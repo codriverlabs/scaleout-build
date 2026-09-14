@@ -35,7 +35,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * writes crosses the network twice (once down, once up) rather than being read/written lazily through
  * a FUSE-backed mount.
  *
- * <p>Selected by {@code JOBRUNR_BUILD_S3_BUCKET} being set (see {@link AgentConfig#s3Bucket()}); when
+ * <p>Selected by {@code SCALEOUT_BUILD_S3_BUCKET} being set (see {@link AgentConfig#s3Bucket()}); when
  * it is not set, the agent uses the mount-based path unchanged, and this class is never touched.
  *
  * <p>Reuses {@code stagingRelativePath} both as a mount-relative filesystem path (mount mode) and as

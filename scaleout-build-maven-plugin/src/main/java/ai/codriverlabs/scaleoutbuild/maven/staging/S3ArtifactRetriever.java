@@ -138,11 +138,17 @@ public final class S3ArtifactRetriever {
         String fileName = key.substring(key.lastIndexOf('/') + 1);
         Path destination = destinationDir.resolve(fileName);
         LOG.info("Downloading s3://{}/{} to {}", bucket, key, destination);
+        // S3Client#getObject(request, Path) throws if the destination file already exists (it does
+        // not overwrite, unlike `aws s3api get-object` or Transfer Manager's download) -- delete any
+        // stale file from a previous run first so repeated local builds against the same target/
+        // directory don't fail on the second run.
+        Files.deleteIfExists(destination);
         try {
             s3Client.getObject(GetObjectRequest.builder().bucket(bucket).key(key).build(),
                     destination);
         } catch (SdkException e) {
-            throw new IOException("Failed to download s3://" + bucket + "/" + key, e);
+            throw new IOException("Failed to download s3://" + bucket + "/" + key
+                    + " to " + destination + ": " + e.getMessage(), e);
         }
         return destination.toAbsolutePath();
     }
