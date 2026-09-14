@@ -33,7 +33,7 @@
 
         <!-- Runtime dependencies -->
         <awssdk.version>2.54.10</awssdk.version>
-        <jackson.version>2.20.0</jackson.version>
+        <jackson.version>2.22.2</jackson.version>
         <slf4j.version>2.0.17</slf4j.version>
 
         <!-- Maven API (provided scope: supplied by the running Maven instance) -->
