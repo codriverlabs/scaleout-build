@@ -13,6 +13,9 @@ import ai.codriverlabs.scaleoutbuild.build.BuildKind;
 import ai.codriverlabs.scaleoutbuild.build.BuildResult;
 import ai.codriverlabs.scaleoutbuild.build.NativeImageBuildExecutor;
 import ai.codriverlabs.scaleoutbuild.build.StagingLayout;
+import ai.codriverlabs.scaleoutbuild.maven.backend.BuildBackend;
+import ai.codriverlabs.scaleoutbuild.maven.backend.DirectEcsBuildBackend;
+import ai.codriverlabs.scaleoutbuild.maven.backend.RemoteBuildOptions;
 import ai.codriverlabs.scaleoutbuild.maven.ecs.AgentContainerSettings;
 import ai.codriverlabs.scaleoutbuild.maven.ecs.CloudWatchLogTailer;
 import ai.codriverlabs.scaleoutbuild.maven.ecs.EcsClusterSettings;
@@ -29,7 +32,6 @@ import ai.codriverlabs.scaleoutbuild.maven.staging.S3ArtifactRetriever;
 import ai.codriverlabs.scaleoutbuild.maven.staging.S3StagingSink;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -37,10 +39,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -53,7 +51,6 @@ import org.apache.maven.plugins.annotations.ResolutionScope;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectHelper;
 import software.amazon.awssdk.services.ecs.EcsClient;
-import software.amazon.awssdk.services.ecs.model.KeyValuePair;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
@@ -234,9 +231,9 @@ public class BuildMojo extends AbstractMojo {
         String buildId = UUID.randomUUID().toString();
         List<String> failures = new ArrayList<>();
 
-        List<MatrixCell> jvmCells = cells.stream().filter(c -> c.buildKind == BuildKind.JVM).toList();
+        List<MatrixCell> jvmCells = cells.stream().filter(c -> c.buildKind() == BuildKind.JVM).toList();
         List<MatrixCell> nativeishCells =
-                cells.stream().filter(c -> c.buildKind != BuildKind.JVM).toList();
+                cells.stream().filter(c -> c.buildKind() != BuildKind.JVM).toList();
 
         for (int i = 0; i < jvmCells.size(); i++) {
             attachJvmArtifact();
@@ -285,20 +282,6 @@ public class BuildMojo extends AbstractMojo {
 
     // --- Matrix computation ---------------------------------------------------------------
 
-    /**
-     * One matrix cell: a build kind, and (for every kind but JVM) a target architecture.
-     *
-     * <p>Package-visible (not {@code private}) so {@code BuildMojoRemoteCellsTest} can construct
-     * cells directly to exercise {@link #runRemoteCells} without going through the full
-     * {@code execute()} lifecycle.
-     */
-    record MatrixCell(BuildKind buildKind, Architecture architecture) {
-        @Override
-        public String toString() {
-            return architecture == null ? buildKind.toString() : buildKind + "/" + architecture;
-        }
-    }
-
     /** Which non-JVM cells build locally versus on ECS. */
     record LocalRemoteSplit(List<MatrixCell> localCells, List<MatrixCell> remoteCells) {
     }
@@ -316,9 +299,9 @@ public class BuildMojo extends AbstractMojo {
             return new LocalRemoteSplit(List.of(), nativeishCells);
         }
         List<MatrixCell> localCells =
-                nativeishCells.stream().filter(c -> c.architecture.matchesHost()).toList();
+                nativeishCells.stream().filter(c -> c.architecture().matchesHost()).toList();
         List<MatrixCell> remoteCells =
-                nativeishCells.stream().filter(c -> !c.architecture.matchesHost()).toList();
+                nativeishCells.stream().filter(c -> !c.architecture().matchesHost()).toList();
         return new LocalRemoteSplit(localCells, remoteCells);
     }
 
@@ -404,21 +387,21 @@ public class BuildMojo extends AbstractMojo {
             throws IOException, MojoFailureException, BuildFailedException, InterruptedException {
         Path mountRoot = resolveWorkDirectory();
         String stagingRelativePath =
-                StagingLayout.defaults().stagingPath(buildId, cell.buildKind, cell.architecture);
+                StagingLayout.defaults().stagingPath(buildId, cell.buildKind(), cell.architecture());
         LocalStagingSink stagingSink = new LocalStagingSink(mountRoot);
         long staged = stagingSink.stage(plan, stagingRelativePath);
         getLog().info(String.format(Locale.ROOT, "Staged %s (%d bytes) for %s", stagingRelativePath,
                 staged, cell));
 
         String profileRelativePath = null;
-        if (cell.buildKind.requiresProfile()) {
+        if (cell.buildKind().requiresProfile()) {
             profileRelativePath = stageProfile(mountRoot, stagingRelativePath);
         }
 
         BuildCellRequest request = BuildCellRequest.builder()
                 .buildId(buildId)
-                .buildKind(cell.buildKind)
-                .architecture(cell.architecture)
+                .buildKind(cell.buildKind())
+                .architecture(cell.architecture())
                 .stagingRelativePath(stagingRelativePath)
                 .argFileName(plan.argsFileName())
                 .profileRelativePath(profileRelativePath)
@@ -492,189 +475,13 @@ public class BuildMojo extends AbstractMojo {
         AgentContainerSettings containerSettings =
                 new AgentContainerSettings(agentImageUri, agentCpu, agentMemory,
                         agentEphemeralStorageGiB);
+        RemoteBuildOptions options = new RemoteBuildOptions(s3Bucket, resolveWorkDirectory(),
+                pollIntervalSeconds, overallTimeoutMinutes, maxSpotInterruptionsBeforeOnDemand,
+                timeoutMinutes, extraNativeImageArgs, profilePath);
 
-        S3StagingSink stagingSink = new S3StagingSink(s3Client, s3Bucket);
-        TaskDefinitionRegistrar registrar = new TaskDefinitionRegistrar(ecsClient);
-        EcsTaskLauncher launcher = new EcsTaskLauncher(ecsClient);
-        CloudWatchLogTailer logTailer = new CloudWatchLogTailer(logsClient);
-        EcsTaskSupervisor supervisor = new EcsTaskSupervisor(launcher, logTailer, ecsClient);
-
-        // Stage every cell's inputs and register its task definition up front, sequentially --
-        // both are cheap and this keeps the concurrent section below to just the part that
-        // actually benefits from running in parallel: watching each task run.
-        List<CellLaunchPlan> launchPlans = new ArrayList<>();
-        for (MatrixCell cell : remoteCells) {
-            String stagingRelativePath =
-                    StagingLayout.defaults().stagingPath(buildId, cell.buildKind, cell.architecture);
-            long staged = stagingSink.stage(plan, stagingRelativePath);
-            getLog().info(String.format(Locale.ROOT, "Staged %s (%d bytes) for %s",
-                    stagingRelativePath, staged, cell));
-
-            String profileRelativePath = null;
-            if (cell.buildKind.requiresProfile()) {
-                profileRelativePath = stageRemoteProfile(s3Client, stagingRelativePath);
-            }
-
-            String taskDefinitionArn = registrar.registerIfChanged(clusterSettings, containerSettings,
-                    cell.buildKind, cell.architecture);
-            List<KeyValuePair> environment = buildTaskOverrideEnvironment(buildId, cell,
-                    stagingRelativePath, plan, profileRelativePath);
-            launchPlans.add(new CellLaunchPlan(cell, taskDefinitionArn, environment));
-        }
-
-        return superviseAllCellsConcurrently(launchPlans, clusterSettings, supervisor, buildId, plan,
-                s3Client);
-    }
-
-    /** Everything one cell's task launch needs, computed once before the concurrent section. */
-    private record CellLaunchPlan(MatrixCell cell, String taskDefinitionArn,
-                                  List<KeyValuePair> environment) {
-    }
-
-    /**
-     * Launches and supervises every remote cell's task concurrently, one thread per cell, since
-     * there is no Map state doing the fan-out for us. Bounded to {@code remoteCells.size()}
-     * threads — this plugin never launches more tasks than that in one invocation, so there is no
-     * reason to cap concurrency below it the way {@code MaxConcurrency} would on a Map state.
-     */
-    private List<String> superviseAllCellsConcurrently(List<CellLaunchPlan> launchPlans,
-                                                        EcsClusterSettings clusterSettings,
-                                                        EcsTaskSupervisor supervisor,
-                                                        String buildId, NativeImageInputPlan plan,
-                                                        S3Client s3Client)
-            throws MojoExecutionException, InterruptedException {
-        ExecutorService executor = Executors.newFixedThreadPool(launchPlans.size());
-        try {
-            List<Future<String>> futures = new ArrayList<>();
-            for (CellLaunchPlan launchPlan : launchPlans) {
-                Callable<String> task = () -> superviseOneCell(launchPlan, clusterSettings,
-                        supervisor, buildId, plan, s3Client);
-                futures.add(executor.submit(task));
-            }
-
-            List<String> failures = new ArrayList<>();
-            for (Future<String> future : futures) {
-                try {
-                    String failure = future.get();
-                    if (failure != null) {
-                        failures.add(failure);
-                    }
-                } catch (java.util.concurrent.ExecutionException e) {
-                    throw new MojoExecutionException(
-                            "Unexpected error supervising a remote cell", e.getCause());
-                }
-            }
-            return failures;
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
-    /**
-     * @return a failure message if this cell did not succeed, or {@code null} on success (after
-     *         its artifact has already been attached to the reactor)
-     */
-    private String superviseOneCell(CellLaunchPlan launchPlan, EcsClusterSettings clusterSettings,
-                                     EcsTaskSupervisor supervisor, String buildId,
-                                     NativeImageInputPlan plan, S3Client s3Client)
-            throws InterruptedException {
-        MatrixCell cell = launchPlan.cell();
-        EcsTaskSupervisor.SupervisionOptions options = EcsTaskSupervisor.SupervisionOptions
-                .defaults()
-                .pollInterval(Duration.ofSeconds(Math.max(1, pollIntervalSeconds)))
-                .overallTimeout(Duration.ofMinutes(Math.max(1, overallTimeoutMinutes)))
-                .maxSpotInterruptionsBeforeOnDemand(Math.max(0, maxSpotInterruptionsBeforeOnDemand));
-
-        EcsTaskSupervisor.SupervisionResult result = supervisor.supervise(clusterSettings,
-                launchPlan.taskDefinitionArn(), launchPlan.environment(), LOG_STREAM_PREFIX,
-                line -> getLog().info("[" + cell + "] " + line), options);
-
-        if (result.timedOut()) {
-            return cell + ": " + result.failureReason();
-        }
-        if (!result.succeeded()) {
-            return cell + " failed remotely: " + result.failureReason();
-        }
-
-        try {
-            Path destinationDir = resolveWorkDirectory().resolve("remote-artifacts")
-                    .resolve(cell.toString().replace('/', '-'));
-            S3ArtifactRetriever retriever = new S3ArtifactRetriever(s3Client, s3Bucket);
-            List<Path> artifacts = retriever.retrieve(buildId, cell.buildKind, cell.architecture,
-                    plan.expectedArtifacts(), destinationDir);
-            if (artifacts.isEmpty()) {
-                return cell + " reported success but no artifact was found in S3";
-            }
-            attachArtifacts(cell, artifacts);
-            return null;
-        } catch (IOException e) {
-            String causeDetail = e.getCause() != null && e.getCause().getMessage() != null
-                    ? " (" + e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage() + ")"
-                    : "";
-            return cell + " succeeded remotely but its artifact could not be downloaded: "
-                    + e.getMessage() + causeDetail;
-        }
-    }
-
-    /**
-     * Log stream prefix configured on the task definition's {@code awslogs-stream-prefix} — the
-     * actual stream name ({@code prefix/container-name/task-id}) isn't known until the task starts,
-     * so {@link CloudWatchLogTailer} matches on this prefix rather than the full stream name.
-     */
-    private static final String LOG_STREAM_PREFIX = TaskDefinitionRegistrar.LOG_STREAM_PREFIX;
-
-    private String stageRemoteProfile(S3Client s3Client, String stagingRelativePath)
-            throws IOException, MojoFailureException {
-        Path source = Path.of(profilePath);
-        if (!java.nio.file.Files.isRegularFile(source)) {
-            throw new MojoFailureException("aws-ecs.profilePath does not exist: " + profilePath);
-        }
-        String relativeName = "default.iprof";
-        String key = stagingRelativePath.endsWith("/")
-                ? stagingRelativePath + relativeName : stagingRelativePath + "/" + relativeName;
-        try {
-            s3Client.putObject(b -> b.bucket(s3Bucket).key(key),
-                    software.amazon.awssdk.core.sync.RequestBody.fromFile(source));
-        } catch (software.amazon.awssdk.core.exception.SdkException e) {
-            throw new IOException("Failed to upload profile to s3://" + s3Bucket + "/" + key, e);
-        }
-        return relativeName;
-    }
-
-    /** Task-override environment variables matching {@code AgentConfig}'s exact names. */
-    private List<KeyValuePair> buildTaskOverrideEnvironment(String buildId, MatrixCell cell,
-                                                             String stagingRelativePath,
-                                                             NativeImageInputPlan plan,
-                                                             String profileRelativePath) {
-        List<KeyValuePair> environment = new ArrayList<>();
-        environment.add(env("SCALEOUT_BUILD_MOUNT_ROOT", TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH));
-        if (agentUsesDirectS3Io) {
-            environment.add(env("SCALEOUT_BUILD_S3_BUCKET", s3Bucket));
-        }
-        environment.add(env("SCALEOUT_BUILD_ID", buildId));
-        environment.add(env("SCALEOUT_BUILD_KIND", cell.buildKind.configValue()));
-        environment.add(env("SCALEOUT_BUILD_ARCH", cell.architecture.name()));
-        environment.add(env("SCALEOUT_BUILD_STAGING_RELATIVE_PATH", stagingRelativePath));
-        environment.add(env("SCALEOUT_BUILD_ARG_FILE_NAME", plan.argsFileName()));
-        if (profileRelativePath != null) {
-            environment.add(env("SCALEOUT_BUILD_PROFILE_RELATIVE_PATH", profileRelativePath));
-        }
-        if (!plan.expectedArtifacts().isEmpty()) {
-            environment.add(env("SCALEOUT_BUILD_EXPECTED_ARTIFACTS",
-                    String.join(",", plan.expectedArtifacts())));
-        }
-        if (extraNativeImageArgs != null && !extraNativeImageArgs.isEmpty()) {
-            environment.add(env("SCALEOUT_BUILD_EXTRA_NATIVE_IMAGE_ARGS",
-                    String.join(" ", extraNativeImageArgs)));
-        }
-        if (timeoutMinutes > 0) {
-            environment.add(env("SCALEOUT_BUILD_TIMEOUT_MINUTES", String.valueOf(timeoutMinutes)));
-        }
-        return environment;
-    }
-
-    private static KeyValuePair env(String name, String value) {
-        return KeyValuePair.builder().name(name).value(value).build();
+        BuildBackend backend = new DirectEcsBuildBackend(s3Client, ecsClient, logsClient,
+                clusterSettings, containerSettings, options, getLog());
+        return backend.runCells(remoteCells, plan, buildId, this::attachArtifacts);
     }
 
     private EcsLaunchType resolveLaunchType() throws MojoFailureException {
@@ -747,8 +554,8 @@ public class BuildMojo extends AbstractMojo {
 
     private void attachArtifacts(MatrixCell cell, List<Path> artifacts) {
         for (Path artifact : artifacts) {
-            String classifierBase = cell.architecture == null ? cell.buildKind.configValue()
-                    : cell.buildKind.configValue() + "-" + cell.architecture.artifactClassifier();
+            String classifierBase = cell.architecture() == null ? cell.buildKind().configValue()
+                    : cell.buildKind().configValue() + "-" + cell.architecture().artifactClassifier();
             String classifier = artifacts.size() == 1 ? classifierBase
                     : classifierBase + "-" + artifact.getFileName();
             String type = guessType(artifact);

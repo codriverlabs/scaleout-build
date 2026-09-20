@@ -18,8 +18,8 @@ class BuildMojoLocalRemoteSplitTest {
 
     @Test
     void byDefaultAHostMatchingCellBuildsLocallyAndTheOtherGoesRemote() {
-        var hostCell = new BuildMojo.MatrixCell(BuildKind.NATIVE, HOST);
-        var otherCell = new BuildMojo.MatrixCell(BuildKind.NATIVE, OTHER);
+        var hostCell = new MatrixCell(BuildKind.NATIVE, HOST);
+        var otherCell = new MatrixCell(BuildKind.NATIVE, OTHER);
 
         var split = BuildMojo.splitLocalAndRemote(List.of(hostCell, otherCell), false);
 
@@ -29,8 +29,8 @@ class BuildMojoLocalRemoteSplitTest {
 
     @Test
     void forceRemoteSendsEveryCellRemoteEvenTheHostMatchingOne() {
-        var hostCell = new BuildMojo.MatrixCell(BuildKind.NATIVE, HOST);
-        var otherCell = new BuildMojo.MatrixCell(BuildKind.NATIVE, OTHER);
+        var hostCell = new MatrixCell(BuildKind.NATIVE, HOST);
+        var otherCell = new MatrixCell(BuildKind.NATIVE, OTHER);
 
         var split = BuildMojo.splitLocalAndRemote(List.of(hostCell, otherCell), true);
 
