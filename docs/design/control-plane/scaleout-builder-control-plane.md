@@ -2,8 +2,11 @@
 
 ## Status: Proposed — design only, no code written
 
-Companion document: [`migration-from-direct-ecs-access.md`](migration-from-direct-ecs-access.md)
-covers how to get from today's model to this one without a flag-day cutover.
+Companion documents:
+[`migration-from-direct-ecs-access.md`](migration-from-direct-ecs-access.md) covers how to get from
+today's model to this one without a flag-day cutover.
+[`sigv4-client-signing.md`](sigv4-client-signing.md) is the reference design for how clients
+authenticate to this service, and is written to be usable outside this repository.
 
 ## Problem
 
