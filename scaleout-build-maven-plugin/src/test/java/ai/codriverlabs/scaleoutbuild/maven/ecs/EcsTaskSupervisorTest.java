@@ -62,7 +62,10 @@ class EcsTaskSupervisorTest {
         environment = List.of(KeyValuePair.builder().name("SCALEOUT_BUILD_ARCH").value("ARM64").build());
         logLines = new java.util.ArrayList<>();
 
-        when(logsClient.filterLogEvents(any(Consumer.class)))
+        // lenient(): the stream-name composition test below is a pure unit test of a static helper
+        // and never polls CloudWatch, so strict stubbing would fail it for not using this stub.
+        // Relaxing "was this stub used" here does not weaken any assertion in the tailing tests.
+        org.mockito.Mockito.lenient().when(logsClient.filterLogEvents(any(Consumer.class)))
                 .thenReturn(FilterLogEventsResponse.builder().events(List.of()).build());
     }
 
@@ -262,6 +265,56 @@ class EcsTaskSupervisorTest {
         assertThat(result.succeeded()).isFalse();
         assertThat(result.spotInterruptions()).isZero();
         verify(ecsClient, times(1)).runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class));
+    }
+
+    /**
+     * Regression guard for a bug confirmed against real AWS: every matrix cell's task definition
+     * shares one {@code awslogs-stream-prefix}, so tailing on that bare prefix matched every
+     * concurrent cell's stream. Each cell then printed the other cell's lines under its own label,
+     * and the single {@code logsSince} watermark — advanced by whichever stream emitted most
+     * recently — silently dropped the slower task's genuinely-new lines. The filter must therefore
+     * be the task-scoped stream name, {@code <prefix>/<container-name>/<task-id>}.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void tailsOnlyTheSupervisedTasksOwnLogStreamNotTheSharedPrefix() throws InterruptedException {
+        when(ecsClient.runTask(any(software.amazon.awssdk.services.ecs.model.RunTaskRequest.class))).thenReturn(RunTaskResponse.builder()
+                .tasks(Task.builder()
+                        .taskArn("arn:aws:ecs:us-east-1:123456789012:task/scaleout-build/abc123def456")
+                        .build())
+                .build());
+        when(ecsClient.describeTasks(any(Consumer.class))).thenReturn(DescribeTasksResponse.builder()
+                .tasks(Task.builder()
+                        .taskArn("arn:aws:ecs:us-east-1:123456789012:task/scaleout-build/abc123def456")
+                        .lastStatus("STOPPED")
+                        .stoppedReason("Essential container in task exited")
+                        .containers(Container.builder().exitCode(0).build()).build())
+                .build());
+
+        supervisor.supervise(clusterSettings, "arn:...:task-definition/x:1", environment,
+                "scaleout-build", logLines::add,
+                EcsTaskSupervisor.SupervisionOptions.defaults().pollInterval(Duration.ofMillis(10)));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(Consumer.class);
+        verify(logsClient, org.mockito.Mockito.atLeastOnce()).filterLogEvents(captor.capture());
+        var builder = software.amazon.awssdk.services.cloudwatchlogs.model.FilterLogEventsRequest
+                .builder();
+        ((Consumer<software.amazon.awssdk.services.cloudwatchlogs.model.FilterLogEventsRequest.Builder>)
+                captor.getValue()).accept(builder);
+        assertThat(builder.build().logStreamNamePrefix())
+                .isEqualTo("scaleout-build/scaleout-build-agent/abc123def456");
+    }
+
+    @Test
+    void composesTheAwslogsStreamNameFromTheTaskIdSegmentOfTheArn() {
+        assertThat(EcsTaskSupervisor.logStreamNameFor("scaleout-build",
+                "arn:aws:ecs:eu-west-1:864899852480:task/scaleout-build-test/4ca29c85a3d649a7b805fcf7f912dfd0"))
+                .isEqualTo("scaleout-build/scaleout-build-agent/4ca29c85a3d649a7b805fcf7f912dfd0");
+        // Two tasks in the same cluster must never collapse onto the same stream name -- that
+        // collision is exactly what the shared-prefix bug amounted to.
+        assertThat(EcsTaskSupervisor.logStreamNameFor("scaleout-build", "arn:...:task/cluster/aaa"))
+                .isNotEqualTo(
+                        EcsTaskSupervisor.logStreamNameFor("scaleout-build", "arn:...:task/cluster/bbb"));
     }
 }
 

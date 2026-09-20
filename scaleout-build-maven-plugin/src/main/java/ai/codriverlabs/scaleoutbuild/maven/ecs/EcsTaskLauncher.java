@@ -57,7 +57,12 @@ public final class EcsTaskLauncher {
 
     private static final String CAPACITY_PROVIDER_SPOT = "FARGATE_SPOT";
     private static final String CAPACITY_PROVIDER_ON_DEMAND = "FARGATE";
-    private static final String CONTAINER_NAME = "scaleout-build-agent";
+    /**
+     * Must be the same container name the task definition was registered with, otherwise the
+     * container override silently fails to apply — so it reads the single source in
+     * {@link TaskDefinitionRegistrar} rather than keeping its own copy of the literal.
+     */
+    private static final String CONTAINER_NAME = TaskDefinitionRegistrar.CONTAINER_NAME;
 
     private final EcsClient ecsClient;
 

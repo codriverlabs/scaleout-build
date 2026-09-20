@@ -56,7 +56,16 @@ public final class TaskDefinitionRegistrar {
     /** Tag key holding the content hash used to detect an unchanged configuration. */
     static final String CONFIG_HASH_TAG_KEY = "scaleout:configHash";
 
-    private static final String CONTAINER_NAME = "scaleout-build-agent";
+    /**
+     * Name of the single container in the generated task definition. Public because it is the
+     * middle segment of the {@code awslogs} driver's stream name
+     * ({@code <awslogs-stream-prefix>/<container-name>/<task-id>}), so anything that needs to
+     * address one task's log stream exactly — {@link EcsTaskSupervisor} — has to compose it from
+     * the same value used here. Previously duplicated as a private constant in
+     * {@link EcsTaskLauncher} too; a single source avoids the two drifting apart and silently
+     * breaking stream-name composition.
+     */
+    public static final String CONTAINER_NAME = "scaleout-build-agent";
     private static final String MOUNT_VOLUME_NAME = "scaleout-build-mount";
     /** Container path the staging mount is exposed at; must match {@code AgentConfig}'s default. */
     public static final String MOUNT_CONTAINER_PATH = "/mnt/build";

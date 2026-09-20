@@ -17,10 +17,15 @@ import software.amazon.awssdk.services.cloudwatchlogs.model.ResourceNotFoundExce
 /**
  * Tails a running task's CloudWatch Logs stream into the Maven console, incrementally.
  *
- * <p>Polls with {@code FilterLogEvents} and a {@code logStreamNamePrefix} rather than a specific
- * stream name, because the {@code awslogs} driver's stream name
- * ({@code prefix/container-name/task-id}) is only known once the task has actually started — the
- * prefix alone is known from the task definition's log configuration.
+ * <p>Polls with {@code FilterLogEvents}, whose filter is a stream-name <em>prefix</em>. Callers
+ * supervising a specific task should pass that task's full, exact stream name (see
+ * {@code EcsTaskSupervisor#logStreamNameFor}) rather than the task definition's shared
+ * {@code awslogs-stream-prefix}: a full name used as a prefix matches exactly the one stream, while
+ * the bare shared prefix matches every concurrent task's stream in the group. Passing the shared
+ * prefix is not merely noisy — the watermark below is a single timestamp, so events interleaved from
+ * another task advance it past the current task's own unread lines and those lines are then dropped
+ * as "already forwarded". The stream name is derivable as soon as {@code RunTask} returns, so there
+ * is no window in which only the prefix is known.
  *
  * <p>Uses a moving {@code startTime} watermark rather than {@code nextToken} pagination: for a
  * continuously appended stream being tailed live (not read once to completion), tracking "the

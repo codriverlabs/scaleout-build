@@ -118,12 +118,13 @@ public final class EcsTaskSupervisor {
 
         String currentTaskArn = launcher.runTask(clusterSettings, taskDefinitionArn, environment,
                 false);
+        String currentLogStreamName = logStreamNameFor(logStreamNamePrefix, currentTaskArn);
         int spotInterruptions = 0;
         Instant logsSince = Instant.EPOCH;
         Instant deadline = Instant.now().plus(effectiveOptions.overallTimeout);
 
         while (true) {
-            logsSince = tailLogsBestEffort(clusterSettings, logStreamNamePrefix, logsSince, logSink);
+            logsSince = tailLogsBestEffort(clusterSettings, currentLogStreamName, logsSince, logSink);
 
             Task task = describeTask(clusterSettings, currentTaskArn);
             if (task != null && "STOPPED".equals(task.lastStatus())) {
@@ -136,7 +137,10 @@ public final class EcsTaskSupervisor {
                             preferOnDemand ? " preferring on-demand capacity" : "");
                     currentTaskArn = launcher.runTask(clusterSettings, taskDefinitionArn, environment,
                             preferOnDemand);
-                    logsSince = Instant.EPOCH; // new task, new log stream
+                    // New task, new log stream: both the stream name (it embeds the task id) and
+                    // the watermark have to be reset, not just the watermark.
+                    currentLogStreamName = logStreamNameFor(logStreamNamePrefix, currentTaskArn);
+                    logsSince = Instant.EPOCH;
                 } else {
                     return terminalResult(task, spotInterruptions);
                 }
@@ -188,10 +192,37 @@ public final class EcsTaskSupervisor {
         return response.tasks().isEmpty() ? null : response.tasks().get(0);
     }
 
-    private Instant tailLogsBestEffort(EcsClusterSettings clusterSettings, String logStreamNamePrefix,
+    /**
+     * Composes the exact {@code awslogs} log stream name for one task:
+     * {@code <awslogs-stream-prefix>/<container-name>/<task-id>}, where the task id is the last
+     * segment of the task ARN ({@code arn:aws:ecs:<region>:<account>:task/<cluster>/<task-id>}).
+     *
+     * <p><b>Why this exists rather than tailing on {@code logStreamNamePrefix} alone.</b> Every
+     * matrix cell's task definition shares one {@code awslogs-stream-prefix}
+     * ({@link TaskDefinitionRegistrar#LOG_STREAM_PREFIX}), so filtering on the bare prefix matches
+     * <em>every</em> concurrent cell's stream in the group — and every earlier build's streams that
+     * still fall inside the poll window. That produced two distinct, confirmed failures when
+     * x86_64 and arm64 cells ran concurrently against real AWS: each cell's console output
+     * contained the other cell's lines under its own label, and — more seriously — because
+     * {@code logsSince} advances to the newest event seen across all matched streams, genuinely new
+     * lines from the slower task were older than that watermark and got silently dropped by the
+     * tailer's own de-duplication. Scoping to one stream fixes both, and also stops each cell
+     * re-scanning every other cell's log data on every poll.
+     *
+     * <p>The task ARN is available as soon as {@code RunTask} returns, which is strictly before the
+     * first poll — so nothing here depends on the task having started yet. The stream itself may
+     * not exist for the first few polls; {@link CloudWatchLogTailer} already treats that as normal.
+     */
+    static String logStreamNameFor(String logStreamNamePrefix, String taskArn) {
+        int lastSlash = taskArn.lastIndexOf('/');
+        String taskId = lastSlash >= 0 ? taskArn.substring(lastSlash + 1) : taskArn;
+        return logStreamNamePrefix + "/" + TaskDefinitionRegistrar.CONTAINER_NAME + "/" + taskId;
+    }
+
+    private Instant tailLogsBestEffort(EcsClusterSettings clusterSettings, String logStreamName,
                                        Instant since, BuildLog logSink) {
         try {
-            return logTailer.pollOnce(clusterSettings.logGroupName(), logStreamNamePrefix, since,
+            return logTailer.pollOnce(clusterSettings.logGroupName(), logStreamName, since,
                     logSink);
         } catch (RuntimeException e) {
             // Log tailing is a convenience, not load-bearing: a transient CloudWatch Logs error
