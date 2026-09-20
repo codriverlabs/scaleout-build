@@ -105,12 +105,70 @@ No behaviour change. Establishes what "identical" means before anything moves.
 
 1. Record a known-good baseline run of the example app on the direct path: the two artifact
    SHA-256 digests, the per-cell wall-clock durations, and the staged input digests.
-2. Extract the plugin's current AWS-facing logic behind a narrow internal interface — something like
-   `BuildBackend` with `submit`, `status`, `logs`, `cancel`, `artifacts` — implemented today by the
-   existing direct-ECS code. This is a pure refactor with no functional change, and it is the seam
-   the service client plugs into later.
+2. Extract the plugin's current AWS-facing logic behind a narrow internal interface, implemented
+   today by the existing direct-ECS code. This is a pure refactor with no functional change, and it
+   is the seam the service client plugs into later.
 
-Exit criteria: `mvn -B clean verify` green; a direct-path E2E run reproducing the baseline digests.
+### Status: done
+
+`MatrixCell` was promoted out of `BuildMojo` to a top-level type (it is the unit of work every
+backend deals in, and leaving it nested would force a service client to depend on the Mojo class
+just to name its own input type). The remote path moved to
+`ai.codriverlabs.scaleoutbuild.maven.backend`: `BuildBackend` (the seam), `DirectEcsBuildBackend`
+(today's behaviour, lifted unchanged), and `RemoteBuildOptions` (the per-invocation knobs that are
+not infrastructure identity — the existing `EcsClusterSettings` and `AgentContainerSettings` already
+carry that). `BuildMojo` shrank by 151 lines and now builds the settings, constructs the backend,
+and passes `this::attachArtifacts` as the artifact sink.
+
+Verified by 99 tests green with no test changes beyond the `MatrixCell` rename, plus a real E2E run
+against the live stack: both artifacts correct (`ELF x86-64` / `ELF ARM aarch64`), per-cell log
+labels still cleanly separated (8/0 and 0/7), and one CAS entry for the dependency jar across three
+runs.
+
+### Correction to this document's original sketch of the seam
+
+This document first described the interface as carrying `submit`, `status`, `logs`, `cancel`, and
+`artifacts`. **That was wrong, and the implementation deliberately does not follow it.** Those five
+operations are the control plane's *wire protocol*, not the plugin's seam. The direct backend has no
+notion of a build id to poll or a stream to resume, because the client process *is* the supervisor;
+forcing today's blocking supervision loop into a submit-then-poll shape would have been a redesign
+rather than the behaviour-preserving refactor Phase 0 exists to be.
+
+The seam is therefore a single coarse `runCells(cells, plan, buildId, artifactSink)`. A service
+backend expresses submit, poll, stream, and cancel *internally*, behind that same method. Artifact
+attachment stays with the caller via a sink callback, both because it needs `MavenProjectHelper` and
+because passing a callback preserves today's log interleaving exactly — each cell's artifact is
+attached as that cell finishes, not after all cells finish.
+
+### Finding: artifact digests cannot be the differential-test gate
+
+Recording the baseline produced evidence that settles an open item this document previously listed
+as untested. Two runs over identical sources produced **different** artifact digests at
+**identical** sizes:
+
+| Run | `NATIVE-X86_64` | `NATIVE-ARM64` |
+|---|---|---|
+| 1 | `1e1e7379…` | `7de0154e…` |
+| 2 | `6f0de787…` | `70f2696d…` |
+
+The staging CAS explains it: there are **two** distinct digests for the 5060-byte example-app jar
+but only **one** for the 709075-byte `commons-lang3` jar. So Maven's own jar output is not
+byte-reproducible between runs — almost certainly embedded timestamps — which means the
+`native-image` input differs even when the source does not, and the output digest cannot match.
+
+Consequences, both now reflected below:
+
+- The Phase 1 differential test **cannot** be strict about artifact digests. It uses the
+  architecture, dynamic-linker path, and successful-execution comparison instead.
+- Setting `project.build.outputTimestamp` in the example app would make the jar reproducible and
+  could restore a strict digest gate. Worth trying, but it is a change to the example project rather
+  than a property of the pipeline, so it is not assumed here.
+- Unchanged dependency jars dedupe perfectly across runs and across developers; the project's own
+  jar re-uploads every time. That is the expected steady state for the control plane's upload
+  negotiation, and it means `POST /builds` will almost always have exactly one digest to hand back a
+  presigned URL for.
+
+Exit criteria: `mvn -B clean verify` green; a direct-path E2E run reproducing the baseline.
 
 ## Phase 1 — service deployed, direct path still default
 
@@ -129,9 +187,10 @@ Exit criteria — the differential test, which is the real gate:
 
 - The example app builds successfully via `aws-ecs.endpoint`.
 - Both artifacts are genuine, distinct `ELF x86-64` and `ELF ARM aarch64` binaries.
-- The artifact digests match the Phase 0 baseline. A native-image build is not bit-reproducible in
-  general, so if digests differ, the comparison falls back to architecture, dynamic-linker path, and
-  successful execution — and that weakening is recorded rather than glossed over.
+- The artifact digests match the Phase 0 baseline. **Not achievable as stated** — see Phase 0's
+  "artifact digests cannot be the differential-test gate". The comparison is architecture, dynamic-
+  linker path, and successful execution, unless `project.build.outputTimestamp` is set on the example
+  app first to make its jar reproducible.
 - A reconnect across the 15-minute Lambda boundary loses no log lines, verified by comparing the
   reassembled stream against the CloudWatch stream contents directly.
 - `Ctrl+C` during a service-path build results in `CANCELLED` state and stopped ECS tasks, confirmed
@@ -235,6 +294,6 @@ layout.
   read permission and a region assumption.
 - Whether Phase 2's deprecation warning should escalate to a build failure before Phase 3, to force
   discovery of remaining direct-path users rather than waiting to find out.
-- Whether the differential test in Phase 1 can be made strict about artifact digests, which depends
-  on whether `native-image` output is reproducible for a fixed toolchain and input set. Untested —
-  if it is, the gate is much stronger than the architecture-and-execution fallback.
+- Whether setting `project.build.outputTimestamp` on the example app makes its jar reproducible and
+  so restores a strict artifact-digest gate for the Phase 1 differential test. The jar is currently
+  *not* reproducible (see Phase 0), which is why the gate is weaker than originally written.

@@ -125,7 +125,7 @@ class BuildMojoRemoteCellsTest {
 
         NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),
                 "-o\noutput/test-app\n", List.of("test-app"));
-        List<BuildMojo.MatrixCell> remoteCells =
+        List<MatrixCell> remoteCells =
                 List.of(newCell(BuildKind.NATIVE, Architecture.ARM64));
 
         List<String> failures = mojo.runRemoteCells(remoteCells, generatedPlan, "b1", s3Client,
@@ -233,7 +233,7 @@ class BuildMojoRemoteCellsTest {
 
         NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),
                 "-o\noutput/test-app\n", List.of("test-app"));
-        List<BuildMojo.MatrixCell> remoteCells =
+        List<MatrixCell> remoteCells =
                 List.of(newCell(BuildKind.NATIVE, Architecture.ARM64));
 
         List<String> failures = mojo.runRemoteCells(remoteCells, generatedPlan, "b1", s3Client,
@@ -283,7 +283,7 @@ class BuildMojoRemoteCellsTest {
 
         NativeImageInputPlan generatedPlan = NativeImageInputPlan.generated(List.of(),
                 "-o\noutput/test-app\n", List.of("test-app"));
-        List<BuildMojo.MatrixCell> remoteCells = List.of(
+        List<MatrixCell> remoteCells = List.of(
                 newCell(BuildKind.NATIVE, Architecture.X86_64),
                 newCell(BuildKind.NATIVE, Architecture.ARM64));
 
@@ -295,8 +295,8 @@ class BuildMojoRemoteCellsTest {
         verify(projectHelper, times(2)).attachArtifact(any(), any(), any(), any());
     }
 
-    private static BuildMojo.MatrixCell newCell(BuildKind buildKind, Architecture architecture) {
-        return new BuildMojo.MatrixCell(buildKind, architecture);
+    private static MatrixCell newCell(BuildKind buildKind, Architecture architecture) {
+        return new MatrixCell(buildKind, architecture);
     }
 
     private static void setField(Object target, String name, Object value) throws Exception {
