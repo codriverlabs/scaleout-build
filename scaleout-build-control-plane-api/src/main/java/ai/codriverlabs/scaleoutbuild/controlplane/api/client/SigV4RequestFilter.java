@@ -17,7 +17,6 @@ import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.http.auth.aws.signer.AwsV4FamilyHttpSigner;
 import software.amazon.awssdk.http.auth.aws.signer.AwsV4HttpSigner;
 import software.amazon.awssdk.http.auth.spi.signer.SignedRequest;
-import software.amazon.awssdk.identity.spi.AwsCredentialsIdentity;
 import software.amazon.awssdk.regions.Region;
 
 /**
@@ -133,10 +132,15 @@ public final class SigV4RequestFilter implements ClientRequestFilter {
         });
 
         SignedRequest signed = signer.sign(b -> {
-            b.identity((AwsCredentialsIdentity) credentialsProvider.resolveCredentials())
+            // No cast needed: AwsCredentials extends AwsCredentialsIdentity.
+            b.identity(credentialsProvider.resolveCredentials())
                     .request(unsigned.build())
                     .putProperty(AwsV4FamilyHttpSigner.SERVICE_SIGNING_NAME, service)
                     .putProperty(AwsV4HttpSigner.REGION_NAME, region.id());
+            // DOUBLE_URL_ENCODE, NORMALIZE_PATH (both default true), PAYLOAD_SIGNING_ENABLED
+            // (default true) and AUTH_LOCATION (default HEADER) are deliberately left at their
+            // defaults, which are correct for every service except S3. See
+            // docs/design/control-plane/sigv4-client-signing.md.
             if (payload.length > 0) {
                 b.payload(() -> new ByteArrayInputStream(payload));
             }
