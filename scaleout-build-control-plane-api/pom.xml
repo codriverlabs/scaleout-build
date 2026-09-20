@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Copyright © 2026 Plasticity.Cloud Limited & CoDriverLabs Limited. All rights reserved.
+  -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ai.codriverlabs</groupId>
+        <artifactId>scaleout-build-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>scaleout-build-control-plane-api</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Scaleout Build (control-plane API)</name>
+    <description>
+        Scaleout builder control-plane API contract — JAX-RS interfaces, request/response records,
+        and a SigV4 client filter. Shared by the service implementation, the Maven plugin's service
+        backend, any CLI, and an MCP server. Deliberately free of server or AWS-orchestration logic
+        so that consuming the contract does not drag in an implementation.
+    </description>
+
+    <dependencies>
+        <!--
+          Domain vocabulary (BuildKind, Architecture, StagingLayout) is reused rather than
+          re-declared: duplicating the enums here would let the wire contract and the build engine
+          drift apart silently, which is a worse failure than the small transitive cost. This module
+          only pulls jackson-databind and slf4j-api through it.
+        -->
+        <dependency>
+            <groupId>ai.codriverlabs</groupId>
+            <artifactId>scaleout-build-shared</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!--
+          provided: the consumer supplies the JAX-RS and Jackson implementations. A Quarkus service,
+          a Maven plugin using a plain HTTP client, and an MCP server all bring their own, and this
+          module must not pick one for them.
+        -->
+        <dependency>
+            <groupId>jakarta.ws.rs</groupId>
+            <artifactId>jakarta.ws.rs-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
+          optional: only needed by clients that sign requests themselves (the Maven plugin, a CLI,
+          an MCP server). The service implementation does not sign anything, so it should not
+          inherit these.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>auth</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>http-auth-aws</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>regions</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Instant round-trips need JavaTimeModule, which findAndRegisterModules() discovers. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

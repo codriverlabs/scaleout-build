@@ -21,6 +21,7 @@
 
     <modules>
         <module>scaleout-build-shared</module>
+        <module>scaleout-build-control-plane-api</module>
         <module>scaleout-build-maven-plugin</module>
         <module>scaleout-build-agent</module>
         <module>scaleout-test-infra</module>
@@ -34,6 +35,8 @@
         <!-- Runtime dependencies -->
         <awssdk.version>2.54.16</awssdk.version>
         <jackson.version>2.22.2</jackson.version>
+        <!-- Jakarta REST 4.0 is the latest published (4.0.1/4.1.0 do not exist on Central). -->
+        <jakarta-ws-rs.version>4.0.0</jakarta-ws-rs.version>
         <slf4j.version>2.0.19</slf4j.version>
 
         <!-- Maven API (provided scope: supplied by the running Maven instance) -->
@@ -86,6 +89,11 @@
                 <scope>import</scope>
             </dependency>
 
+            <dependency>
+                <groupId>jakarta.ws.rs</groupId>
+                <artifactId>jakarta.ws.rs-api</artifactId>
+                <version>${jakarta-ws-rs.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-api</artifactId>
