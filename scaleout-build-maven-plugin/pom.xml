@@ -30,6 +30,11 @@
     <dependencies>
         <dependency>
             <groupId>ai.codriverlabs</groupId>
+            <artifactId>scaleout-build-ecs</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.codriverlabs</groupId>
             <artifactId>scaleout-build-shared</artifactId>
         </dependency>
 

@@ -11,7 +11,7 @@ import static org.mockito.Mockito.when;
 
 import ai.codriverlabs.scaleoutbuild.build.Architecture;
 import ai.codriverlabs.scaleoutbuild.build.BuildKind;
-import ai.codriverlabs.scaleoutbuild.maven.planner.NativeImageInputPlan;
+import ai.codriverlabs.scaleoutbuild.planner.NativeImageInputPlan;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;

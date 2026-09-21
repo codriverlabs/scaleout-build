@@ -22,6 +22,7 @@
     <modules>
         <module>scaleout-build-shared</module>
         <module>scaleout-build-control-plane-api</module>
+        <module>scaleout-build-ecs</module>
         <module>scaleout-build-maven-plugin</module>
         <module>scaleout-build-agent</module>
         <module>scaleout-test-infra</module>
