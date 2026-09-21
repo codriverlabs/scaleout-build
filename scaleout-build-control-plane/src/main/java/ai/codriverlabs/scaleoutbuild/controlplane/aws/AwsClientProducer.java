@@ -9,6 +9,8 @@ import jakarta.enterprise.inject.Produces;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.regions.providers.DefaultAwsRegionProviderChain;
+import ai.codriverlabs.scaleoutbuild.ecs.CloudWatchLogTailer;
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
@@ -60,6 +62,26 @@ public class AwsClientProducer {
                 .region(region())
                 .httpClientBuilder(UrlConnectionHttpClient.builder())
                 .build();
+    }
+
+    @Produces
+    @ApplicationScoped
+    public CloudWatchLogsClient cloudWatchLogsClient() {
+        return CloudWatchLogsClient.builder()
+                .region(region())
+                .httpClientBuilder(UrlConnectionHttpClient.builder())
+                .build();
+    }
+
+    /** The tailer is stateless; one instance is reused across streaming invocations. */
+    @Produces
+    @ApplicationScoped
+    public CloudWatchLogTailer logTailer(CloudWatchLogsClient logsClient) {
+        return new CloudWatchLogTailer(logsClient);
+    }
+
+    void closeLogs(@Disposes CloudWatchLogsClient client) {
+        client.close();
     }
 
     void closeS3(@Disposes S3Client client) {

@@ -319,7 +319,7 @@ public class BuildService {
      * not hold a supervision loop the way the plugin's direct backend does, so state is pulled on
      * read rather than pushed.
      */
-    BuildRecord refreshFromEcs(BuildRecord record) {
+    public BuildRecord refreshFromEcs(BuildRecord record) {
         List<String> taskArns = record.getCells().stream()
                 .filter(c -> !c.getState().isTerminal() && c.getTaskArn() != null)
                 .map(BuildRecord.CellRecord::getTaskArn)
