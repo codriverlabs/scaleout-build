@@ -13,6 +13,7 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
+import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -59,8 +60,13 @@ public class CallerIdentityFilter implements ContainerRequestFilter {
     @ConfigProperty(name = "scaleout.auth.allow-dev-principal", defaultValue = "false")
     boolean allowDevPrincipal;
 
-    @ConfigProperty(name = "scaleout.auth.dev-principal-arn", defaultValue = "")
-    String devPrincipalArn;
+    /**
+     * Optional, not a String with an empty default: SmallRye converts {@code ""} to null and then
+     * fails injection outright, which the GraalVM native build surfaced as a class-initialization
+     * error at image build time.
+     */
+    @ConfigProperty(name = "scaleout.auth.dev-principal-arn")
+    Optional<String> devPrincipalArn;
 
     /** Paths served without a caller identity: health checks, which the Lambda runtime itself polls. */
     private static boolean isUnauthenticatedPath(String path) {
@@ -80,11 +86,11 @@ public class CallerIdentityFilter implements ContainerRequestFilter {
             ctx.setProperty(CallerIdentity.PROPERTY, resolver.resolve(header));
             return;
         } catch (UnauthenticatedException e) {
-            if (allowDevPrincipal && !devPrincipalArn.isBlank()) {
+            if (allowDevPrincipal && devPrincipalArn.filter(a -> !a.isBlank()).isPresent()) {
                 LOG.warnf("Using configured dev principal %s because %s (NEVER enable this in a "
-                        + "deployed environment)", devPrincipalArn, e.getMessage());
+                        + "deployed environment)", devPrincipalArn.orElseThrow(), e.getMessage());
                 ctx.setProperty(CallerIdentity.PROPERTY,
-                        CallerIdentityResolver.of(devPrincipalArn, null, null));
+                        CallerIdentityResolver.of(devPrincipalArn.orElseThrow(), null, null));
                 return;
             }
             // Deliberately not echoing the reason to the client: whether the header was absent

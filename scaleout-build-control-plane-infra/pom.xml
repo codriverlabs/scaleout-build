@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Copyright © 2026 Plasticity.Cloud Limited & CoDriverLabs Limited. All rights reserved.
+  -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ai.codriverlabs</groupId>
+        <artifactId>scaleout-build-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>scaleout-build-control-plane-infra</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Scaleout Build (control-plane infrastructure)</name>
+    <description>
+        AWS CDK app provisioning the control plane and the ECS data plane it drives, as one stack.
+        Long-lived, unlike scaleout-test-infra: the DynamoDB table and staging bucket are RETAIN.
+    </description>
+
+    <properties>
+        <!-- 2.270.0 verified as the newest published; scaleout-test-infra is on 2.269.0. -->
+        <aws-cdk-lib.version>2.270.0</aws-cdk-lib.version>
+        <constructs.version>10.8.1</constructs.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>software.amazon.awscdk</groupId>
+            <artifactId>aws-cdk-lib</artifactId>
+            <version>${aws-cdk-lib.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.constructs</groupId>
+            <artifactId>constructs</artifactId>
+            <version>${constructs.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>scaleout-build-control-plane-infra</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.4</version>
+                <configuration>
+                    <mainClass>
+                        ai.codriverlabs.scaleoutbuild.controlplane.infra.ControlPlaneInfraApp
+                    </mainClass>
+                    <classpathScope>compile</classpathScope>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

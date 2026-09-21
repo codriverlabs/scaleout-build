@@ -43,6 +43,15 @@ final class BuildItems {
     static final String ATTR_EXPIRES_AT = "expiresAt";
     static final String ATTR_TTL = "ttl";
     static final String ATTR_DOCUMENT = "document";
+    /**
+     * Running task ARNs, duplicated out of the JSON document as a top-level string set.
+     *
+     * <p>Redundant by design: the reaper is a separate Lambda that must stop a dead build's tasks, and
+     * without this it would have to parse the document JSON — coupling an independently deployed
+     * function to this service's storage shape. A flat attribute keeps the reaper's contract to
+     * "state, timestamps, task ARNs" and nothing more.
+     */
+    static final String ATTR_TASK_ARNS = "taskArns";
 
     private BuildItems() {
     }
@@ -67,6 +76,14 @@ final class BuildItems {
         putInstant(item, ATTR_EXPIRES_AT, record.getExpiresAt());
         if (record.getTtl() > 0) {
             item.put(ATTR_TTL, n(Long.toString(record.getTtl())));
+        }
+        var taskArns = record.getCells().stream()
+                .filter(c -> c.getTaskArn() != null && !c.getState().isTerminal())
+                .map(BuildRecord.CellRecord::getTaskArn)
+                .toList();
+        if (!taskArns.isEmpty()) {
+            item.put(ATTR_TASK_ARNS,
+                    software.amazon.awssdk.services.dynamodb.model.AttributeValue.fromSs(taskArns));
         }
         try {
             item.put(ATTR_DOCUMENT, s(mapper.writeValueAsString(new Document(
