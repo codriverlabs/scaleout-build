@@ -33,7 +33,7 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <!-- Runtime dependencies -->
-        <awssdk.version>2.54.16</awssdk.version>
+        <awssdk.version>2.55.0</awssdk.version>
         <jackson.version>2.22.2</jackson.version>
         <!-- Jakarta REST 4.0 is the latest published (4.0.1/4.1.0 do not exist on Central). -->
         <jakarta-ws-rs.version>4.0.0</jakarta-ws-rs.version>
