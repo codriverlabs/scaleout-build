@@ -6,6 +6,7 @@ package ai.codriverlabs.scaleoutbuild.maven.backend;
 import ai.codriverlabs.scaleoutbuild.build.StagingLayout;
 import ai.codriverlabs.scaleoutbuild.maven.MatrixCell;
 import ai.codriverlabs.scaleoutbuild.ecs.AgentContainerSettings;
+import ai.codriverlabs.scaleoutbuild.ecs.AgentEnvironment;
 import ai.codriverlabs.scaleoutbuild.ecs.CloudWatchLogTailer;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsClusterSettings;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsTaskLauncher;
@@ -224,40 +225,26 @@ public final class DirectEcsBuildBackend implements BuildBackend {
         return relativeName;
     }
 
-    /** Task-override environment variables matching {@code AgentConfig}'s exact names. */
+    /**
+     * Task-override environment for one cell.
+     *
+     * <p>Delegates to {@link AgentEnvironment}, which is the single source for the
+     * {@code SCALEOUT_BUILD_*} contract. Assembling it here as well would put the writer side in two
+     * places while the reader ({@code AgentConfig}) stays in one, with no compile-time link between
+     * them — the shape of the bug commit {@code b33f9e2} had to fix across 14 variables.
+     */
     private List<KeyValuePair> buildTaskOverrideEnvironment(String buildId, MatrixCell cell,
                                                             String stagingRelativePath,
                                                             NativeImageInputPlan plan,
                                                             String profileRelativePath) {
-        List<KeyValuePair> environment = new ArrayList<>();
-        environment.add(env("SCALEOUT_BUILD_MOUNT_ROOT", TaskDefinitionRegistrar.MOUNT_CONTAINER_PATH));
-        if (clusterSettings.agentUsesDirectS3Io()) {
-            environment.add(env("SCALEOUT_BUILD_S3_BUCKET", options.s3Bucket()));
-        }
-        environment.add(env("SCALEOUT_BUILD_ID", buildId));
-        environment.add(env("SCALEOUT_BUILD_KIND", cell.buildKind().configValue()));
-        environment.add(env("SCALEOUT_BUILD_ARCH", cell.architecture().name()));
-        environment.add(env("SCALEOUT_BUILD_STAGING_RELATIVE_PATH", stagingRelativePath));
-        environment.add(env("SCALEOUT_BUILD_ARG_FILE_NAME", plan.argsFileName()));
-        if (profileRelativePath != null) {
-            environment.add(env("SCALEOUT_BUILD_PROFILE_RELATIVE_PATH", profileRelativePath));
-        }
-        if (!plan.expectedArtifacts().isEmpty()) {
-            environment.add(env("SCALEOUT_BUILD_EXPECTED_ARTIFACTS",
-                    String.join(",", plan.expectedArtifacts())));
-        }
-        if (!options.extraNativeImageArgs().isEmpty()) {
-            environment.add(env("SCALEOUT_BUILD_EXTRA_NATIVE_IMAGE_ARGS",
-                    String.join(" ", options.extraNativeImageArgs())));
-        }
-        if (options.timeoutMinutes() > 0) {
-            environment.add(env("SCALEOUT_BUILD_TIMEOUT_MINUTES",
-                    String.valueOf(options.timeoutMinutes())));
-        }
-        return environment;
-    }
-
-    private static KeyValuePair env(String name, String value) {
-        return KeyValuePair.builder().name(name).value(value).build();
+        return AgentEnvironment
+                .builder(buildId, cell.buildKind(), cell.architecture(), stagingRelativePath,
+                        plan.argsFileName())
+                .s3Bucket(clusterSettings.agentUsesDirectS3Io() ? options.s3Bucket() : null)
+                .profileRelativePath(profileRelativePath)
+                .expectedArtifacts(plan.expectedArtifacts())
+                .extraNativeImageArgs(options.extraNativeImageArgs())
+                .timeoutMinutes(options.timeoutMinutes())
+                .build();
     }
 }
