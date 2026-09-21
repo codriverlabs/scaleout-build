@@ -118,8 +118,26 @@ public class ControlPlaneInfraStack extends Stack {
          * the dedup cache that keeps uploads near-free, plus every produced artifact. The cost is that
          * a destroy leaves it behind for manual cleanup, which is the correct trade for a long-lived
          * service and the wrong one for a disposable test stack.
+         *
+         * Named deterministically, consistently with every other resource here (cluster
+         * `scaleout-build`, table `scaleout-builds`, repository `scaleout-build-agent`, log groups
+         * under `/scaleout-build/`), rather than left to CDK's generated name. Bucket names are
+         * globally unique, so account and region are part of it -- which also makes it regional by
+         * construction, so two regions can host independent deployments.
+         *
+         * A predictable name is operationally useful: an engineer can find the staging prefix in the
+         * console without being handed the name, which is why clients do not need it either. They
+         * receive presigned URLs, which already carry bucket, key, expiry and signature.
+         *
+         * Consequence of a fixed name plus RETAIN, worth knowing before the first teardown: after
+         * `cdk destroy` the bucket survives, so a later `cdk deploy` fails with "bucket already
+         * exists" rather than silently creating a second one. Recovery is `cdk import` to re-adopt it,
+         * or deleting it deliberately. That is the intended failure mode -- the alternative is a
+         * generated name that quietly orphans a bucket full of artifacts on every redeploy.
          */
         Bucket stagingBucket = Bucket.Builder.create(this, "StagingBucket")
+                .bucketName(String.format("scaleout-build-staging-%s-%s",
+                        this.getAccount(), this.getRegion()))
                 .versioned(true)
                 .blockPublicAccess(BlockPublicAccess.BLOCK_ALL)
                 .enforceSsl(true)
