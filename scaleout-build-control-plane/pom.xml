@@ -96,6 +96,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>url-connection-client</artifactId>
         </dependency>
+        <!-- Pulled in transitively by scaleout-build-ecs, declared for the CDI producer. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudwatchlogs</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>io.quarkus</groupId>

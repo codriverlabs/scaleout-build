@@ -213,7 +213,7 @@ public final class EcsTaskSupervisor {
      * first poll — so nothing here depends on the task having started yet. The stream itself may
      * not exist for the first few polls; {@link CloudWatchLogTailer} already treats that as normal.
      */
-    static String logStreamNameFor(String logStreamNamePrefix, String taskArn) {
+    public static String logStreamNameFor(String logStreamNamePrefix, String taskArn) {
         int lastSlash = taskArn.lastIndexOf('/');
         String taskId = lastSlash >= 0 ? taskArn.substring(lastSlash + 1) : taskArn;
         return logStreamNamePrefix + "/" + TaskDefinitionRegistrar.CONTAINER_NAME + "/" + taskId;
