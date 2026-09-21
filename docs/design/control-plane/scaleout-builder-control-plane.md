@@ -280,11 +280,27 @@ Presigned URLs expire; the client re-requests rather than caching them.
 
 ## Authorization and isolation
 
-The Function URL event follows API Gateway payload format 2.0, so the verified caller is available
-at `requestContext.authorizer.iam.userArn`. This is the same ownership model as
-`express-compute-control-plane`'s `docs/design/caller-identity-ownership.md`, with one adaptation:
-that document's snippet reads `request.getRequestContext().getIdentity().getUserArn()`, which is
-payload v1 / REST `AwsProxyRequest`. Function URLs use payload 2.0 and the `authorizer.iam` path.
+**Behind the Lambda Web Adapter the service is a plain HTTP server, so there is no Lambda event
+object to read.** LWA forwards the Lambda request context as an `x-amzn-request-context` request
+*header* containing the JSON that would otherwise have been `event.requestContext`. The verified
+caller is `userArn` inside it. This is the mechanism `express-compute-control-plane`'s
+`CallerIdentityFilter` uses, and it is worth stating explicitly because the obvious alternative —
+reading `requestContext.authorizer.iam.userArn` from an event payload — only applies to a function
+invoked *without* LWA.
+
+Extraction therefore happens in a `ContainerRequestFilter`, parsing that header with Jackson (not
+string scanning) and putting the normalized principal on the request context for downstream use.
+
+**The header must fail closed.** It is attacker-controlled input in any deployment where the service
+is reachable other than through the Function URL, because LWA is the only thing that guarantees it
+was set by AWS rather than by the client. Two rules follow:
+
+1. If the header is absent or unparseable, reject with `401` — do **not** proceed with a null owner.
+   Proceeding is a fail-open path that would let an unauthenticated caller create builds owned by
+   nobody, and then read them back by asking for the same null owner.
+2. Local development, which has no LWA in front, must opt in explicitly (a dev-only profile
+   supplying a fixed principal) rather than being served by the production code path treating a
+   missing header as anonymous.
 
 Assumed-role ARNs are normalized to a stable principal before comparison, so the same role always
 resolves to the same owner regardless of session name:

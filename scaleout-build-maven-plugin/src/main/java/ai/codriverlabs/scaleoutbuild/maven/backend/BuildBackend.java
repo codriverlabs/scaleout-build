@@ -4,7 +4,7 @@
 package ai.codriverlabs.scaleoutbuild.maven.backend;
 
 import ai.codriverlabs.scaleoutbuild.maven.MatrixCell;
-import ai.codriverlabs.scaleoutbuild.maven.planner.NativeImageInputPlan;
+import ai.codriverlabs.scaleoutbuild.planner.NativeImageInputPlan;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;

@@ -260,6 +260,38 @@ Use static test credentials, never the default chain, so tests do not depend on 
 Integration-test against the real endpoint at least once: unit tests confirm internal consistency,
 not that AWS agrees with you.
 
+## Server side: how the caller identity arrives
+
+Included here because it is the other half of the same contract, and because it is easy to get wrong
+in a way that is worse than a signing bug.
+
+**With the Lambda Web Adapter, there is no event object.** The service is a plain HTTP server; LWA
+forwards what would have been `event.requestContext` as an `x-amzn-request-context` request header
+containing that JSON. The verified caller is `userArn` within it.
+
+Do not reach for `requestContext.authorizer.iam.userArn` on a payload-format-2.0 event unless the
+function is invoked *without* LWA — with LWA in front, no such object exists in the application.
+
+Two rules for handling that header:
+
+- **Parse it with a JSON parser**, not `indexOf`/`substring` scanning. Hand-rolled extraction
+  silently returns the wrong field the moment a value contains an escaped quote or the key appears
+  inside another string.
+- **Fail closed.** If the header is missing or unparseable, return `401`. It is only trustworthy
+  because LWA sets it, so treating absence as "anonymous" is a fail-open path: in any deployment
+  reachable other than through the Function URL, a client can simply not send it — or send a forged
+  one — and be treated as an unauthenticated-but-accepted caller. Local development without LWA
+  should supply an identity through an explicit dev profile instead of relying on that path.
+
+Normalize assumed-role ARNs to a stable principal so a role maps to one owner regardless of session:
+
+```
+arn:aws:sts::123:assumed-role/Developers/alice  →  arn:aws:iam::123:role/Developers
+```
+
+Note the tradeoff this creates: everyone assuming the same role shares an identity. Including the
+session name fixes that but breaks the stable-owner property for CI.
+
 ## Anti-patterns observed in the wild
 
 Found in `express-compute-control-plane` at commit `f33b1f3`, and documented here because they are
@@ -274,6 +306,8 @@ the natural mistakes rather than unusual ones. Full report:
 | Defaulting region to `us-east-1` | Signature error against a correctly configured endpoint in another region |
 | Deprecated `Aws4Signer` | Works today; on a removal path |
 | Excluding only `Host` from signed headers | A pre-existing `Authorization` header gets folded into the canonical request |
+| `if (requestContext == null) return;` in the server-side identity filter | Fails open — request proceeds with no caller, so ownership checks compare against null |
+| Hand-rolled `indexOf`/`substring` JSON extraction of `x-amzn-request-context` | Returns the wrong value once a field contains an escaped quote, or a key name appears inside another string |
 
 ## Reference implementation
 
