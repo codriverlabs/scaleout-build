@@ -6,6 +6,37 @@ Companion document:
 [`scaleout-builder-control-plane.md`](scaleout-builder-control-plane.md) specifies the service this
 migration targets. Read that first; this document is only about how to get there.
 
+## Status: Partly superseded — read this first
+
+The phased plan below was written on the assumption that the direct-ECS path would be **kept** through
+Phases 1–2 as an escape hatch, with a differential test comparing both paths. That assumption has since
+been dropped:
+
+- **The direct path is not retained.** The `aws-ecs.*` parameters are deleted outright rather than
+  deprecated, and the property prefix becomes `scaleout-build.*`. There is no `directEcsAccess` flag.
+- **`deployment.properties` collapses to one line**, `scaleout-build.endpoint`. Not even a region: the
+  Function URL host is `<id>.lambda-url.<region>.on.aws`, so the client parses the signing region out
+  of the endpoint.
+- **`scaleout-test-infra` has been deleted**, and its deployed stack destroyed. It was to be kept
+  frozen only so the differential test could run both paths; with no direct path there is nothing to
+  compare. Its ECR repository and log group names also collided with the control-plane stack's, so the
+  old stack had to go before the new one could deploy.
+- **Phase 1's differential gate therefore has no live comparison.** It becomes verification against the
+  recorded baseline: both artifacts must be genuine `ELF x86-64` and `ELF ARM aarch64`, plausibly sized,
+  and actually execute. Digests could never have been part of it — see the reproducibility finding in
+  Phase 0.
+- **Phases 2 and 3 collapse into one step**, since there is no default to invert and no escape hatch to
+  withdraw. IAM revocation happens at the same time as the parameter deletion.
+
+What remains accurate and worth keeping: the Phase 0 parameter inventory, the reproducibility finding,
+the repository-placement reasoning, and the observation that revoking developer IAM is the step where
+the security benefit actually lands. Everything else below should be read as the plan that was
+considered, not the plan being executed.
+
+Storage layout is covered separately in
+[`storage-layout-and-isolation.md`](storage-layout-and-isolation.md), which supersedes any assumption
+here of a single flat content-addressed store.
+
 ## What is being migrated
 
 Today the Maven plugin talks directly to ECS, S3, CloudWatch Logs, and ECR using the developer's

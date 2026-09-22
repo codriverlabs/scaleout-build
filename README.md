@@ -22,9 +22,17 @@ classifiers.
   `aws-ecs:build` goal.
 - **`scaleout-build-agent`** — the container image that runs on the remote worker, executing one
   matrix cell and exiting.
-- **`scaleout-test-infra`** — an AWS CDK (Java) app that provisions a minimal, disposable AWS
-  environment for exercising `aws-ecs:build` against real AWS. Not part of the plugin's release
-  artifact.
+- **`scaleout-build-control-plane-api`** — the control plane's wire contract: JAX-RS interfaces,
+  request/response records, and a SigV4 client filter. Shared by the service, the plugin, and any
+  other client (a CLI, an MCP server).
+- **`scaleout-build-ecs`** — ECS task orchestration, S3 staging, and native-image input planning,
+  shared by the plugin and the control-plane service.
+- **`scaleout-build-control-plane`** — the Quarkus service that holds the ECS/S3/CloudWatch
+  permissions so developers need none. Runs as a Lambda behind a Function URL.
+- **`scaleout-build-control-plane-reaper`** — scheduled Lambda that stops the tasks of builds whose
+  client died.
+- **`scaleout-build-control-plane-infra`** — an AWS CDK (Java) app provisioning the control plane and
+  the ECS data plane it drives, as one stack. Not part of the plugin's release artifact.
 
 See [`docs/examples/scaleout-build-example-app`](docs/examples/scaleout-build-example-app) for a
 real, runnable example, verified end to end against AWS: native-image compilation for both

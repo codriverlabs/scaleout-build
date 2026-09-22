@@ -12,9 +12,13 @@ updates:
     directories:
       - "/"
       - "/scaleout-build-shared"
+      - "/scaleout-build-control-plane-api"
+      - "/scaleout-build-ecs"
+      - "/scaleout-build-control-plane"
+      - "/scaleout-build-control-plane-reaper"
+      - "/scaleout-build-control-plane-infra"
       - "/scaleout-build-maven-plugin"
       - "/scaleout-build-agent"
-      - "/scaleout-test-infra"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -50,9 +54,8 @@ updates:
     schedule:
       interval: "monthly"
 
-  # --- GitHub Actions: kept ready for when CI workflows are added under .github/workflows/.
-  # Harmless and a no-op today (no workflow files exist yet), and it's easy to forget to add
-  # once workflows do land, so it's enabled now rather than deferred.
+  # --- GitHub Actions: covers .github/workflows/build-agent-image.yml, which builds and pushes the
+  # agent container image. Monthly, since action version bumps are rarely urgent.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

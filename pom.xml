@@ -28,7 +28,6 @@
         <module>scaleout-build-control-plane-infra</module>
         <module>scaleout-build-maven-plugin</module>
         <module>scaleout-build-agent</module>
-        <module>scaleout-test-infra</module>
     </modules>
 
     <properties>

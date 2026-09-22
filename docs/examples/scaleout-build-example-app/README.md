@@ -1,5 +1,12 @@
 # scaleout-build-maven-plugin example app
 
+> **Setup below is out of date.** It describes the direct-ECS path, which has been removed along with
+> `scaleout-test-infra`. This example is migrated to the control plane in migration step 4: the 22
+> `aws-ecs.*` parameters go away and `deployment.properties` becomes a single
+> `scaleout-build.endpoint` line pointing at the control plane's Function URL. Until then the
+> instructions here will not work — see
+> [`../../design/control-plane/migration-from-direct-ecs-access.md`](../../design/control-plane/migration-from-direct-ecs-access.md).
+
 Minimal, reflection-free example exercising `aws-ecs:build` end to end against real AWS:
 `native-image` compilation for both `x86_64` and `arm64`, offloaded to ECS Fargate tasks, using
 [`scaleout-test-infra`](../../../scaleout-test-infra)'s deployed stack (plain S3 staging, the

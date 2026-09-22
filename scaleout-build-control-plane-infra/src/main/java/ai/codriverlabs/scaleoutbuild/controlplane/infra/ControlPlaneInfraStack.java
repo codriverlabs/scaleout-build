@@ -60,18 +60,17 @@ import software.constructs.Construct;
  * The cluster, staging bucket and task roles were originally {@code scaleout-test-infra}, a stack
  * documented as disposable because each developer deployed their own copy and ran Maven against it
  * directly. Once the control plane is the only way in, those resources stop being test scaffolding and
- * become the service's long-lived data plane — shared, and with no consumer other than this service
- * once migration Phase 3 revokes direct access.
+ * become the service's long-lived data plane — shared, and with no consumer other than this service.
  *
  * <p>Splitting them would mean a 100% one-directional dependency across a stack boundary, bridged by
  * SSM parameters that can go stale and point at a destroyed cluster, and {@code iam:PassRole} narrowed
  * against a string CDK cannot validate instead of a direct role reference.
  *
- * <p>{@code scaleout-test-infra} is kept, frozen, until migration Phase 3: Phase 1's gate is a
- * differential test that builds the example app both ways and compares, which needs both environments
- * to exist at once. It is deliberately <em>not</em> refactored to share constructs with this stack —
- * editing the working stack that the differential test depends on carries more risk than temporary
- * duplication in a module scheduled for deletion.
+ * <p>{@code scaleout-test-infra} has been deleted. It was originally to be kept frozen so that a
+ * differential test could build the example app both ways and compare — but the direct-ECS path is not
+ * being retained at all, so there is nothing to compare against and no reason to keep it. Its ECR
+ * repository and log group names collided with this stack's, so the old stack had to be destroyed
+ * before this one could deploy.
  */
 public class ControlPlaneInfraStack extends Stack {
 
@@ -113,7 +112,7 @@ public class ControlPlaneInfraStack extends Stack {
                 .build();
 
         /*
-         * RETAIN, unlike scaleout-test-infra's DESTROY. This bucket holds the content-addressed store
+         * RETAIN, where the retired scaleout-test-infra used DESTROY. This bucket holds the content-addressed store
          * shared by every build and developer, so `cdk destroy` must not take it: losing it discards
          * the dedup cache that keeps uploads near-free, plus every produced artifact. The cost is that
          * a destroy leaves it behind for manual cleanup, which is the correct trade for a long-lived

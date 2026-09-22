@@ -25,7 +25,7 @@
 #
 # Export AWS_REGION, not CDK_DEFAULT_REGION: the CDK CLI computes CDK_DEFAULT_* from the active
 # credentials and overwrites anything set in the parent shell. This is documented the hard way in
-# scaleout-test-infra/README.md.
+# scaleout-build-control-plane-infra/src/.../ControlPlaneInfraApp.java's class javadoc.
 
 set -euo pipefail
 

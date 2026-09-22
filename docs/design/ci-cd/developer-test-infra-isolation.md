@@ -1,5 +1,32 @@
 # Per-developer test infra isolation via GitHub Actions + OIDC
 
+## Status: Superseded — retained as the record of why the current approach was chosen
+
+This document's mechanism was never implemented, and will not be. It is kept because its analysis of
+*why* per-developer isolation is hard at the IAM layer is the reason the control plane exists.
+
+**What superseded it:** putting the ECS/S3/CloudWatch permissions behind a service
+([`../control-plane/scaleout-builder-control-plane.md`](../control-plane/scaleout-builder-control-plane.md))
+means developers hold no standing permissions on those services at all, so there is nothing to isolate
+per developer at the IAM layer. Authorization moved to an application-level `ownerKey` check, which
+makes one shared IAM policy — `lambda:InvokeFunctionUrl` plus `lambda:InvokeFunction` on one function —
+sufficient for everyone. That replaces this document's N per-developer inline policies, the CI role
+holding `PutUserPolicy` restricted by two independent conditions, and the unresolved deprovisioning
+question.
+
+Isolation of build *inputs* is now a storage-layout property, documented in
+[`../control-plane/storage-layout-and-isolation.md`](../control-plane/storage-layout-and-isolation.md).
+
+`scaleout-test-infra`, the stack this document was written about, has been deleted.
+
+**Still accurate and worth reading:** the explanation of why ECS has no resource-based policy
+equivalent to an S3 bucket policy (and therefore why the grant *had* to touch each developer's own
+identity), the VPC-quota reasoning for sharing one VPC, and the observation that restricting a policy
+*name* does not restrict which principal it can be attached to. Those constraints are real regardless
+of which approach is taken.
+
+## Original document follows
+
 ## Status: Planned — not yet implemented
 
 ## Problem
