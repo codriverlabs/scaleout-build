@@ -78,4 +78,24 @@ class ApplicationBootTest {
                 .then()
                 .statusCode(401);
     }
+
+    /**
+     * The log route must reach {@code LogStreamResource}, not a stub.
+     *
+     * <p>{@code BuildApi} used to declare {@code streamLogs} as well, so the implementing {@code
+     * BuildResource} inherited the JAX-RS annotations and its 501 stub shadowed the real SSE resource.
+     * A deployed environment answered 501 on every log request while the whole suite passed, because
+     * nothing asserted which of two same-path resources won.
+     *
+     * <p>401 here is the correct answer for an unauthenticated caller and, more to the point, proves
+     * the request reached a resource that has the caller-identity filter applied rather than a stub
+     * that short-circuits with 501.
+     */
+    @Test
+    void logStreamRouteIsNotShadowedByAStub() {
+        given()
+                .when().get("/builds/some-build-id/logs")
+                .then()
+                .statusCode(401);
+    }
 }

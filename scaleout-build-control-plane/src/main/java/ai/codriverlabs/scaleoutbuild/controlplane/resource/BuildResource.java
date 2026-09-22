@@ -98,17 +98,6 @@ public class BuildResource implements BuildApi {
     }
 
     @Override
-    public Response streamLogs(String buildId, String cell, Long since) {
-        // Implemented by LogStreamResource, which needs SSE-specific annotations this interface
-        // method cannot carry. Declared here only to satisfy the contract.
-        return Response.status(Response.Status.NOT_IMPLEMENTED)
-                .entity(ErrorResponse.of("NotImplemented",
-                        "Log streaming is served by GET /builds/{buildId}/logs on the streaming "
-                                + "resource.", null))
-                .build();
-    }
-
-    @Override
     public Response cancelBuild(String buildId) {
         return buildService.cancel(caller(), buildId)
                 .<Response>map(s -> Response.ok(s).build())
