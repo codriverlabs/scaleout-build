@@ -11,6 +11,7 @@ import ai.codriverlabs.scaleoutbuild.controlplane.service.BuildService;
 import ai.codriverlabs.scaleoutbuild.controlplane.service.InvalidRequestException;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.Path;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Providers;
 import java.util.Optional;
@@ -31,6 +32,18 @@ import org.jboss.logging.Logger;
  *       caller-supplied owner field would be trivially forgeable.</li>
  * </ul>
  */
+/*
+ * @Path is declared here as well as on BuildApi, and it is load-bearing.
+ *
+ * RESTEasy Reactive discovers resources by scanning for @Path on the CLASS. Inheriting it from an
+ * implemented interface is not sufficient: without this annotation the class is not registered as a
+ * resource at all and every /builds request answers 404 -- no warning at build time, nothing in the
+ * logs, just an API that does not exist.
+ *
+ * Found by ApplicationBootTest asserting 401 on /builds/{id} and getting 404. The deploy before it
+ * looked fine, because a health check never touches a resource route.
+ */
+@Path("/builds")
 public class BuildResource implements BuildApi {
 
     private static final Logger LOG = Logger.getLogger(BuildResource.class);
