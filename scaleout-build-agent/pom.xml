@@ -156,6 +156,25 @@
                             </to>
                             <container>
                                 <mainClass>ai.codriverlabs.scaleoutbuild.build.agent.AgentMain</mainClass>
+                                <!--
+                                  Matches the Dockerfile's USER. Without it Jib defaults to the base
+                                  image's user, which for this profile meant shipping a ROOT container
+                                  while the Dockerfile path correctly ran as 1001. Verified by
+                                  scripts/verify-agent-image.sh rather than trusted: neither Docker's USER nor
+                                  this element validates that the uid exists in the base image, so the
+                                  only real check is running the image and asking.
+                                -->
+                                <user>1001:1001</user>
+                                <environment>
+                                    <!--
+                                      Also mirrors the Dockerfile. native-image writes heavy scratch
+                                      traffic to TMPDIR, so keep it on the container's own writable
+                                      layer rather than a mounted filesystem; the agent reads both of
+                                      these at startup.
+                                    -->
+                                    <SCALEOUT_BUILD_TEMP_DIR>/tmp</SCALEOUT_BUILD_TEMP_DIR>
+                                    <SCALEOUT_BUILD_MOUNT_ROOT>/mnt/build</SCALEOUT_BUILD_MOUNT_ROOT>
+                                </environment>
                             </container>
                         </configuration>
                     </plugin>
@@ -163,4 +182,5 @@
             </build>
         </profile>
     </profiles>
+
 </project>
