@@ -90,6 +90,22 @@ for mode, want in {
     if reaper.get("Layers"):
         failures.append(f"{mode}/reaper: must not carry the Web Adapter layer")
 
+    # The launcher sends a FARGATE_SPOT capacityProviderStrategy, which ECS rejects unless the
+    # provider is associated with the cluster. Omitting this fails only at RunTask, on every cell.
+    # CDK renders enableFargateCapacityProviders as its own resource rather than a property on the
+    # cluster, so assert on the association, not on AWS::ECS::Cluster.
+    assocs = [v["Properties"] for v in resources.values()
+              if v["Type"] == "AWS::ECS::ClusterCapacityProviderAssociations"]
+    if len(assocs) != 1:
+        failures.append(f"{mode}: expected 1 ClusterCapacityProviderAssociations, got {len(assocs)}; "
+                        f"EcsTaskLauncher's FARGATE_SPOT strategy is rejected at RunTask without it")
+    else:
+        providers = assocs[0].get("CapacityProviders") or []
+        for required in ("FARGATE", "FARGATE_SPOT"):
+            if required not in providers:
+                failures.append(f"{mode}/capacityProviders: {required} not associated "
+                                f"(has {providers or '<none>'})")
+
     urls = [v["Properties"] for v in resources.values() if v["Type"] == "AWS::Lambda::Url"]
     if len(urls) != 1:
         failures.append(f"{mode}: expected exactly 1 Function URL, got {len(urls)}")

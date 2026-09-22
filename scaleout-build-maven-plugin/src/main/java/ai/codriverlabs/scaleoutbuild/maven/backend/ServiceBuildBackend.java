@@ -77,7 +77,8 @@ public final class ServiceBuildBackend implements BuildBackend {
                                  ArtifactSink artifactSink)
             throws IOException, MojoExecutionException, MojoFailureException, InterruptedException {
         BuildSpec spec = toBuildSpec(cells);
-        List<InputDescriptor> inputs = describeInputs(plan);
+        List<StagedFile> staged = stagedFiles(plan);
+        List<InputDescriptor> inputs = describeInputs(staged);
 
         log.info("Submitting " + cells.size() + " cell(s) to " + options.endpoint()
                 + " (signing region " + client.region() + ")");
@@ -93,7 +94,7 @@ public final class ServiceBuildBackend implements BuildBackend {
                     + " ephemeralStorageGiB=" + created.appliedResources().ephemeralStorageGiB());
         }
 
-        upload(created, inputs, plan);
+        upload(created, inputs, staged);
 
         ScheduledExecutorService heartbeat = startHeartbeat(created);
         Thread shutdownHook = installCancelHook(created.buildId());
@@ -130,9 +131,34 @@ public final class ServiceBuildBackend implements BuildBackend {
      * lacks. In practice that is the project's own jar, because Maven embeds timestamps and so its jar
      * is not byte-reproducible, while dependency jars are identical across builds.
      */
-    private List<InputDescriptor> describeInputs(NativeImageInputPlan plan) throws IOException {
+    /**
+     * Everything the cell needs in its staging prefix, including the argfile.
+     *
+     * <p>In {@code DERIVED} mode the argfile is generated text rather than a file on disk, so it is
+     * written out here and then treated as an ordinary content-addressed input. The alternative would be
+     * to add an {@code argsContent} field to the wire contract and have the service write the object,
+     * which buys nothing: as a normal input it dedups like any other blob, and the service keeps a single
+     * code path that materializes declared inputs and nothing else.
+     *
+     * <p>Omitting it is what the first real end-to-end build failed on. Both cells launched, downloaded
+     * their two jars, and died with "Argument file not found" -- the agent requires the argfile named by
+     * {@code SCALEOUT_BUILD_ARG_FILE_NAME} to be present in the prefix, and the direct-ECS backend used
+     * to write it as a side effect of staging.
+     */
+    private List<StagedFile> stagedFiles(NativeImageInputPlan plan) throws IOException {
+        List<StagedFile> files = new ArrayList<>(plan.files());
+        if (plan.generatedArgsContent().isPresent()) {
+            Path argsFile = options.workDirectory().resolve(plan.argsFileName());
+            Files.createDirectories(argsFile.getParent());
+            Files.writeString(argsFile, plan.generatedArgsContent().orElseThrow());
+            files.add(new StagedFile(plan.argsFileName(), argsFile));
+        }
+        return files;
+    }
+
+    private List<InputDescriptor> describeInputs(List<StagedFile> stagedFiles) throws IOException {
         List<InputDescriptor> inputs = new ArrayList<>();
-        for (StagedFile file : plan.files()) {
+        for (StagedFile file : stagedFiles) {
             Path source = file.source();
             inputs.add(new InputDescriptor(file.relativePath(), sha256Hex(source),
                     Files.size(source)));
@@ -141,13 +167,13 @@ public final class ServiceBuildBackend implements BuildBackend {
     }
 
     private void upload(CreateBuildResponse created, List<InputDescriptor> inputs,
-                        NativeImageInputPlan plan) throws IOException {
+                        List<StagedFile> stagedFiles) throws IOException {
         if (created.uploads().isEmpty()) {
             return;
         }
         Map<String, Path> byDigest = new HashMap<>();
         for (int i = 0; i < inputs.size(); i++) {
-            byDigest.putIfAbsent(inputs.get(i).sha256(), plan.files().get(i).source());
+            byDigest.putIfAbsent(inputs.get(i).sha256(), stagedFiles.get(i).source());
         }
         long bytes = 0;
         for (UploadTarget target : created.uploads()) {

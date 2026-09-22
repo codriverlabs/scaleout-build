@@ -12,6 +12,8 @@ import ai.codriverlabs.scaleoutbuild.controlplane.api.LogEvent;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.client.SigV4Signer;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.net.URI;
@@ -45,8 +47,18 @@ final class ControlPlaneClient {
             .connectTimeout(Duration.ofSeconds(20))
             .followRedirects(HttpClient.Redirect.NEVER)
             .build();
+    /*
+     * JavaTimeModule is registered explicitly rather than via findAndRegisterModules().
+     *
+     * findAndRegisterModules() is a ServiceLoader scan: with jackson-datatype-jsr310 absent from the
+     * plugin's runtime classpath it silently finds nothing and the mapper looks fine, then fails the
+     * first time an Instant crosses the wire -- which is what happened on the first real build, at
+     * createBuild, on UploadTarget.expiresAt. An explicit registration cannot compile without the
+     * dependency present.
+     */
     private final ObjectMapper mapper = new ObjectMapper()
-            .findAndRegisterModules()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private final SigV4Signer signer = new SigV4Signer();
     private final URI endpoint;
@@ -159,18 +171,26 @@ final class ControlPlaneClient {
                 .GET()
                 .build();
         try {
-            // REPLACE_EXISTING: a repeat build must not fail because the previous artifact is still
-            // there. The direct path had exactly this bug, fixed in b33f9e2.
+            /*
+             * ofFile, not ofFileDownload.
+             *
+             * ofFileDownload derives the filename from the Content-Disposition header and throws
+             * "No Content-Disposition header in response" when it is absent. S3 does not send one on a
+             * presigned GET, so it can never work here -- it failed on the first build that got far
+             * enough to download an artifact, after both native images had already been built
+             * successfully. ofFile writes to a path we choose, which is what we want anyway: the
+             * destination name comes from the artifact descriptor, not from the server.
+             *
+             * TRUNCATE_EXISTING so a repeat build does not fail on, or append to, a previous artifact.
+             * The direct path had that bug, fixed in b33f9e2.
+             */
             HttpResponse<Path> response = http.send(request,
-                    HttpResponse.BodyHandlers.ofFileDownload(destination.getParent(),
+                    HttpResponse.BodyHandlers.ofFile(destination,
                             java.nio.file.StandardOpenOption.CREATE,
                             java.nio.file.StandardOpenOption.WRITE,
                             java.nio.file.StandardOpenOption.TRUNCATE_EXISTING));
             if (response.statusCode() / 100 != 2) {
                 throw new IOException("download failed with HTTP " + response.statusCode());
-            }
-            if (!response.body().equals(destination)) {
-                Files.move(response.body(), destination, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

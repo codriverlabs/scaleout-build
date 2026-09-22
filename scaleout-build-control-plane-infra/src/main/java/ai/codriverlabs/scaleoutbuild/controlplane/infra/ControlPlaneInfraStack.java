@@ -188,6 +188,21 @@ public class ControlPlaneInfraStack extends Stack {
                 .clusterName("scaleout-build")
                 .vpc(vpc)
                 .containerInsightsV2(software.amazon.awscdk.services.ecs.ContainerInsights.ENABLED)
+                /*
+                 * Required, not an optimisation.
+                 *
+                 * EcsTaskLauncher launches FARGATE work through a capacityProviderStrategy of
+                 * FARGATE_SPOT with an on-demand fallback, rather than a plain launchType. ECS rejects
+                 * any strategy naming a provider that is not associated with the cluster:
+                 * "The specified capacity provider strategy cannot contain a capacity provider that is
+                 * not associated with the cluster."
+                 *
+                 * This associates both FARGATE and FARGATE_SPOT. The predecessor stack did the same; the
+                 * consolidated stack dropped it, and the first real build failed on every cell. Nothing
+                 * detected it earlier because the error only appears at RunTask, and no synth assertion
+                 * covered the pairing between the launcher's strategy and the cluster's providers.
+                 */
+                .enableFargateCapacityProviders(true)
                 .build();
 
         Repository agentRepository = Repository.Builder.create(this, "AgentRepository")
