@@ -45,6 +45,7 @@ DOCKERFILE="${REPO_ROOT}/scaleout-build-agent/Dockerfile"
 
 PUSH=false
 MULTI_ARCH=false
+FUNCTION_MODE=""
 IMAGE_URI=""
 PLATFORM=""
 
@@ -64,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             PLATFORM="${2:?--platform requires a value, e.g. linux/amd64 or linux/arm64}"
             shift 2
             ;;
+        --function)
+            FUNCTION_MODE="${2:?--function requires jvm or native}"
+            shift 2
+            ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -74,6 +79,51 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --- Control-plane function ------------------------------------------------------------------------
+#
+# Two deployable shapes, and they are not interchangeable:
+#
+#   jvm     A zip of bytecode. Architecture-NEUTRAL: the same zip runs on arm64 or x86_64, so there is
+#           nothing multi-arch to build and no GraalVM toolchain needed. Deployed to arm64 purely for
+#           price/performance.
+#
+#   native  A GraalVM binary, built by Mandrel in a container. Architecture-SPECIFIC, and it can only
+#           be built for the architecture of the host doing the building -- cross-compiling a native
+#           image is not something GraalVM does. So an x86_64 host produces an x86_64 binary and must
+#           be deployed as x86_64.
+#
+# The emitted zips have distinct names (function-jvm.zip / function-native.zip) so that building one
+# mode and deploying the other fails with a missing file rather than a function that cannot execute
+# its own handler.
+if [[ -n "$FUNCTION_MODE" ]]; then
+    case "$FUNCTION_MODE" in
+        jvm)
+            echo "==> Building the control-plane function (JVM zip; architecture-neutral)"
+            mvn -B -q -pl scaleout-build-control-plane -am package -DskipTests
+            ARTIFACT="${REPO_ROOT}/scaleout-build-control-plane/target/function-jvm.zip"
+            ;;
+        native)
+            HOST_NATIVE_ARCH="$(uname -m)"
+            echo "==> Building the control-plane function (GraalVM native for ${HOST_NATIVE_ARCH}; several minutes)"
+            echo "    Native images cannot be cross-compiled, so this produces a ${HOST_NATIVE_ARCH} binary"
+            echo "    and must be deployed as ${HOST_NATIVE_ARCH}. deploy-local.sh derives that for you."
+            mvn -B -Pnative -pl scaleout-build-control-plane -am package -DskipTests
+            ARTIFACT="${REPO_ROOT}/scaleout-build-control-plane/target/function-native.zip"
+            ;;
+        *)
+            echo "--function takes jvm or native, not '${FUNCTION_MODE}'" >&2
+            exit 1
+            ;;
+    esac
+
+    echo "==> Building the reaper jar (always JVM; a jar is architecture-neutral)"
+    mvn -B -q -pl scaleout-build-control-plane-reaper -am install -DskipTests
+
+    [[ -f "$ARTIFACT" ]] || { echo "Expected artifact missing: ${ARTIFACT}" >&2; exit 1; }
+    echo "==> Built $(basename "$ARTIFACT") ($(du -h "$ARTIFACT" | cut -f1))"
+    exit 0
+fi
 
 if $PUSH && $MULTI_ARCH; then
     echo "--push and --multi-arch are mutually exclusive — --multi-arch already pushes." >&2

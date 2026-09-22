@@ -1,0 +1,28 @@
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.2.0 https://maven.apache.org/xsd/assembly-2.2.0.xsd">
+  <id>jvm-function</id>
+  <formats>
+    <format>zip</format>
+  </formats>
+  <includeBaseDirectory>false</includeBaseDirectory>
+  <fileSets>
+    <fileSet>
+      <directory>src/main/zip</directory>
+      <outputDirectory>/</outputDirectory>
+      <fileMode>0755</fileMode>
+      <!--
+        filtered: run.sh interpolates ${project.build.finalName} so the launcher and the jar it execs
+        cannot drift apart. See run.sh for the bug this avoids.
+      -->
+      <filtered>true</filtered>
+    </fileSet>
+  </fileSets>
+  <files>
+    <file>
+      <source>target/${project.build.finalName}-runner.jar</source>
+      <outputDirectory>/</outputDirectory>
+      <destName>${project.build.finalName}-runner.jar</destName>
+    </file>
+  </files>
+</assembly>
