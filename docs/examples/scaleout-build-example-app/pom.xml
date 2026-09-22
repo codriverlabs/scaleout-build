@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Example project exercising scaleout-build-maven-plugin's aws-ecs:build goal end to end against real
+  Example project exercising scaleout-build-maven-plugin's scaleout-build:build goal end to end against real
   AWS: native-image compilation for both x86_64 and arm64, offloaded to ECS Fargate tasks running
   in eu-west-1, using scaleout-test-infra's deployed stack (plain S3 staging, direct-S3-calls agent
   I/O mode — see scaleout-test-infra/README.md).
@@ -19,7 +19,7 @@
     <description>
         Minimal, reflection-free "hello world" plus one small real dependency (Commons Lang3, to
         exercise a genuine classpath jar through the plugin's content-addressed S3 staging), used
-        to prove aws-ecs:build's real, end-to-end pipeline: stage inputs, register a task
+        to prove scaleout-build:build's real, end-to-end pipeline: stage inputs, register a task
         definition per (build kind, architecture) cell, launch and supervise Fargate tasks for
         both x86_64 and arm64 concurrently, retrieve the produced native binaries.
     </description>
@@ -67,10 +67,25 @@
                             <goal>read-project-properties</goal>
                         </goals>
                         <configuration>
-                            <files>
-                                <file>${project.basedir}/deployment.properties</file>
-                            </files>
-                        </configuration>
+                    <!-- Matrix: one build kind, both architectures. The control plane launches one
+                         task per cell; this project never sees a cluster or a role. -->
+                    <buildKinds>
+                        <buildKind>native</buildKind>
+                    </buildKinds>
+                    <architectures>
+                        <architecture>x86_64</architecture>
+                        <architecture>arm64</architecture>
+                    </architectures>
+                    <mainClass>ai.codriverlabs.example.HelloNative</mainClass>
+                    <imageName>hello-native</imageName>
+
+                    <!-- forceRemote: build both cells remotely even though one matches this host,
+                         which is the point of the example. -->
+                    <forceRemote>true</forceRemote>
+
+                    <!-- The only deployment-specific value, read from deployment.properties. -->
+                    <endpoint>${scaleout-build.endpoint}</endpoint>
+                </configuration>
                     </execution>
                 </executions>
             </plugin>
@@ -102,9 +117,8 @@
                     </execution>
                 </executions>
                 <configuration>
-                    <!-- Matrix: one build kind (plain NATIVE), both architectures — two Fargate
-                         tasks launched concurrently, one per architecture, per BuildMojo's own
-                         "one task per matrix cell" design. -->
+                    <!-- Matrix: one build kind, both architectures. The control plane launches one
+                         task per cell; this project never names a cluster, a role or a bucket. -->
                     <buildKinds>
                         <buildKind>native</buildKind>
                     </buildKinds>
@@ -115,44 +129,13 @@
                     <mainClass>ai.codriverlabs.example.HelloNative</mainClass>
                     <imageName>hello-native</imageName>
 
-                    <!-- forceRemote=true: send both cells to ECS regardless of host architecture —
-                         the default otherwise builds a host-matching cell locally with no AWS
-                         calls at all, which would defeat the point of this example (proving the
-                         real, remote, both-architectures path). -->
+                    <!-- forceRemote: build both cells remotely even though one matches this host,
+                         which is the whole point of the example. -->
                     <forceRemote>true</forceRemote>
 
-                    <!-- All account/deployment-specific values below come from
-                         deployment.properties (see deployment.properties.example) via
-                         properties-maven-plugin, not hardcoded — see this file's own header
-                         comment and that properties file's header for where each value comes
-                         from. -->
-                    <region>${aws-ecs.region}</region>
-                    <clusterArn>${aws-ecs.clusterArn}</clusterArn>
-                    <!-- Each subnet/security-group is its own property (rather than one
-                         comma-joined value split at runtime) — Maven's handling of a single
-                         string value for a List<String>-typed plugin parameter isn't guaranteed
-                         to comma-split inside a nested XML element the way -Dprop=a,b does on the
-                         command line, so this avoids relying on that. Add
-                         aws-ecs.subnetId.3=... etc. to deployment.properties (and a matching
-                         <subnetId> element here) if your VPC has more subnets to offer. -->
-                    <subnetIds>
-                        <subnetId>${aws-ecs.subnetId.1}</subnetId>
-                        <subnetId>${aws-ecs.subnetId.2}</subnetId>
-                    </subnetIds>
-                    <securityGroupIds>
-                        <securityGroupId>${aws-ecs.securityGroupId.1}</securityGroupId>
-                    </securityGroupIds>
-                    <assignPublicIp>true</assignPublicIp>
-                    <executionRoleArn>${aws-ecs.executionRoleArn}</executionRoleArn>
-                    <taskRoleArn>${aws-ecs.taskRoleArn}</taskRoleArn>
-                    <logGroupName>${aws-ecs.logGroupName}</logGroupName>
-                    <s3Bucket>${aws-ecs.s3Bucket}</s3Bucket>
-
-                    <!-- Plain S3, direct-S3-calls agent I/O — scaleout-test-infra's default
-                         (includeS3Files=false) deployment mode; no mount infrastructure exists to
-                         fall back on. -->
-                    <agentUsesDirectS3Io>true</agentUsesDirectS3Io>
-                    <agentImageUri>${aws-ecs.agentImageUri}</agentImageUri>
+                    <!-- The only deployment-specific value, read from deployment.properties. The
+                         signing region comes from the URL host, so there is nothing else to set. -->
+                    <endpoint>${scaleout-build.endpoint}</endpoint>
                 </configuration>
             </plugin>
         </plugins>

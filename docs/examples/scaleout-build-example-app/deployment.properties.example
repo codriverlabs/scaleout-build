@@ -1,31 +1,19 @@
-# Copy this file to deployment.properties (gitignored) and fill in your own values — or, easier,
-# generate this file automatically by running scaleout-test-infra/deploy-and-capture-outputs.sh,
-# which deploys the stack and writes deployment.properties for you directly from its real
-# CloudFormation outputs. See scaleout-test-infra/README.md's "Feeding the outputs into
-# aws-ecs:build" table for exactly where each value below comes from if filling this in by hand.
+# Copy to deployment.properties (gitignored) and set the endpoint your control plane deployment
+# printed. This is the ONLY deployment-specific value the plugin needs.
 #
-# This file is deliberately NOT committed with real values: an account ID, IAM role ARNs, subnet/
-# security-group IDs, and a bucket name are specific to one AWS account and deployment, and would
-# be meaningless (and misleading) for anyone else who checks out this repo and runs the example
-# unmodified. None of these are secrets — they're just not portable.
+# Not a region: a Lambda Function URL host is <id>.lambda-url.<region>.on.aws, so the client parses
+# the SigV4 signing region straight out of the endpoint.
+#
+# Not a bucket, cluster, role, subnet, security group, log group or agent image either. Those are the
+# control plane's configuration, and a client able to set them could choose what code runs with the
+# task role's permissions. See docs/design/control-plane/migration-from-direct-ecs-access.md for the
+# full inventory of what moved.
+#
+# Get it from the deploy script, or read it back at any time with:
+#   aws ssm get-parameter --name /scaleout-build/control-plane/endpoint \
+#       --query Parameter.Value --output text
+#
+# Callers need lambda:InvokeFunctionUrl and lambda:InvokeFunction on the control-plane function, and
+# no other AWS permissions at all.
 
-aws-ecs.region=eu-west-1
-aws-ecs.clusterArn=arn:aws:ecs:eu-west-1:ACCOUNT_ID:cluster/scaleout-build-test
-
-# Each subnet/security-group is its own numbered property, matching a nested <subnetId>/
-# <securityGroupId> element in pom.xml one-to-one -- not a single comma-joined value. Add more
-# aws-ecs.subnetId.N entries (and a matching <subnetId> element in pom.xml) if you want more than
-# scaleout-test-infra's two subnets.
-aws-ecs.subnetId.1=subnet-EXAMPLE1
-aws-ecs.subnetId.2=subnet-EXAMPLE2
-aws-ecs.securityGroupId.1=sg-EXAMPLE
-
-aws-ecs.executionRoleArn=arn:aws:iam::ACCOUNT_ID:role/ScaleoutBuildTestInfra-ExecutionRole-EXAMPLE
-aws-ecs.taskRoleArn=arn:aws:iam::ACCOUNT_ID:role/ScaleoutBuildTestInfra-TaskRole-EXAMPLE
-
-aws-ecs.logGroupName=/scaleout-build/build-agent
-aws-ecs.s3Bucket=scaleoutbuildtestinfra-stagingbucket-example
-
-# Built and pushed via build-local.sh --multi-arch <this value, without the :latest tag> from the
-# repo root — see the root README/build-local.sh --help.
-aws-ecs.agentImageUri=ACCOUNT_ID.dkr.ecr.eu-west-1.amazonaws.com/scaleout-build-agent:latest
+scaleout-build.endpoint=https://EXAMPLE123.lambda-url.eu-west-1.on.aws/

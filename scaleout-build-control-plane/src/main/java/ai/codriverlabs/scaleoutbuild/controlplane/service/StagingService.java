@@ -11,6 +11,9 @@ import ai.codriverlabs.scaleoutbuild.controlplane.api.UploadTarget;
 import ai.codriverlabs.scaleoutbuild.controlplane.config.ControlPlaneConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -42,7 +45,6 @@ public class StagingService {
     private final S3Client s3;
     private final S3Presigner presigner;
     private final ControlPlaneConfig config;
-    private final StagingLayout layout = StagingLayout.defaults();
 
     @Inject
     public StagingService(S3Client s3, S3Presigner presigner, ControlPlaneConfig config) {
@@ -52,27 +54,69 @@ public class StagingService {
     }
 
     /**
+     * The layout for one owner: {@code workspace/<ownerHash>/{cas,builds}/…}.
+     *
+     * <p>Per-owner rather than one shared store, for two reasons documented in
+     * {@code docs/design/control-plane/storage-layout-and-isolation.md}. A shared store makes
+     * {@link #missingDigests} an existence oracle over other owners' uploads; worse, a manifest is a
+     * claim rather than a proof, so a caller could name a digest it never possessed and have the
+     * service copy that blob into its build. Namespacing removes both structurally instead of by
+     * remembering to check.
+     *
+     * <p>The cost is small: dedup still applies across all of one owner's builds, which is where the
+     * benefit actually is — dependency jars are byte-identical build to build, while the project's own
+     * jar changes every time because Maven embeds timestamps.
+     */
+    private StagingLayout layoutFor(String ownerKey) {
+        String ownerHash = ownerHash(ownerKey);
+        return new StagingLayout("workspace/" + ownerHash + "/builds",
+                "workspace/" + ownerHash + "/cas");
+    }
+
+    /**
+     * Hashed, not embedded: {@code ownerKey} is an ARN that may contain {@code /} and {@code @}
+     * ({@code arn:aws:iam::123:role/Dev/alice@corp.com}), and its session-name component is influenced
+     * by the caller. Embedding it raw would inject caller-steerable path separators into S3 keys.
+     *
+     * <p>32 hex characters — 128 bits, so collisions are not a practical concern. Not a secret: each
+     * build record stores the {@code ownerKey} so an operator can resolve a prefix to a principal.
+     */
+    static String ownerHash(String ownerKey) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(ownerKey.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(32);
+            for (int i = 0; i < 16; i++) {
+                hex.append(String.format("%02x", digest[i]));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required by the JDK", e);
+        }
+    }
+
+    /**
      * @return the digests not already present in the content-addressed store, de-duplicated and in
      *         request order. In practice only the project's own jar appears here: dependency jars are
      *         byte-identical across builds and developers, so they are uploaded once ever.
      */
-    public List<String> missingDigests(List<InputDescriptor> inputs) {
+    public List<String> missingDigests(String ownerKey, List<InputDescriptor> inputs) {
         Set<String> seen = new LinkedHashSet<>();
         List<String> missing = new ArrayList<>();
         for (InputDescriptor input : inputs) {
             if (!seen.add(input.sha256())) {
                 continue;
             }
-            if (!casObjectExists(input.sha256())) {
+            if (!casObjectExists(ownerKey, input.sha256())) {
                 missing.add(input.sha256());
             }
         }
         return missing;
     }
 
-    public boolean casObjectExists(String sha256) {
+    public boolean casObjectExists(String ownerKey, String sha256) {
         try {
-            s3.headObject(b -> b.bucket(config.stagingBucket()).key(layout.casKey(sha256)));
+            s3.headObject(b -> b.bucket(config.stagingBucket()).key(layoutFor(ownerKey).casKey(sha256)));
             return true;
         } catch (NoSuchKeyException e) {
             return false;
@@ -87,13 +131,13 @@ public class StagingService {
     }
 
     /** Presigned {@code PUT} straight into the content-addressed store. */
-    public UploadTarget presignUpload(String sha256) {
+    public UploadTarget presignUpload(String ownerKey, String sha256) {
         Duration ttl = Duration.ofSeconds(config.limits().presignedUrlTtlSeconds());
         var presigned = presigner.presignPutObject(b -> b
                 .signatureDuration(ttl)
                 .putObjectRequest(PutObjectRequest.builder()
                         .bucket(config.stagingBucket())
-                        .key(layout.casKey(sha256))
+                        .key(layoutFor(ownerKey).casKey(sha256))
                         .build()));
         return new UploadTarget(sha256, "PUT", presigned.url().toString(),
                 Instant.now().plus(ttl));
@@ -118,15 +162,15 @@ public class StagingService {
      * <p>Server-side copy, so the bytes never transit this function — a 200 MB classpath costs a few
      * S3 copy calls rather than 200 MB of Lambda bandwidth and memory.
      */
-    public void materializeCell(String buildId, BuildKind buildKind, Architecture architecture,
-                                List<InputDescriptor> inputs) {
-        String stagingPath = layout.stagingPath(buildId, buildKind, architecture);
+    public void materializeCell(String ownerKey, String buildId, BuildKind buildKind,
+                                Architecture architecture, List<InputDescriptor> inputs) {
+        String stagingPath = layoutFor(ownerKey).stagingPath(buildId, buildKind, architecture);
         for (InputDescriptor input : inputs) {
             String destination = stagingPath.endsWith("/")
                     ? stagingPath + input.path() : stagingPath + "/" + input.path();
             s3.copyObject(CopyObjectRequest.builder()
                     .sourceBucket(config.stagingBucket())
-                    .sourceKey(layout.casKey(input.sha256()))
+                    .sourceKey(layoutFor(ownerKey).casKey(input.sha256()))
                     .destinationBucket(config.stagingBucket())
                     .destinationKey(destination)
                     .build());
@@ -134,11 +178,13 @@ public class StagingService {
     }
 
     /** Key prefix the agent writes produced artifacts to. */
-    public String outputPrefix(String buildId, BuildKind buildKind, Architecture architecture) {
-        return layout.outputPath(buildId, buildKind, architecture);
+    public String outputPrefix(String ownerKey, String buildId, BuildKind buildKind,
+                               Architecture architecture) {
+        return layoutFor(ownerKey).outputPath(buildId, buildKind, architecture);
     }
 
-    public String stagingPath(String buildId, BuildKind buildKind, Architecture architecture) {
-        return layout.stagingPath(buildId, buildKind, architecture);
+    public String stagingPath(String ownerKey, String buildId, BuildKind buildKind,
+                              Architecture architecture) {
+        return layoutFor(ownerKey).stagingPath(buildId, buildKind, architecture);
     }
 }

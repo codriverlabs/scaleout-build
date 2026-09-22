@@ -14,8 +14,8 @@ import ai.codriverlabs.scaleoutbuild.build.BuildResult;
 import ai.codriverlabs.scaleoutbuild.build.NativeImageBuildExecutor;
 import ai.codriverlabs.scaleoutbuild.build.StagingLayout;
 import ai.codriverlabs.scaleoutbuild.maven.backend.BuildBackend;
-import ai.codriverlabs.scaleoutbuild.maven.backend.DirectEcsBuildBackend;
-import ai.codriverlabs.scaleoutbuild.maven.backend.RemoteBuildOptions;
+import ai.codriverlabs.scaleoutbuild.maven.backend.ServiceBuildBackend;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.RequestedResources;
 import ai.codriverlabs.scaleoutbuild.ecs.AgentContainerSettings;
 import ai.codriverlabs.scaleoutbuild.ecs.CloudWatchLogTailer;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsClusterSettings;
@@ -55,7 +55,8 @@ import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * {@code aws-ecs:build} — computes a GraalVM build matrix and runs it directly against ECS, with no
+ * {@code scaleout-build:build} — computes a GraalVM build matrix and runs it through the builder
+ * control plane, with no
  * orchestration layer above it (see {@code docs/PURE_ECS_ALTERNATIVE.md} for why, and when a
  * declarative orchestrator like Step Functions would be worth reintroducing instead).
  *
@@ -78,11 +79,11 @@ public class BuildMojo extends AbstractMojo {
      * Build kinds to produce: any of {@code jvm}, {@code native}, {@code native-pgo-instrument},
      * {@code native-pgo-optimize}. Defaults to {@code [native]}.
      */
-    @Parameter(property = "aws-ecs.buildKinds")
+    @Parameter(property = "scaleout-build.buildKinds")
     private List<String> buildKinds;
 
     /** Target architectures for every non-JVM build kind. Defaults to the host architecture. */
-    @Parameter(property = "aws-ecs.architectures")
+    @Parameter(property = "scaleout-build.architectures")
     private List<String> architectures;
 
     /**
@@ -90,15 +91,15 @@ public class BuildMojo extends AbstractMojo {
      * the requested build kinds. Per {@code docs/DESIGN.md} §3, collecting this profile (running an
      * instrumented binary against real traffic) is out of scope for this plugin.
      */
-    @Parameter(property = "aws-ecs.profilePath")
+    @Parameter(property = "scaleout-build.profilePath")
     private String profilePath;
 
     /** Explicit main class for derived-argfile builds; read from the artifact manifest if omitted. */
-    @Parameter(property = "aws-ecs.mainClass")
+    @Parameter(property = "scaleout-build.mainClass")
     private String mainClass;
 
     /** Explicit output binary name for derived-argfile builds; defaults to the project's final name. */
-    @Parameter(property = "aws-ecs.imageName")
+    @Parameter(property = "scaleout-build.imageName")
     private String imageName;
 
     /** Extra {@code native-image} arguments appended for derived-argfile builds. */
@@ -110,23 +111,32 @@ public class BuildMojo extends AbstractMojo {
     private List<String> extraNativeImageArgs;
 
     /** Command that invokes {@code native-image} for local-first cells, space-separated. */
-    @Parameter(property = "aws-ecs.nativeImageCommand", defaultValue = "native-image")
+    @Parameter(property = "scaleout-build.nativeImageCommand", defaultValue = "native-image")
     private String nativeImageCommand;
 
-    /** Directory local-first builds are staged into; defaults to {@code target/aws-ecs-build}. */
-    @Parameter(property = "aws-ecs.workDirectory")
+    /** Directory local-first builds are staged into; defaults to {@code target/scaleout-build}. */
+    @Parameter(property = "scaleout-build.workDirectory")
     private String workDirectory;
 
     /** Soft timeout applied to each {@code native-image} process; 0 disables it. */
-    @Parameter(property = "aws-ecs.timeoutMinutes", defaultValue = "0")
+    @Parameter(property = "scaleout-build.timeoutMinutes", defaultValue = "0")
     private int timeoutMinutes;
 
     /** Overall time to wait for the remote matrix execution to finish before failing the goal. */
-    @Parameter(property = "aws-ecs.overallTimeoutMinutes", defaultValue = "120")
+    @Parameter(property = "scaleout-build.overallTimeoutMinutes", defaultValue = "120")
     private int overallTimeoutMinutes;
 
     /** Skips the goal entirely, for profiles that only want native builds on CI. */
-    @Parameter(property = "aws-ecs.skip", defaultValue = "false")
+    /**
+     * Control plane endpoint — the Lambda Function URL. The only deployment-specific value this plugin
+     * needs: the signing region is parsed out of the URL host
+     * ({@code <id>.lambda-url.<region>.on.aws}), and everything else about the infrastructure is the
+     * service's concern. See {@code docs/design/control-plane/migration-from-direct-ecs-access.md}.
+     */
+    @Parameter(property = "scaleout-build.endpoint", required = true)
+    private String endpoint;
+
+    @Parameter(property = "scaleout-build.skip", defaultValue = "false")
     private boolean skip;
 
     /**
@@ -136,94 +146,23 @@ public class BuildMojo extends AbstractMojo {
      * the local machine's toolchain out of the loop entirely or to exercise the remote path for a
      * cell that happens to match the host.
      */
-    @Parameter(property = "aws-ecs.forceRemote", defaultValue = "false")
+    @Parameter(property = "scaleout-build.forceRemote", defaultValue = "false")
     private boolean forceRemote;
 
     // --- Remote orchestration configuration; only required if any cell cannot run locally. ---
 
-    /**
-     * Which ECS compute model remote cells run on: {@code FARGATE} (default), {@code
-     * MANAGED_INSTANCES} (ECS Managed Instances), or {@code EC2} (raw EC2 launch type). Determines
-     * which of the launch-type-specific parameters below are required — see {@code
-     * docs/PURE_ECS_ALTERNATIVE.md} §0 for the tradeoffs, most importantly that {@code FARGATE}/
-     * {@code MANAGED_INSTANCES} stage via an S3 Files volume while {@code EC2} instead bind-mounts
-     * a host path where Mountpoint for Amazon S3 must already be mounted by the container
-     * instance's user-data (S3 Files is not supported on the raw EC2 launch type).
-     */
-    @Parameter(property = "aws-ecs.launchType", defaultValue = "FARGATE")
-    private String launchType;
 
-    @Parameter(property = "aws-ecs.s3Bucket")
-    private String s3Bucket;
-    @Parameter(property = "aws-ecs.clusterArn")
-    private String clusterArn;
-    @Parameter(property = "aws-ecs.subnetIds")
-    private List<String> subnetIds;
-    @Parameter(property = "aws-ecs.securityGroupIds")
-    private List<String> securityGroupIds;
-    @Parameter(property = "aws-ecs.assignPublicIp", defaultValue = "false")
-    private boolean assignPublicIp;
-    @Parameter(property = "aws-ecs.executionRoleArn")
-    private String executionRoleArn;
-    @Parameter(property = "aws-ecs.taskRoleArn")
-    private String taskRoleArn;
-    /** Required for {@code launchType} {@code FARGATE}/{@code MANAGED_INSTANCES}; unused for {@code EC2}. */
-    @Parameter(property = "aws-ecs.s3FilesFileSystemArn")
-    private String s3FilesFileSystemArn;
-    @Parameter(property = "aws-ecs.s3FilesRootDirectory")
-    private String s3FilesRootDirectory;
-    @Parameter(property = "aws-ecs.s3FilesAccessPointArn")
-    private String s3FilesAccessPointArn;
-    /**
-     * Absolute path on the EC2 container instance where Mountpoint for Amazon S3 has already been
-     * mounted by the instance's user-data, e.g. {@code /mnt/build}. Required for {@code launchType}
-     * {@code EC2}; unused for {@code FARGATE}/{@code MANAGED_INSTANCES}. The plugin does not set up
-     * this mount itself — see {@code docs/PURE_ECS_ALTERNATIVE.md} §0 for the user-data snippet.
-     */
-    @Parameter(property = "aws-ecs.ec2HostMountPath")
-    private String ec2HostMountPath;
-    /**
-     * Name of the pre-provisioned capacity provider to target via {@code capacityProviderStrategy}.
-     * Required for {@code launchType} {@code MANAGED_INSTANCES}. Optional for {@code EC2} — when
-     * unset, tasks launch with {@code launchType: EC2} directly against unmanaged container
-     * instances already registered on the cluster. Unused for {@code FARGATE}, which always
-     * targets the AWS-managed {@code FARGATE}/{@code FARGATE_SPOT} providers.
-     */
-    @Parameter(property = "aws-ecs.capacityProviderName")
-    private String capacityProviderName;
-    @Parameter(property = "aws-ecs.logGroupName")
-    private String logGroupName;
-    @Parameter(property = "aws-ecs.region")
-    private String region;
-    @Parameter(property = "aws-ecs.agentImageUri")
-    private String agentImageUri;
-    /**
-     * Selects the agent's I/O mode. When {@code true}, the agent downloads staged inputs and
-     * uploads produced artifacts itself via plain S3 calls, and no mount infrastructure (S3 Files
-     * volume, or Mountpoint-via-user-data on EC2) is required. When {@code false} (default), the
-     * agent reads and writes through whichever mount the launch type provides. See
-     * {@code ai.codriverlabs.scaleoutbuild.build.agent.S3Io}'s class Javadoc for the tradeoffs between
-     * the two modes.
-     */
-    @Parameter(property = "aws-ecs.agentUsesDirectS3Io", defaultValue = "false")
-    private boolean agentUsesDirectS3Io;
-    @Parameter(property = "aws-ecs.agentCpu", defaultValue = "4096")
-    private String agentCpu;
-    @Parameter(property = "aws-ecs.agentMemory", defaultValue = "16384")
-    private String agentMemory;
-    @Parameter(property = "aws-ecs.agentEphemeralStorageGiB", defaultValue = "0")
-    private int agentEphemeralStorageGiB;
-    /** How many Spot interruptions a cell tolerates before its relaunch prefers on-demand capacity. */
-    @Parameter(property = "aws-ecs.maxSpotInterruptionsBeforeOnDemand", defaultValue = "2")
-    private int maxSpotInterruptionsBeforeOnDemand;
-    /** How often to poll ECS/CloudWatch Logs while a remote cell is running. */
-    @Parameter(property = "aws-ecs.pollIntervalSeconds", defaultValue = "5")
-    private int pollIntervalSeconds;
+    @Parameter(property = "scaleout-build.requestedCpu", defaultValue = "4096")
+    private String requestedCpu;
+    @Parameter(property = "scaleout-build.requestedMemory", defaultValue = "16384")
+    private String requestedMemory;
+    @Parameter(property = "scaleout-build.requestedEphemeralStorageGiB", defaultValue = "0")
+    private int requestedEphemeralStorageGiB;
 
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
         if (skip) {
-            getLog().info("aws-ecs:build skipped (aws-ecs.skip=true)");
+            getLog().info("scaleout-build:build skipped (scaleout-build.skip=true)");
             return;
         }
 
@@ -275,7 +214,7 @@ public class BuildMojo extends AbstractMojo {
 
         if (!failures.isEmpty()) {
             throw new MojoFailureException(
-                    "aws-ecs:build failed for " + failures.size() + " cell(s):\n"
+                    "scaleout-build:build failed for " + failures.size() + " cell(s):\n"
                             + String.join("\n", failures));
         }
     }
@@ -329,7 +268,7 @@ public class BuildMojo extends AbstractMojo {
         if (kinds.contains(BuildKind.NATIVE_PGO_OPTIMIZE) && (profilePath == null
                 || profilePath.isBlank())) {
             throw new MojoFailureException(
-                    "aws-ecs.profilePath must be set when native-pgo-optimize is requested");
+                    "scaleout-build.profilePath must be set when native-pgo-optimize is requested");
         }
         return cells;
     }
@@ -363,7 +302,7 @@ public class BuildMojo extends AbstractMojo {
     private void attachJvmArtifact() {
         if (project.getArtifact() == null || project.getArtifact().getFile() == null) {
             getLog().warn("build kind 'jvm' was requested but the project has no packaged artifact "
-                    + "yet; is aws-ecs:build bound after the package phase?");
+                    + "yet; is scaleout-build:build bound after the package phase?");
             return;
         }
         getLog().info("JVM build kind: attaching the already-packaged project artifact "
@@ -432,7 +371,7 @@ public class BuildMojo extends AbstractMojo {
             throws IOException, MojoFailureException {
         Path source = Path.of(profilePath);
         if (!java.nio.file.Files.isRegularFile(source)) {
-            throw new MojoFailureException("aws-ecs.profilePath does not exist: " + profilePath);
+            throw new MojoFailureException("scaleout-build.profilePath does not exist: " + profilePath);
         }
         String relativeName = "default.iprof";
         Path destination = mountRoot.resolve(stagingRelativePath).resolve(relativeName);
@@ -446,104 +385,23 @@ public class BuildMojo extends AbstractMojo {
     private List<String> runRemoteCells(List<MatrixCell> remoteCells, NativeImageInputPlan plan,
                                         String buildId) throws IOException, MojoExecutionException,
             MojoFailureException, InterruptedException {
-        requireRemoteConfig();
-
-        S3Client s3Client = S3Client.builder().region(software.amazon.awssdk.regions.Region.of(region))
-                .build();
-        EcsClient ecsClient =
-                EcsClient.builder().region(software.amazon.awssdk.regions.Region.of(region)).build();
-        CloudWatchLogsClient logsClient = CloudWatchLogsClient.builder()
-                .region(software.amazon.awssdk.regions.Region.of(region)).build();
-        try {
-            return runRemoteCells(remoteCells, plan, buildId, s3Client, ecsClient, logsClient);
-        } finally {
-            s3Client.close();
-            ecsClient.close();
-            logsClient.close();
+        if (isBlank(endpoint)) {
+            throw new MojoFailureException("scaleout-build.endpoint is required: "
+                    + "remote cells are built by the control plane, which has no default address. "
+                    + "Deploy it with scripts/deploy-control-plane.sh and use the endpoint it prints.");
         }
-    }
-
-    /** Package-visible for testing the orchestration logic against mocked AWS clients. */
-    List<String> runRemoteCells(List<MatrixCell> remoteCells, NativeImageInputPlan plan,
-                                String buildId, S3Client s3Client, EcsClient ecsClient,
-                                CloudWatchLogsClient logsClient)
-            throws IOException, MojoExecutionException, MojoFailureException, InterruptedException {
-        EcsClusterSettings clusterSettings = new EcsClusterSettings(resolveLaunchType(), clusterArn,
-                subnetIds, securityGroupIds, assignPublicIp, executionRoleArn, taskRoleArn,
-                s3FilesFileSystemArn, s3FilesRootDirectory, s3FilesAccessPointArn, ec2HostMountPath,
-                capacityProviderName, logGroupName, region, agentUsesDirectS3Io);
-        AgentContainerSettings containerSettings =
-                new AgentContainerSettings(agentImageUri, agentCpu, agentMemory,
-                        agentEphemeralStorageGiB);
-        RemoteBuildOptions options = new RemoteBuildOptions(s3Bucket, resolveWorkDirectory(),
-                pollIntervalSeconds, overallTimeoutMinutes, maxSpotInterruptionsBeforeOnDemand,
-                timeoutMinutes, extraNativeImageArgs, profilePath);
-
-        BuildBackend backend = new DirectEcsBuildBackend(s3Client, ecsClient, logsClient,
-                clusterSettings, containerSettings, options, getLog());
+        BuildBackend backend = new ServiceBuildBackend(new ServiceBuildBackend.ServiceBuildOptions(
+                endpoint, resolveWorkDirectory(), mainClass, imageName, nativeImageCommand,
+                extraNativeImageArgs, extraBuildArgs, timeoutMinutes, overallTimeoutMinutes,
+                new RequestedResources(requestedCpu, requestedMemory, requestedEphemeralStorageGiB),
+                "scaleout-build-maven-plugin/" + pluginVersion()), getLog());
         return backend.runCells(remoteCells, plan, buildId, this::attachArtifacts);
     }
 
-    private EcsLaunchType resolveLaunchType() throws MojoFailureException {
-        // Falls back to FARGATE (matching the @Parameter's defaultValue) when null, since tests
-        // that construct BuildMojo directly and set fields via reflection bypass Maven's plexus
-        // injector and its defaultValue handling entirely.
-        String value = launchType == null || launchType.isBlank() ? "FARGATE" : launchType;
-        try {
-            return EcsLaunchType.valueOf(value.trim().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException e) {
-            throw new MojoFailureException("Invalid aws-ecs.launchType '" + launchType
-                    + "'; must be one of " + java.util.Arrays.toString(EcsLaunchType.values()));
-        }
-    }
-
-    private void requireRemoteConfig() throws MojoFailureException {
-        EcsLaunchType resolvedLaunchType = resolveLaunchType();
-        List<String> missing = new ArrayList<>();
-        if (isBlank(s3Bucket)) {
-            missing.add("aws-ecs.s3Bucket");
-        }
-        if (isBlank(clusterArn)) {
-            missing.add("aws-ecs.clusterArn");
-        }
-        if (subnetIds == null || subnetIds.isEmpty()) {
-            missing.add("aws-ecs.subnetIds");
-        }
-        if (securityGroupIds == null || securityGroupIds.isEmpty()) {
-            missing.add("aws-ecs.securityGroupIds");
-        }
-        if (isBlank(executionRoleArn)) {
-            missing.add("aws-ecs.executionRoleArn");
-        }
-        if (isBlank(taskRoleArn)) {
-            missing.add("aws-ecs.taskRoleArn");
-        }
-        if (!agentUsesDirectS3Io) {
-            if (resolvedLaunchType.usesS3Files()) {
-                if (isBlank(s3FilesFileSystemArn)) {
-                    missing.add("aws-ecs.s3FilesFileSystemArn");
-                }
-            } else if (isBlank(ec2HostMountPath)) {
-                missing.add("aws-ecs.ec2HostMountPath");
-            }
-        }
-        if (resolvedLaunchType == EcsLaunchType.MANAGED_INSTANCES && isBlank(capacityProviderName)) {
-            missing.add("aws-ecs.capacityProviderName");
-        }
-        if (isBlank(logGroupName)) {
-            missing.add("aws-ecs.logGroupName");
-        }
-        if (isBlank(region)) {
-            missing.add("aws-ecs.region");
-        }
-        if (isBlank(agentImageUri)) {
-            missing.add("aws-ecs.agentImageUri");
-        }
-        if (!missing.isEmpty()) {
-            throw new MojoFailureException(
-                    "The requested matrix needs at least one remote (non-local-first) build, which "
-                            + "requires the following configuration to be set: " + missing);
-        }
+    /** Reported to the service so an operator can spot clients predating a contract change. */
+    private String pluginVersion() {
+        String version = getClass().getPackage().getImplementationVersion();
+        return version == null ? "dev" : version;
     }
 
     private static boolean isBlank(String value) {
@@ -574,7 +432,7 @@ public class BuildMojo extends AbstractMojo {
         if (workDirectory != null && !workDirectory.isBlank()) {
             return Path.of(workDirectory);
         }
-        return Path.of(project.getBuild().getDirectory(), "aws-ecs-build");
+        return Path.of(project.getBuild().getDirectory(), "scaleout-build");
     }
 
     private List<String> splitCommand(String command) {

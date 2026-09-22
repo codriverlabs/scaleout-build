@@ -110,10 +110,10 @@ public class BuildService {
         // Retained well past the build so a developer can still inspect a failure the next morning.
         record.setTtl(now.plus(Duration.ofDays(14)).getEpochSecond());
 
-        List<String> missing = staging.missingDigests(request.inputs());
+        List<String> missing = staging.missingDigests(caller.ownerKey(), request.inputs());
         List<UploadTarget> uploads = new ArrayList<>();
         for (String digest : missing) {
-            uploads.add(staging.presignUpload(digest));
+            uploads.add(staging.presignUpload(caller.ownerKey(), digest));
         }
         List<String> alreadyStaged = request.inputs().stream()
                 .map(InputDescriptor::sha256)
@@ -175,7 +175,7 @@ public class BuildService {
                     + "; only PENDING or STAGED builds can be started");
         }
 
-        List<String> stillMissing = staging.missingDigests(record.getInputs());
+        List<String> stillMissing = staging.missingDigests(record.getOwnerKey(), record.getInputs());
         if (!stillMissing.isEmpty()) {
             throw new InvalidRequestException(
                     "inputs not yet staged: " + String.join(", ", stillMissing));
@@ -201,13 +201,13 @@ public class BuildService {
             BuildKind buildKind = BuildKind.parse(cell.getCell().split("/")[0]);
             Architecture architecture = Architecture.parse(cell.getCell().split("/")[1]);
             try {
-                staging.materializeCell(record.getBuildId(), buildKind, architecture,
-                        record.getInputs());
+                staging.materializeCell(record.getOwnerKey(), record.getBuildId(), buildKind,
+                        architecture, record.getInputs());
                 String taskDefinitionArn = registrar.registerIfChanged(clusterSettings,
                         containerSettings, buildKind, architecture);
                 var environment = AgentEnvironment
                         .builder(record.getBuildId(), buildKind, architecture,
-                                staging.stagingPath(record.getBuildId(), buildKind, architecture),
+                                staging.stagingPath(record.getOwnerKey(), record.getBuildId(), buildKind, architecture),
                                 ai.codriverlabs.scaleoutbuild.build.StagingLayout.DEFAULT_ARGS_FILE_NAME)
                         .s3Bucket(config.ecs().agentUsesDirectS3Io() ? config.stagingBucket() : null)
                         .expectedArtifacts(List.of(record.getBuildSpec().imageName()))
@@ -300,7 +300,7 @@ public class BuildService {
                 if (cell.getState() == CellState.SUCCEEDED) {
                     BuildKind buildKind = BuildKind.parse(cell.getCell().split("/")[0]);
                     Architecture architecture = Architecture.parse(cell.getCell().split("/")[1]);
-                    String prefix = staging.outputPrefix(record.getBuildId(), buildKind, architecture);
+                    String prefix = staging.outputPrefix(record.getOwnerKey(), record.getBuildId(), buildKind, architecture);
                     for (String artifact : cell.getArtifactPaths()) {
                         String key = prefix.endsWith("/") ? prefix + artifact : prefix + "/" + artifact;
                         downloads.add(staging.presignDownload(key, null));
