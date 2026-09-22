@@ -7,6 +7,8 @@ Companion documents:
 today's model to this one without a flag-day cutover.
 [`sigv4-client-signing.md`](sigv4-client-signing.md) is the reference design for how clients
 authenticate to this service, and is written to be usable outside this repository.
+[`storage-layout-and-isolation.md`](storage-layout-and-isolation.md) covers the S3 key layout, the
+per-owner content-addressed store, and what it does and does not isolate.
 
 ## Problem
 

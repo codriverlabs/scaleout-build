@@ -1,0 +1,24 @@
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.2.0 https://maven.apache.org/xsd/assembly-2.2.0.xsd">
+  <id>function</id>
+  <formats>
+    <format>zip</format>
+  </formats>
+  <includeBaseDirectory>false</includeBaseDirectory>
+  <files>
+    <!--
+      On provided.al2023 the handler is literally the file named `bootstrap`, so the GraalVM native
+      binary is renamed to it. No launcher script is involved, which is deliberate: a shell wrapper
+      would be a second place for the artifact name to drift out of sync with the build.
+      express-compute-control-plane has exactly that problem today: its JVM-mode bootstrap execs
+      eks-dx-tenant-service-runner.jar while the assembly produces ecp-tenant-service-runner.jar.
+    -->
+    <file>
+      <source>target/${project.build.finalName}-runner</source>
+      <outputDirectory>/</outputDirectory>
+      <destName>bootstrap</destName>
+      <fileMode>0755</fileMode>
+    </file>
+  </files>
+</assembly>
