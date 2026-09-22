@@ -402,7 +402,7 @@ runtime:
   framing, reconnect with `?since=`, and the per-cell watermark map. A regression test asserting
   that a reconnect after `lambda-timeout` loses no lines is mandatory, given commit `7782771`.
 - **Integration** — DynamoDB Local for the table and GSI.
-- **End-to-end** — against real AWS using `scaleout-test-infra`, driving the example app through the
+- **End-to-end** — against real AWS using `scaleout-build-control-plane-infra`, driving the example app through the
   service. The existing E2E assertion stays: both artifacts must be genuine, distinct
   `ELF x86-64` and `ELF ARM aarch64` binaries.
 

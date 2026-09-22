@@ -1,7 +1,0 @@
-{
-  "app": "mvn -q -f pom.xml compile exec:java",
-  "context": {
-    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
-    "@aws-cdk/core:checkSecretUsage": true
-  }
-}

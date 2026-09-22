@@ -136,7 +136,7 @@ kept rather than one replacing the other:
   even if only some of it is read.
 - **A genuinely new IAM requirement, now provisioned**: the task role needs its own
   `s3:GetObject`/`s3:ListBucket` (to download inputs) and `s3:PutObject` (to upload artifacts) on
-  the staging bucket. `scaleout-test-infra`'s CDK stack's task role grants the read/list pair
+  the staging bucket. the control-plane stack's task role grants the read/list pair
   already (needed for the mount-based modes' own prerequisites) plus a separate, narrowly scoped
   `s3:PutObject` statement added specifically for this mode — deliberately unconditional rather
   than gated behind a stack parameter, so the same deployed stack can test either I/O mode.

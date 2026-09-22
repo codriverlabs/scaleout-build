@@ -113,7 +113,7 @@
           must not attempt a registry pull/push as a side effect. Invoke explicitly:
 
               mvn -pl scaleout-build-agent jib:build \
-                  -Djib.to.image=<AgentRepositoryUri from scaleout-test-infra's CDK stack output>
+                  -Djib.to.image=<AgentRepositoryUri from the control-plane stack's output>
 
           Requires the amazon-ecr-credential-helper (docker-credential-ecr-login) on PATH to push
           to ECR — Jib calls it directly, the same way it would call any other Docker credential
