@@ -84,8 +84,49 @@ public class ControlPlaneInfraStack extends Stack {
     public ControlPlaneInfraStack(Construct scope, String id, StackProps props) {
         super(scope, id, props);
 
-        boolean arm64 = !"x86_64".equalsIgnoreCase(
-                String.valueOf(this.getNode().tryGetContext("serviceArch")));
+        /*
+         * Deployment mode, chosen by CDK context rather than baked in:
+         *
+         *   -c runtimeMode=jvm            JAVA_25 on ARM_64, from function-jvm.zip
+         *   -c runtimeMode=native         provided.al2023, from function-native.zip
+         *   -c nativeArch=x86|arm64       which architecture the native binary was built for
+         *
+         * JVM is the default because it needs no GraalVM toolchain, so a first deploy works from a
+         * plain `mvn package`. A JVM zip is architecture-neutral -- it is bytecode -- so ARM_64 is
+         * simply chosen for price/performance, with nothing multi-arch to build.
+         *
+         * A native binary is the opposite: it is architecture-specific, so nativeArch must match the
+         * Mandrel image it was produced by. Claiming the wrong one yields an Exec format error at cold
+         * start, which is why the scripts derive it from the build rather than leaving it to be typed.
+         */
+        String runtimeMode = String.valueOf(
+                this.getNode().tryGetContext("runtimeMode") == null ? "jvm"
+                        : this.getNode().tryGetContext("runtimeMode"));
+        boolean jvmMode = !"native".equalsIgnoreCase(runtimeMode);
+        boolean nativeX86 = "x86".equalsIgnoreCase(
+                String.valueOf(this.getNode().tryGetContext("nativeArch")));
+
+        // JVM: ARM_64 for price/performance, since the zip runs on either. Native: whatever it was
+        // compiled for.
+        Architecture serviceArch = jvmMode ? Architecture.ARM_64
+                : (nativeX86 ? Architecture.X86_64 : Architecture.ARM_64);
+        boolean arm64 = serviceArch == Architecture.ARM_64;
+
+        /*
+         * Where the deployable zips come from. Development resolves straight out of target/, which is
+         * what the local scripts use; otherwise from assets/, which is what a release or CI pipeline
+         * populates. Distinct filenames per mode, so building JVM and deploying native fails with a
+         * missing file instead of starting a function that cannot execute its own handler.
+         */
+        boolean development = !"false".equals(
+                String.valueOf(this.getNode().tryGetContext("development")));
+        String serviceZip = development
+                ? "../scaleout-build-control-plane/target/" + (jvmMode ? "function-jvm.zip"
+                        : "function-native.zip")
+                : "../assets/control-plane-" + (jvmMode ? "jvm" : "native") + ".zip";
+        String reaperZip = development
+                ? "../scaleout-build-control-plane-reaper/target/reaper.jar"
+                : "../assets/reaper.jar";
 
         // --- Data plane -----------------------------------------------------------------------
 
@@ -147,6 +188,21 @@ public class ControlPlaneInfraStack extends Stack {
                 .clusterName("scaleout-build")
                 .vpc(vpc)
                 .containerInsightsV2(software.amazon.awscdk.services.ecs.ContainerInsights.ENABLED)
+                /*
+                 * Required, not an optimisation.
+                 *
+                 * EcsTaskLauncher launches FARGATE work through a capacityProviderStrategy of
+                 * FARGATE_SPOT with an on-demand fallback, rather than a plain launchType. ECS rejects
+                 * any strategy naming a provider that is not associated with the cluster:
+                 * "The specified capacity provider strategy cannot contain a capacity provider that is
+                 * not associated with the cluster."
+                 *
+                 * This associates both FARGATE and FARGATE_SPOT. The predecessor stack did the same; the
+                 * consolidated stack dropped it, and the first real build failed on every cell. Nothing
+                 * detected it earlier because the error only appears at RunTask, and no synth assertion
+                 * covered the pairing between the launcher's strategy and the cluster's providers.
+                 */
+                .enableFargateCapacityProviders(true)
                 .build();
 
         Repository agentRepository = Repository.Builder.create(this, "AgentRepository")
@@ -218,12 +274,19 @@ public class ControlPlaneInfraStack extends Stack {
                 // a managed-runtime JVM variant needs a launcher script whose handler value and jar
                 // name are a second thing to keep in sync, which is broken in the reference project
                 // this pattern came from.
-                .runtime(Runtime.PROVIDED_AL2023)
-                .architecture(arm64 ? Architecture.ARM_64 : Architecture.X86_64)
-                .handler("bootstrap")
-                .code(Code.fromAsset("../scaleout-build-control-plane/target/function.zip"))
+                .runtime(jvmMode ? Runtime.JAVA_25 : Runtime.PROVIDED_AL2023)
+                .architecture(serviceArch)
+                /*
+                 * JVM mode: run.sh, shipped inside the zip, which the Web Adapter's exec wrapper starts.
+                 * Native mode: bootstrap, the renamed GraalVM binary, which is the handler itself.
+                 * The JVM launcher derives its jar name at build time so the two cannot drift.
+                 */
+                .handler(jvmMode ? "run.sh" : "bootstrap")
+                .code(Code.fromAsset(serviceZip))
+                // JVM needs headroom a static binary does not: JIT, heap and metaspace. Also buys a
+                // proportional share of vCPU, which shortens the JVM's cold start specifically.
+                .memorySize(jvmMode ? 1024 : 512)
                 .layers(List.of(LayerVersion.fromLayerVersionArn(this, "LambdaWebAdapter", lwaLayerArn)))
-                .memorySize(512)
                 // The SSE endpoint holds a connection while a build runs, so this is the streaming
                 // budget rather than a request timeout. LogStreamResource hands over at 780s.
                 .timeout(Duration.seconds(900))
@@ -293,10 +356,12 @@ public class ControlPlaneInfraStack extends Stack {
         Function reaperFunction = Function.Builder.create(this, "ReaperFunction")
                 .functionName("scaleout-build-control-plane-reaper")
                 .runtime(Runtime.JAVA_25)
-                .architecture(arm64 ? Architecture.ARM_64 : Architecture.X86_64)
+                // Always ARM_64: a jar is architecture-neutral, so this is a pricing choice and is
+                // deliberately independent of whichever mode the service is deployed in.
+                .architecture(Architecture.ARM_64)
                 .handler("ai.codriverlabs.scaleoutbuild.controlplane.reaper.BuildReaperHandler"
                         + "::handleRequest")
-                .code(Code.fromAsset("../scaleout-build-control-plane-reaper/target/reaper.jar"))
+                .code(Code.fromAsset(reaperZip))
                 .memorySize(512)
                 .timeout(Duration.seconds(120))
                 .environment(Map.of(
@@ -329,6 +394,12 @@ public class ControlPlaneInfraStack extends Stack {
                 .build();
 
         CfnOutput.Builder.create(this, "ControlPlaneEndpoint").value(serviceUrl.getUrl()).build();
+        // Surfaced so `cdk deploy` output states which mode is live: the two are indistinguishable
+        // from the endpoint alone, and a native deploy that silently fell back would otherwise be
+        // invisible until someone checked the console.
+        CfnOutput.Builder.create(this, "ServiceRuntimeMode")
+                .value((jvmMode ? "jvm" : "native") + "/" + (arm64 ? "arm64" : "x86_64"))
+                .build();
         CfnOutput.Builder.create(this, "AgentRepositoryUri")
                 .value(agentRepository.getRepositoryUri()).build();
         CfnOutput.Builder.create(this, "ClusterArn").value(cluster.getClusterArn()).build();

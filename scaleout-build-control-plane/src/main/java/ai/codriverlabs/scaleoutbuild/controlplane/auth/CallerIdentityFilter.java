@@ -6,6 +6,8 @@ package ai.codriverlabs.scaleoutbuild.controlplane.auth;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ErrorResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.Priority;
+import ai.codriverlabs.scaleoutbuild.controlplane.config.ControlPlaneConfig;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -14,7 +16,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import java.util.Optional;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -57,16 +58,25 @@ public class CallerIdentityFilter implements ContainerRequestFilter {
     @Inject
     ObjectMapper objectMapper;
 
-    @ConfigProperty(name = "scaleout.auth.allow-dev-principal", defaultValue = "false")
-    boolean allowDevPrincipal;
-
-    /**
-     * Optional, not a String with an empty default: SmallRye converts {@code ""} to null and then
-     * fails injection outright, which the GraalVM native build surfaced as a class-initialization
-     * error at image build time.
+    /*
+     * Instance<>, not a direct @Inject of the mapping.
+     *
+     * A JAX-RS filter is instantiated during RESTEasy Reactive's deployment
+     * (RuntimeInterceptorDeployment.createInterceptorInstances), which runs before runtime config
+     * mappings are registered. Injecting ControlPlaneConfig directly therefore resolves too early and
+     * fails the whole REST deployment with "SRCFG00027: Could not find a mapping" -- an error that
+     * names the config class and says nothing about ordering.
+     *
+     * Instance<> defers resolution to the first get(), which happens inside filter() on a real request,
+     * long after startup. ApplicationBootTest covers this; it is what found it.
      */
-    @ConfigProperty(name = "scaleout.auth.dev-principal-arn")
-    Optional<String> devPrincipalArn;
+    @Inject
+    Instance<ControlPlaneConfig> configInstance;
+
+    private ControlPlaneConfig.Auth auth() {
+        return configInstance.get().auth();
+    }
+
 
     /** Paths served without a caller identity: health checks, which the Lambda runtime itself polls. */
     private static boolean isUnauthenticatedPath(String path) {
@@ -86,11 +96,11 @@ public class CallerIdentityFilter implements ContainerRequestFilter {
             ctx.setProperty(CallerIdentity.PROPERTY, resolver.resolve(header));
             return;
         } catch (UnauthenticatedException e) {
-            if (allowDevPrincipal && devPrincipalArn.filter(a -> !a.isBlank()).isPresent()) {
+            if (auth().allowDevPrincipal() && auth().devPrincipalArn().filter(a -> !a.isBlank()).isPresent()) {
                 LOG.warnf("Using configured dev principal %s because %s (NEVER enable this in a "
-                        + "deployed environment)", devPrincipalArn.orElseThrow(), e.getMessage());
+                        + "deployed environment)", auth().devPrincipalArn().orElseThrow(), e.getMessage());
                 ctx.setProperty(CallerIdentity.PROPERTY,
-                        CallerIdentityResolver.of(devPrincipalArn.orElseThrow(), null, null));
+                        CallerIdentityResolver.of(auth().devPrincipalArn().orElseThrow(), null, null));
                 return;
             }
             // Deliberately not echoing the reason to the client: whether the header was absent

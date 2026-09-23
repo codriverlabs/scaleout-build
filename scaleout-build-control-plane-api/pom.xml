@@ -95,11 +95,20 @@
             <artifactId>mockito-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- Instant round-trips need JavaTimeModule, which findAndRegisterModules() discovers. -->
+        <!--
+          Compile scope, NOT test.
+          UploadTarget.expiresAt and the BuildStatus timestamps are java.time.Instant, which
+          jackson-databind cannot handle on its own. This was previously test-scoped, which meant
+          WireContractSerializationTest round-tripped Instant successfully while every shipped consumer
+          lacked the module. findAndRegisterModules() made that invisible: it is a ServiceLoader scan, so
+          with the jar absent it silently registers nothing and the mapper looks correctly configured
+          until an Instant actually crosses the wire. The first real build failed at createBuild on
+          UploadTarget.expiresAt.
+          This module owns the DTOs that carry Instant, so it is the right place to carry the capability.
+        -->
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>
-            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

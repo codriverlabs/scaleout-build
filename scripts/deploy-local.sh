@@ -36,9 +36,25 @@ STACK_NAME="ScaleoutBuildControlPlane"
 SKIP_BUILD=false
 SKIP_AGENT=false
 CDK_APPROVAL=()
+CDK_CONTEXT=()
+
+# JVM by default: it needs no GraalVM toolchain, so a first deploy works from a plain `mvn package`.
+RUNTIME_MODE="jvm"
+
+# A native image cannot be cross-compiled, so the deployable architecture is the BUILD HOST's, not a
+# choice. Derived here rather than left as a flag, because getting it wrong produces an "Exec format
+# error" at cold start that names nothing useful.
+case "$(uname -m)" in
+    x86_64|amd64)  HOST_NATIVE_ARCH="x86" ;;
+    aarch64|arm64) HOST_NATIVE_ARCH="arm64" ;;
+    *) HOST_NATIVE_ARCH="" ;;
+esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --jvm) RUNTIME_MODE="jvm"; shift ;;
+        --native) RUNTIME_MODE="native"; shift ;;
+        --context) CDK_CONTEXT+=(-c "${2:?--context requires key=value}"); shift 2 ;;
         --skip-build) SKIP_BUILD=true; shift ;;
         --skip-agent) SKIP_AGENT=true; shift ;;
         --yes) CDK_APPROVAL=(--require-approval never); shift ;;
@@ -55,26 +71,32 @@ fi
 
 echo "==> Target: $(aws sts get-caller-identity --query Account --output text) / ${REGION}"
 
-if ! $SKIP_BUILD; then
-    echo "==> Building the reaper jar"
-    mvn -B -q -f "${REPO_ROOT}/pom.xml" -pl scaleout-build-control-plane-reaper -am \
-        install -DskipTests
-
-    echo "==> Building the service native image (GraalVM in a container; several minutes)"
-    mvn -B -f "${REPO_ROOT}/pom.xml" -Pnative -pl scaleout-build-control-plane package -DskipTests
+if [[ "$RUNTIME_MODE" == "native" && -z "$HOST_NATIVE_ARCH" ]]; then
+    echo "Unrecognised host architecture $(uname -m): cannot determine the native target." >&2
+    exit 1
 fi
 
-for artifact in "${REPO_ROOT}/scaleout-build-control-plane/target/function.zip" \
+if ! $SKIP_BUILD; then
+    "${REPO_ROOT}/build-local.sh" --function "$RUNTIME_MODE"
+fi
+
+for artifact in "${REPO_ROOT}/scaleout-build-control-plane/target/function-${RUNTIME_MODE}.zip" \
                 "${REPO_ROOT}/scaleout-build-control-plane-reaper/target/reaper.jar"; do
     if [[ ! -f "$artifact" ]]; then
         echo "Missing deployable artifact: ${artifact}" >&2
-        echo "Run without --skip-build, or build it first." >&2
+        echo "Run without --skip-build, or build it for this mode: ./build-local.sh --function ${RUNTIME_MODE}" >&2
         exit 1
     fi
 done
 
-echo "==> cdk deploy ${STACK_NAME}"
-(cd "$INFRA_DIR" && mvn -q compile && cdk deploy "${CDK_APPROVAL[@]}" --outputs-file cdk-outputs.json)
+CDK_MODE_CONTEXT=(-c "runtimeMode=${RUNTIME_MODE}" -c "development=true")
+if [[ "$RUNTIME_MODE" == "native" ]]; then
+    CDK_MODE_CONTEXT+=(-c "nativeArch=${HOST_NATIVE_ARCH}")
+fi
+
+echo "==> cdk deploy ${STACK_NAME} (runtimeMode=${RUNTIME_MODE}$([[ "$RUNTIME_MODE" == native ]] && echo "/${HOST_NATIVE_ARCH}" || echo "/arm64"))"
+(cd "$INFRA_DIR" && mvn -q compile && cdk deploy "${CDK_APPROVAL[@]}" \
+    "${CDK_MODE_CONTEXT[@]}" "${CDK_CONTEXT[@]}" --outputs-file cdk-outputs.json)
 
 outputs() {
     aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK_NAME" \
@@ -93,6 +115,7 @@ fi
 echo
 echo "==> Deployed."
 echo "    Control plane endpoint : ${ENDPOINT}"
+echo "    Runtime mode           : $(outputs ServiceRuntimeMode)"
 echo "    Agent image            : ${AGENT_REPO}:latest"
 echo "    Cluster                : $(outputs ClusterArn)"
 echo "    Staging bucket         : $(outputs StagingBucketName)   (RemovalPolicy.RETAIN)"
@@ -101,7 +124,7 @@ echo
 echo "    Also published to SSM at /scaleout-build/control-plane/endpoint"
 echo
 echo "    Point a build at it with:"
-echo "      mvn package -Daws-ecs.endpoint=${ENDPOINT}"
+echo "      mvn package -Dscaleout-build.endpoint=${ENDPOINT}"
 echo
 echo "    Callers need lambda:InvokeFunctionUrl and lambda:InvokeFunction on"
 echo "    scaleout-build-control-plane, and nothing else -- no ECS, S3, CloudWatch or ECR access."

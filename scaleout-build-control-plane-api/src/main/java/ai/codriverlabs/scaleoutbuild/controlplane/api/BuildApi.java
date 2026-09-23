@@ -93,13 +93,14 @@ public interface BuildApi {
      *
      * @param cell  optional cell filter (e.g. {@code NATIVE/ARM64}); omit to interleave all cells
      * @param since optional exclusive watermark, epoch millis, for resuming
+     *
+     * <p><b>Documented here but deliberately not declared as a method.</b> The route is served by the
+     * service's own LogStreamResource, which returns {@code Multi<LogEvent>}. When this interface
+     * declared it too, the implementing BuildResource inherited the JAX-RS annotations and its stub
+     * shadowed the real resource: the endpoint answered 501 in a deployed environment while every test
+     * passed. The wire contract is unchanged -- {@code GET /builds/{buildId}/logs},
+     * {@code text/event-stream}.
      */
-    @GET
-    @jakarta.ws.rs.Path("/{buildId}/logs")
-    @Produces(MediaType.SERVER_SENT_EVENTS)
-    Response streamLogs(@PathParam("buildId") String buildId,
-                        @QueryParam("cell") String cell,
-                        @QueryParam("since") Long since);
 
     /**
      * Cancels every non-terminal cell.

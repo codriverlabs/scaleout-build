@@ -30,6 +30,33 @@ public interface ControlPlaneConfig {
 
     Limits limits();
 
+    Auth auth();
+
+    /*
+     * Part of the mapping rather than loose @ConfigProperty fields, because @ConfigMapping(prefix =
+     * "scaleout") makes SmallRye the owner of the whole scaleout.* namespace: any scaleout.* property
+     * that is not a member of this interface fails startup with SRCFG00050 "does not map to any root".
+     *
+     * That is exactly how this was found -- in production, on every cold start, after 122 unit tests
+     * passed. None of them booted the application, so nothing evaluated the config mapping.
+     */
+    interface Auth {
+        /**
+         * Dev escape hatch for running the service outside Lambda, where no request context header
+         * exists. Defaults to false so the filter fails closed: a deployment that forgets to set this
+         * rejects unauthenticated callers rather than trusting them.
+         */
+        @WithDefault("false")
+        boolean allowDevPrincipal();
+
+        /**
+         * Optional deliberately. Over a plain String, @WithDefault("") would have SmallRye convert the
+         * empty string to null and then fail injection -- which surfaces as an opaque class-init error
+         * rather than a config problem.
+         */
+        Optional<String> devPrincipalArn();
+    }
+
     interface Ecs {
         String clusterArn();
 

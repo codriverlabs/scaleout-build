@@ -67,25 +67,13 @@
                             <goal>read-project-properties</goal>
                         </goals>
                         <configuration>
-                    <!-- Matrix: one build kind, both architectures. The control plane launches one
-                         task per cell; this project never sees a cluster or a role. -->
-                    <buildKinds>
-                        <buildKind>native</buildKind>
-                    </buildKinds>
-                    <architectures>
-                        <architecture>x86_64</architecture>
-                        <architecture>arm64</architecture>
-                    </architectures>
-                    <mainClass>ai.codriverlabs.example.HelloNative</mainClass>
-                    <imageName>hello-native</imageName>
-
-                    <!-- forceRemote: build both cells remotely even though one matches this host,
-                         which is the point of the example. -->
-                    <forceRemote>true</forceRemote>
-
-                    <!-- The only deployment-specific value, read from deployment.properties. -->
-                    <endpoint>${scaleout-build.endpoint}</endpoint>
-                </configuration>
+                            <files>
+                                <!-- Gitignored; copy deployment.properties.example and set the one
+                                     endpoint value. Read at validate so ${scaleout-build.endpoint}
+                                     resolves before the package phase runs the build goal. -->
+                                <file>deployment.properties</file>
+                            </files>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
