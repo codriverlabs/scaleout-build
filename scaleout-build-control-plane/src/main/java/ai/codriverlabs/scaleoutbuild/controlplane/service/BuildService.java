@@ -44,7 +44,30 @@ import software.amazon.awssdk.services.ecs.EcsClient;
 public class BuildService {
 
     private static final Logger LOG = Logger.getLogger(BuildService.class);
-    private static final SecureRandom RANDOM = new SecureRandom();
+
+    /*
+     * An INSTANCE field, deliberately, not `private static final SecureRandom`.
+     *
+     * GraalVM runs static initializers at image *build* time, so a static SecureRandom would be
+     * constructed during the build and baked into the image heap complete with its cached seed. Every
+     * Lambda instance started from that image would then emit the same sequence of build-id suffixes.
+     * native-image refuses to build rather than let that happen:
+     *
+     *   UnsupportedFeatureException: Detected an instance of Random/SplittableRandom class in the
+     *   image heap. Instances created during image generation have cached seed values and don't behave
+     *   as expected.
+     *
+     * That refusal is doing real work here. The build id is the DynamoDB table's partition key, so a
+     * repeated suffix means two owners' builds can collide on the same item and overwrite each other's
+     * records -- the per-owner GSI does not protect the base table. It is not an access-control issue,
+     * because BuildRepository.findOwned() returns empty for "not yours" exactly as it does for
+     * "absent", so a guessed id grants nothing; it is a correctness issue.
+     *
+     * This bean is @ApplicationScoped, so CDI constructs it at runtime and the field is seeded then.
+     * The alternative fix -- passing --initialize-at-run-time for this class -- would work too, but it
+     * puts the correctness guarantee in a build flag far away from the code that depends on it.
+     */
+    private final SecureRandom random = new SecureRandom();
 
     private final BuildRepository repository;
     private final StagingService staging;
@@ -137,9 +160,9 @@ public class BuildService {
      * Time-ordered identifier. Not a UUID: builds are listed newest-first straight off the GSI sort
      * key, which requires the id itself to sort chronologically.
      */
-    private static String newBuildId() {
+    private String newBuildId() {
         byte[] entropy = new byte[8];
-        RANDOM.nextBytes(entropy);
+        random.nextBytes(entropy);
         StringBuilder suffix = new StringBuilder();
         for (byte b : entropy) {
             suffix.append(String.format("%02x", b));
