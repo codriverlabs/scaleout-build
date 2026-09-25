@@ -1,0 +1,179 @@
+name: Deploy control plane
+
+# Manual only. This creates and updates real infrastructure, including a staging bucket and DynamoDB
+# table that are RemovalPolicy.RETAIN and deliberately outlive a `cdk destroy`, so it must never fire
+# from a push.
+#
+# Mirrors scripts/deploy-local.sh, which stays the primary path -- the script is what gets used day to
+# day and is what proved the deployment works. This workflow exists so a deploy does not require a
+# developer's own AWS credentials.
+#
+# PREREQUISITE, and it does not exist yet: the AWS_DEPLOY_ROLE_ARN secret must name a role whose trust
+# policy allows this repository via GitHub's OIDC provider. Until it is set, this workflow fails on the
+# first step with a clear message rather than an opaque credentials error.
+#
+# The role needs CDK deploy permissions (CloudFormation plus the services in the stack) and
+# sts:AssumeRole on the CDK bootstrap roles. It is NOT the same as the permissions a *caller* of the
+# deployed service needs -- those are only lambda:InvokeFunctionUrl and lambda:InvokeFunction, which is
+# the entire point of the control plane.
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: AWS region
+        required: true
+        default: eu-west-1
+      runtime_mode:
+        description: Lambda packaging for the service
+        required: true
+        default: jvm
+        type: choice
+        options: [jvm, native]
+      architecture:
+        description: >-
+          Only meaningful for native. A GraalVM native image cannot be cross-compiled, so the binary
+          takes the architecture of the runner that built it and must be deployed to a matching Lambda.
+          Ignored for jvm, which is architecture-neutral bytecode and always deploys to arm64.
+        required: true
+        default: arm64
+        type: choice
+        options: [arm64, x86_64]
+
+permissions:
+  id-token: write   # required to mint the OIDC token for role assumption
+  contents: read
+
+jobs:
+  deploy:
+    # Native builds on the architecture it targets; JVM does not care, so it takes the cheaper amd64
+    # runner. Getting this wrong is not a warning: an x86_64 binary on an arm64 Lambda fails at cold
+    # start with "Exec format error", which names nothing useful.
+    runs-on: >-
+      ${{ (inputs.runtime_mode == 'native' && inputs.architecture == 'arm64')
+          && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - name: Check the deploy role is configured
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::AWS_DEPLOY_ROLE_ARN is not set. Create an IAM role trusting this repo via" \
+                 "GitHub OIDC and add its ARN as a repository secret. See the header of this workflow."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk@2
+
+      # Delegated to build-local.sh rather than repeated here, so the workflow and the local path cannot
+      # drift in what they produce. It emits function-jvm.zip or function-native.zip plus the reaper jar.
+      - name: Build the deployable artifacts
+        run: ./build-local.sh --function ${{ inputs.runtime_mode }}
+
+      # Cheap insurance before touching AWS: asserts the template is coherent in both modes, including
+      # the Fargate capacity provider association whose absence failed every cell of the first real
+      # build.
+      - name: Assert the template
+        run: ./scripts/verify-synth.sh
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      # nativeArch is derived from the runner rather than taken from the input, so the value passed to
+      # CDK cannot contradict the binary that was just built. CDK maps "x86" to X86_64 and anything else
+      # to ARM_64; development=true resolves the zips from target/, which is what the build above wrote.
+      - name: Deploy
+        working-directory: scaleout-build-control-plane-infra
+        run: |
+          case "$(uname -m)" in
+            x86_64|amd64)  NATIVE_ARCH=x86 ;;
+            aarch64|arm64) NATIVE_ARCH=arm64 ;;
+            *) echo "::error::unrecognised runner architecture $(uname -m)"; exit 1 ;;
+          esac
+          echo "runner $(uname -m) -> nativeArch=${NATIVE_ARCH}"
+          mvn -q compile
+          cdk deploy --require-approval never \
+            -c runtimeMode=${{ inputs.runtime_mode }} \
+            -c nativeArch="${NATIVE_ARCH}" \
+            -c development=true \
+            --outputs-file cdk-outputs.json
+
+      # Asserts on the BODY, not the status code. A Function URL with InvokeMode.RESPONSE_STREAM answers
+      # HTTP 200 and puts a runtime error in the response body, which is exactly how the first JVM
+      # deployment appeared healthy while crash-looping on every cold start. Checking the status alone
+      # would reproduce that blind spot in CI.
+      - name: Smoke test the deployment
+        env:
+          REGION: ${{ inputs.region }}
+        run: |
+          ENDPOINT=$(aws ssm get-parameter --name /scaleout-build/control-plane/endpoint \
+            --region "$REGION" --query Parameter.Value --output text)
+          echo "endpoint: $ENDPOINT"
+          python3 - "$ENDPOINT" "$REGION" <<'PY'
+          import json, sys, urllib.request, urllib.error, botocore.session
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+
+          endpoint, region = sys.argv[1].rstrip("/"), sys.argv[2]
+          creds = botocore.session.get_session().get_credentials().get_frozen_credentials()
+          req = AWSRequest(method="GET", url=f"{endpoint}/q/health/ready")
+          SigV4Auth(creds, "lambda", region).add_auth(req)
+          try:
+              with urllib.request.urlopen(
+                      urllib.request.Request(req.url, headers=dict(req.headers)), timeout=90) as resp:
+                  status, body = resp.status, resp.read().decode()
+          except urllib.error.HTTPError as e:
+              status, body = e.code, e.read().decode()
+
+          print(f"HTTP {status}")
+          print(body[:600])
+          if status != 200:
+              sys.exit(f"::error::health check returned HTTP {status}")
+          try:
+              reported = json.loads(body).get("status")
+          except json.JSONDecodeError:
+              sys.exit("::error::health body is not JSON; the runtime most likely died during init "
+                       "(a streaming Function URL still answers 200 in that case)")
+          if reported != "UP":
+              sys.exit(f"::error::health reported {reported!r}, expected 'UP'")
+          print("healthy")
+          PY
+
+      - name: Report
+        working-directory: scaleout-build-control-plane-infra
+        run: |
+          {
+            echo "### Control plane deployed"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Region | \`${{ inputs.region }}\` |"
+            echo "| Mode | \`${{ inputs.runtime_mode }}\` |"
+            echo "| Runner | \`$(uname -m)\` |"
+            python3 -c "
+          import json
+          o = list(json.load(open('cdk-outputs.json')).values())[0]
+          for k in ('ControlPlaneEndpoint', 'ServiceRuntimeMode', 'AgentRepositoryUri',
+                    'StagingBucketName', 'BuildsTableName'):
+              if k in o:
+                  print(f'| {k} | \`{o[k]}\` |')
+          "
+            echo
+            echo "Callers need only \`lambda:InvokeFunctionUrl\` and \`lambda:InvokeFunction\`."
+          } >> "$GITHUB_STEP_SUMMARY"

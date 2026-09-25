@@ -1,0 +1,140 @@
+name: Publish release
+
+# Fires on a v* tag. Two deliverables, because the repo has exactly two kinds of consumer:
+#
+#   1. The Maven plugin and the libraries it needs, to GitHub Packages. This is what a project adds to
+#      its own pom.xml.
+#   2. The agent container image, re-tagged with the release version. Every build launches this image,
+#      so a release that publishes the plugin without a matching agent leaves the two able to drift --
+#      AgentEnvironment builds the SCALEOUT_BUILD_* variables that AgentConfig reads by name, with no
+#      compile-time link between them, so a mismatch fails silently at runtime. Commit b33f9e2 was
+#      exactly that: 14 variables still carrying an older prefix.
+#
+# There is deliberately no equivalent of ecp's release.yml here. That workflow builds a native CLI
+# binary and packages Helm charts; this repo has neither, and reproducing its job graph would be
+# structure without content. What is genuinely shared -- version from tag, verify before publishing,
+# GHCR login -- is below.
+#
+# NOT published: the control plane service, the reaper, and the CDK app. Those are deployed from source
+# by scripts/deploy-local.sh or the deploy workflow, not consumed as artifacts.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to publish (for re-running a failed release)
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/scaleout-build-agent
+
+jobs:
+  publish-maven:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Set version from tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          # Reject anything that is not a plain semver-ish version. versions:set accepts almost any
+          # string, so a mistyped tag would otherwise publish an artifact at a version nobody can
+          # resolve, and Packages does not allow deleting a published version to undo it.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "::error::tag '$TAG' yields version '$VERSION', which is not X.Y.Z or X.Y.Z-qualifier"
+            exit 1
+          fi
+          echo "Releasing $VERSION (from tag $TAG)"
+          mvn -B versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # Full verify, not -DskipTests. A release is the last point at which the Quarkus boot tests are
+      # free; skipping them here is how a version that cannot start gets published.
+      - name: Build and test
+        run: mvn -B clean verify
+
+      # Only what a consumer resolves: the plugin, the three libraries it needs at runtime, and the root
+      # pom -- which is the parent every module inherits from, so omitting it would make all four
+      # unresolvable. The deployables (service, reaper, CDK app, agent) are excluded; they are deployed
+      # from source, not consumed as artifacts.
+      - name: Publish to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mvn -B deploy -DskipTests \
+            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-ecs,scaleout-build-maven-plugin \
+            -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository }}
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Published \`${VERSION}\` to GitHub Packages"
+            echo
+            echo '```xml'
+            echo '<plugin>'
+            echo '    <groupId>ai.codriverlabs</groupId>'
+            echo '    <artifactId>scaleout-build-maven-plugin</artifactId>'
+            echo "    <version>${VERSION}</version>"
+            echo '    <configuration>'
+            echo '        <endpoint>https://<id>.lambda-url.<region>.on.aws/</endpoint>'
+            echo '    </configuration>'
+            echo '</plugin>'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  tag-agent-image:
+    # Independent of publish-maven: a failure to re-tag an image must not leave the Maven artifacts
+    # unpublished, and vice versa. Both are idempotent, so a partial release is safe to re-run via
+    # workflow_dispatch.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@v4
+
+      # Re-tags the existing multi-arch manifest rather than rebuilding it. imagetools create against an
+      # existing manifest list copies it, so the released tag points at bit-identical images to the ones
+      # already verified on main -- a rebuild could quietly differ, since the Mandrel base tag is
+      # floating.
+      - name: Tag the agent image with the release version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            "${IMAGE}:latest"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+      # The released image is what every build will pull, so it gets the same runtime assertions as the
+      # one on main: non-root, native-image runnable per architecture, the agent's environment intact,
+      # and the entrypoint reaching AgentMain.
+      - name: Verify the released image
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          ./scripts/verify-agent-image.sh "${IMAGE}:${TAG#v}"
