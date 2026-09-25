@@ -283,9 +283,18 @@ public class ControlPlaneInfraStack extends Stack {
                  */
                 .handler(jvmMode ? "run.sh" : "bootstrap")
                 .code(Code.fromAsset(serviceZip))
-                // JVM needs headroom a static binary does not: JIT, heap and metaspace. Also buys a
-                // proportional share of vCPU, which shortens the JVM's cold start specifically.
-                .memorySize(jvmMode ? 1024 : 512)
+                /*
+                 * Sized against measured usage rather than guessed headroom. See
+                 * docs/design/control-plane/lambda-resource-usage.md for the figures these come from:
+                 * peak 226 MB observed in JVM mode, 145 MB native.
+                 *
+                 * Memory also buys vCPU -- Lambda allocates it in proportion, roughly one vCPU at
+                 * 1769 MB -- so these values trade cost against latency, not just against headroom. The
+                 * JVM figure is the tighter of the two: 226 MB measured against 384 MB provisioned, and
+                 * an overrun is an OOM kill rather than a slowdown, so it is worth re-checking with
+                 * scripts/lambda-usage.sh after any change that grows the working set.
+                 */
+                .memorySize(jvmMode ? 384 : 256)
                 .layers(List.of(LayerVersion.fromLayerVersionArn(this, "LambdaWebAdapter", lwaLayerArn)))
                 // The SSE endpoint holds a connection while a build runs, so this is the streaming
                 // budget rather than a request timeout. LogStreamResource hands over at 780s.
