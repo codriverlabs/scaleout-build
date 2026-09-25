@@ -75,6 +75,12 @@ Four workflows on `main`, all verified running green:
 that trusts this repository through GitHub's OIDC provider. It fails on its first step with that message
 rather than an opaque credentials error.
 
+## Reference
+
+- [`lambda-resource-usage.md`](lambda-resource-usage.md) — measured memory, duration and cold start for
+  both modes, with the reasoning for why memory has not been reduced. Regenerate with
+  `./scripts/lambda-usage.sh [minutes]`.
+
 ## Outstanding
 
 ### 1. ~~Two Dependabot PRs blocked on a token scope~~ — done
@@ -84,43 +90,16 @@ workflow file. Worth recording why the block dissolved rather than needing the t
 workflow file over **SSH** is not subject to the OAuth `workflow` scope check that rejected
 `gh pr merge` on the Dependabot branches.
 
-### 2. Native mode has never been deployed
+### 2. ~~Native mode has never been deployed~~ — done, and it was broken
 
-`verify-synth.sh` proves the CloudFormation is correct for both modes — runtime, architecture, handler,
-memory, per-architecture Web Adapter layer — but **no native binary has ever cold-started behind the
-adapter**. The path is verified structurally, not in practice.
+Deployed as `native/x86_64`, end-to-end verified, merged in `#35`. It was broken in four ways that
+`verify-synth.sh` could not see, because a correct template says nothing about whether the image runs: a
+static `SecureRandom` that GraalVM refused to bake into the image heap, and three separate gaps in
+reflection metadata. Every `/builds` response returned HTTP 500 while health reported UP.
 
-This matters more than it sounds. JVM mode looked completely healthy on its first deploy while
-crash-looping on every cold start, because a Function URL with `InvokeMode.RESPONSE_STREAM` answers
-`HTTP 200` and puts the runtime error in the *body*. Three startup defects hid behind that. Native mode
-differs in five coupled properties and has had none of that exercise.
-
-```bash
-AWS_REGION=eu-west-1 ./scripts/deploy-local.sh --native --skip-agent --yes
-```
-
-`deploy-local.sh` derives the architecture from `uname -m`, because a native image cannot be
-cross-compiled — an x86_64 host produces an x86_64 binary and must deploy as x86_64. Do not override
-that by hand; a mismatch yields `Exec format error` at cold start and names nothing useful.
-
-Then smoke it, asserting on the **body** and not the status code:
-
-```python
-# python3, needs botocore
-import json, urllib.request, botocore.session
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-E = "https://26usidrly3gc4uo4b2i6fcp5ui0njbjo.lambda-url.eu-west-1.on.aws"
-c = botocore.session.get_session().get_credentials().get_frozen_credentials()
-r = AWSRequest(method="GET", url=E + "/q/health/ready")
-SigV4Auth(c, "lambda", "eu-west-1").add_auth(r)
-with urllib.request.urlopen(urllib.request.Request(r.url, headers=dict(r.headers))) as resp:
-    body = resp.read().decode()
-print(resp.status, body[:200])          # MUST contain '"status": "UP"', not Runtime.ExitError
-```
-
-Then re-run the example app end to end and confirm both binaries again. Afterwards either keep native
-or redeploy `--jvm`; both are one command.
+Measured resource usage is in [`lambda-resource-usage.md`](lambda-resource-usage.md). Headline: native
+cold start is 4.5× faster (2064 ms → 464 ms) and peak memory 145 MB against 226 MB. JVM remains the CDK
+default because it needs no GraalVM toolchain.
 
 ### 3. `migration-from-direct-ecs-access.md` contradicts the code
 
