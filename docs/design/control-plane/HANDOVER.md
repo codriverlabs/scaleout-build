@@ -145,11 +145,24 @@ itself as superseded, so it now reads as current while describing something that
 Rewrite it as a record of what the migration *did*, or delete it and fold the parameter inventory into
 `scaleout-builder-control-plane.md`. It is the kind of document that misleads someone six months out.
 
-### 4. Known-stale dependency, deliberately not chased
+### 4. AWS SDK moves faster than review does
 
-`awssdk.version` is `2.55.1`; `2.55.2` was already published when `#29` merged. The AWS SDK ships
-near-daily, so hand-bumping is a treadmill — Dependabot will raise it. Recorded only so nobody
-rediscovers it as a finding.
+`awssdk.version` is `2.55.5`, verified latest at 2026-09-25 against Central's `maven-metadata.xml`
+rather than against a quoted number. `#29` merged `2.55.1`; five patches shipped in the days since, and
+two separate guesses at "latest" during that window (`2.55.2`, then `2.55.3`) were both already behind
+by the time they were checked.
+
+Treat any version written here as stale on sight. The authoritative check, which does not depend on
+remembering the right patch number:
+
+```bash
+curl -s https://repo.maven.apache.org/maven2/software/amazon/awssdk/bom/maven-metadata.xml \
+  | grep -o '<latest>[^<]*' | cut -d'>' -f2
+```
+
+A BOM also needs `-Dpackaging=pom` when probing with `dependency:get`, or the resolution fails
+misleadingly — it looks for a jar that does not exist and reports the version as unpublished. The
+current pin was verified both ways.
 
 Verify before pinning anything, per `.kiro/steering/tech.md`. A BOM needs `-Dpackaging=pom` or the
 probe fails misleadingly:
