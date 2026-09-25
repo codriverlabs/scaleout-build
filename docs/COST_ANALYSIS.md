@@ -36,15 +36,30 @@ how the system might be deployed:
 | Capacity provider | `FARGATE_SPOT` preferred, `FARGATE` fallback | `EcsTaskLauncher` |
 | Ephemeral storage | 20 GiB (included, unbilled) | `requestedEphemeralStorageGiB=0` |
 | Networking | public subnets, `natGateways(0)`, `assignPublicIp` | `ControlPlaneInfraStack` — one public IPv4 per task, no NAT gateway |
-| SSE Lambda | **1024 MB**, ARM64, held open for the whole build | `memorySize(jvmMode ? 1024 : 512)`; deployed mode is `jvm/arm64` |
+| SSE Lambda | **384 MB** JVM / **256 MB** native, held open for the whole build | `memorySize(jvmMode ? 384 : 256)` — sized against measured usage, see [`lambda-resource-usage.md`](design/control-plane/lambda-resource-usage.md) |
 | SSE poll cadence | 3 s (`FilterLogEvents` + `refreshFromEcs` per tick) | `LogStreamResource.POLL_INTERVAL` |
 | SSE handover | 780 s, then client reconnects | `LogStreamResource.STREAM_BUDGET` |
 | Client heartbeat | every 30 s | `ControlPlaneConfig.heartbeatIntervalSeconds` |
 | Reaper | 512 MB ARM64, `rate(1 minute)`, always on | `ReaperSchedule` |
 | DynamoDB | `PAY_PER_REQUEST` | `BuildsTable` |
 
-Note the SSE Lambda is 1024 MB specifically *because* the stack is currently deployed in JVM mode.
-A native deploy halves it to 512 MB.
+The SSE Lambda was originally 1024 MB JVM / 512 MB native, chosen as headroom before anything had been
+measured. Both were then sized against real usage: peak 237 MB observed in JVM mode against 384 MB
+provisioned, and 145 MB native against 256 MB. Figures and method in
+[`lambda-resource-usage.md`](design/control-plane/lambda-resource-usage.md).
+
+**Why reducing memory actually saves money here, when usually it would not.** Memory and vCPU are
+proportional on Lambda, so for CPU-bound work a smaller function simply runs longer and the GB-seconds
+barely move — measured, native at 256 MB used 0.022 GB-s per short request against 0.023 GB-s at 512 MB,
+which is noise. The saving comes entirely from the SSE relay, which is *wall-clock* bound rather than
+CPU bound: it holds a connection for the duration of the build no matter how much CPU it has. Halving its
+memory halves that line item outright, and it is the second-largest cost in the breakdown below.
+
+The cost of that saving is steady-state latency, and it is not small. Measured: JVM short-request duration
+went from 82 ms at 1024 MB to 214 ms at 384 MB, and native from 46 ms to 88 ms. Cold start behaved
+differently between the two — JVM init worsened 2064 ms to 2345 ms, while native init did not move at all
+(464 ms to 441 ms), which is what you would expect when there is no JIT to warm and init is dominated by
+I/O rather than compute.
 
 ## 3. Rates
 
@@ -102,12 +117,12 @@ provisioning or pull latency. Sensitivity is shown below.
 |---|---|
 | Fargate ARM **Spot** (−70%) | $0.0062 |
 | Public IPv4 ($0.005/h) | $0.0006 |
-| **SSE Lambda, 1 GB × 400 s** | **$0.0053** |
+| **SSE Lambda, 384 MB × 400 s (JVM)** | **$0.0020** |
 | Heartbeats + create/status invocations | ~$0.0005 |
 | CloudWatch Logs ingest, DynamoDB, S3 staging | ~$0.0030 |
-| **Total, Spot path** | **≈ $0.016** |
+| **Total, Spot path** | **≈ $0.012** |
 | *(Fargate on-demand instead, i.e. Spot reclaimed or unavailable)* | *$0.0207* |
-| **Total, on-demand fallback path** | **≈ $0.030** |
+| **Total, on-demand fallback path** | **≈ $0.027** |
 
 Plus a fixed **~$0.10–0.15/month** for the reaper firing every 60 s regardless of build activity
 (43,800 invocations/month at 512 MB, plus one DynamoDB GSI query each). At 10 builds/month that
@@ -115,24 +130,31 @@ amortises to ~$0.01/build — the same order as the build itself. At 100+ builds
 
 ### Sensitivity to the billed window
 
-| Billed window | Fargate Spot | Fargate on-demand | SSE Lambda (1 GB) |
+| Billed window | Fargate Spot | Fargate on-demand | SSE Lambda (384 MB) |
 |---|---|---|---|
-| 300 s (compile only, no pull) | $0.0047 | $0.0155 | $0.0040 |
-| **400 s (estimate used above)** | **$0.0062** | **$0.0207** | **$0.0053** |
-| 480 s (slow pull) | $0.0075 | $0.0249 | $0.0064 |
+| 300 s (compile only, no pull) | $0.0047 | $0.0155 | $0.0015 |
+| **400 s (estimate used above)** | **$0.0062** | **$0.0207** | **$0.0020** |
+| 480 s (slow pull) | $0.0075 | $0.0249 | $0.0024 |
 
 Both compute and the streaming Lambda scale linearly with the window, so shortening the image pull
 improves both simultaneously. That makes agent image size a cost lever, not just a latency one.
 
 ## 5. The SSE Lambda is the most improvable line
 
-$0.0053 of a $0.016 build — about **34%** — is a Lambda holding a connection open and running a
+$0.0020 of a $0.012 build — about **16%**, down from 34% before the function was resized — is a
+Lambda holding a connection open and running a
 3-second `FilterLogEvents` + `refreshFromEcs` loop. Two changes, neither of which touches the wire
 contract in `scaleout-build-control-plane-api`:
 
-1. **Deploy the control plane in native mode.** `ControlPlaneInfraStack` already sizes the function
-   at 512 MB when `runtimeMode=native`; the stack is currently deployed `jvm/arm64`, so it is
-   1024 MB. This halves the streaming cost to $0.0027 outright.
+1. **Deploy the control plane in native mode.** Done, and both modes have since been sized against
+   measured usage: 384 MB JVM, 256 MB native. The streaming line falls from $0.0053 to $0.0020 (JVM) or
+   $0.0017 (native x86_64).
+
+   Note native's saving is smaller than its memory reduction suggests, because native currently deploys
+   on **x86_64** and Lambda bills x86 at $0.0000166667/GB-s against ARM's $0.0000133334 — 25% more. A
+   native image cannot be cross-compiled, so the architecture follows the build host; building on an
+   arm64 runner would bring the line to $0.0013. The earlier version of this document applied the ARM
+   rate to native and so understated it.
 2. **Widen `LogStreamResource.POLL_INTERVAL`** — but *not* for Lambda cost. The billed duration is
    pinned to the build's wall clock whether the loop ticks every 3 s or every 10 s, so the poll
    interval does nothing to the Lambda bill. What it does set is the DynamoDB write rate: ~133
@@ -208,9 +230,10 @@ over the Function URL is a reasonable relay.
 
 | Mechanism | Cost per ~7 min build | Client needs AWS creds | Survives agent `SIGKILL` | Length ceiling |
 |---|---|---|---|---|
-| SSE relay, 1024 MB JVM (today) | $0.0053 | no | yes | 900 s, handled by handover |
-| SSE relay, 512 MB native | $0.0027 | no | yes | same |
-| SSE relay, 256 MB native | $0.0013 | no | yes | same |
+| SSE relay, 1024 MB JVM arm64 (original sizing) | $0.0053 | no | yes | 900 s, handled by handover |
+| **SSE relay, 384 MB JVM arm64 (current)** | **$0.0020** | no | yes | same |
+| **SSE relay, 256 MB native x86_64 (current)** | **$0.0017** | no | yes | same |
+| SSE relay, 256 MB native arm64 (if built on arm64) | $0.0013 | no | yes | same |
 | Client tails CloudWatch via STS | ~$0 | **yes** | yes | none |
 | Agent ships logs to S3 | ~$0.0010 | no | **no** | none |
 | CloudWatch Live Tail | **~$0.067** | depends on holder | yes | 3 h |
@@ -249,12 +272,12 @@ Launch, build, terminate. 400 s of work plus EC2 boot and a Docker pull ≈ 550 
 | Log streaming / orchestration (still needed) | $0.0053 |
 | **Total** | **≈ $0.028** |
 
-**Loses to Fargate Spot at $0.016**, and you inherit AMI patching plus a launch/terminate
+**Loses to Fargate Spot at $0.012**, and you inherit AMI patching plus a launch/terminate
 orchestrator the current design does not need.
 
 ### Always-on build box
 
-| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.016/build |
+| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.012/build |
 |---|---|---|
 | On-demand | $132.79 | ~8,500 builds/month |
 | Compute SP 1 yr | $100.81 | **~6,460 builds/month (~215/day)** |

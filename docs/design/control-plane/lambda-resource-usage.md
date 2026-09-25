@@ -8,6 +8,62 @@ Reproduce with `./scripts/lambda-usage.sh [minutes]`.
 
 ## Measurements
 
+Two rounds. The first sized both functions generously before anything had been measured; the second
+reduced them against the observed figures, which is the configuration now in `ControlPlaneInfraStack`.
+
+### Current sizing (384 MB JVM / 256 MB native)
+
+| | JVM 384 MB arm64 | Native 256 MB x86_64 |
+|---|---|---|
+| Invocations / cold starts sampled | 13 / 2 | 10 / 2 |
+| Max memory used | median 206 MB, **peak 237 MB (62% of 384)** | median 102 MB, **peak 145 MB (57% of 256)** |
+| Duration, excluding log streams | median 214 ms, max 6045 ms | median 88 ms, max 3775 ms |
+| Cold start (init) | median 2345 ms (2344–2347) | median 441 ms (414–468) |
+| OOM kills | 0 | 0 |
+
+### What the reduction cost
+
+| | 1024 → 384 MB (JVM) | 512 → 256 MB (native) |
+|---|---|---|
+| Peak memory | 226 → 237 MB | 145 → 145 MB (unchanged) |
+| Duration (excl. streams) | 82 → 214 ms (**2.6× slower**) | 46 → 88 ms (**1.9× slower**) |
+| Cold start | 2064 → 2345 ms (14% slower) | 464 → 441 ms (**unchanged**) |
+
+Two results worth noting.
+
+**Native cold start did not move.** Halving its memory halved its vCPU, and init was unaffected — because
+a native binary has no JIT to warm, so init is dominated by I/O and setup rather than compute. The JVM's
+did move, for the mirror-image reason: its 2.3 s init is largely class loading and JIT, which is exactly
+what less CPU slows down.
+
+**Short requests are close to cost-neutral.** Lambda bills GB-seconds, so halving memory while duration
+roughly doubles leaves the product almost unchanged: native measured 0.022 GB-s per short request at
+256 MB against 0.023 GB-s at 512 MB. The saving does not come from short requests at all — it comes from
+the SSE log stream, which holds a connection for the build's wall-clock duration regardless of how much
+CPU it has. That line is halved outright, and per `../../COST_ANALYSIS.md` it was the second-largest
+per-build cost before the change.
+
+So the resize is justified by the shape of the workload, not by the utilisation percentages. Trimming
+memory on a purely CPU-bound function would have saved nothing.
+
+### On architecture
+
+The JVM runs arm64 and native runs x86_64, so the two columns are not a clean size comparison. Native
+takes the architecture of whatever built it, because a native image cannot be cross-compiled.
+
+That also has a billing consequence the cost document now reflects: Lambda charges x86_64 at
+$0.0000166667/GB-s against arm64's $0.0000133334 in `eu-west-1` — 25% more — so native's saving is
+smaller than its memory reduction implies. Building on an arm64 runner would recover it.
+
+On instruction-set differences specifically (arm64 has NEON/SVE rather than AVX): nothing here isolates
+such an effect, and it is unlikely to be visible in this workload. The service does JSON serialization,
+HTTP, and AWS SDK calls — not the dense numeric work that vectorises. The measured slowdowns above are
+fully accounted for by vCPU proportionality, which is the simpler explanation and does not require
+invoking the ISA. Where SIMD would plausibly matter is `native-image` compilation on the Fargate agents,
+which is a different workload on different hardware and is not measured here.
+
+## First round, generous sizing
+
 | | JVM | Native |
 |---|---|---|
 | Runtime | `java25` | `provided.al2023` |
@@ -47,32 +103,32 @@ about request latency; the raw median is the one to use when reasoning about cos
 to be unambiguous at that size; the duration medians are not far apart in absolute terms and should not be
 over-read.
 
-## Why memory has not been reduced
+## Why the reduction was measured rather than assumed
 
-Both configurations are over-provisioned on paper — JVM peaks at 22% of 1024 MB, native at 28% of 512 MB —
-and both are left as they are deliberately.
+The original 1024/512 figures were over-provisioned on paper — 22% and 28% of configured — but the
+headroom percentage is the wrong thing to optimise on Lambda, because memory and vCPU move together. The
+measurements above are what justify the change: the saving is real only because the dominant cost is a
+wall-clock connection hold, and the latency cost is real and was quantified rather than predicted.
 
-Reducing memory also reduces vCPU, so it lengthens exactly the durations above. At 512 MB a function gets
-under a third of a vCPU; halving again would slow the JVM's cold start in particular, and a Function URL's
-first request is where that is most visible. Any reduction should be measured, not assumed to be free.
-
-The JVM figure of 1024 MB exists for that reason: it is not sized for the 226 MB of heap it actually uses,
-it is sized to buy vCPU for JIT during init. `verify-synth.sh` asserts the 1024/512 split per mode so it
-cannot drift silently — and that assertion caught a real bug when written, where the JVM bump had been
+The JVM at 384 MB is the tighter of the two: 237 MB peak against 384 MB provisioned. An overrun is an OOM
+kill, not a slowdown, so re-check with `scripts/lambda-usage.sh` after anything that grows the working
+set — notably a build with a large classpath, which this sample does not exercise. `verify-synth.sh` asserts the per-mode split so it cannot
+drift silently — and that assertion caught a real bug when written, where the JVM memory bump had been
 applied to the reaper instead of the service.
 
 ## Practical consequences
 
-- **Native is the better production choice on these numbers**: 4.5× faster cold start, ~35% less memory,
+- **Native is the better production choice on these numbers**: 5.3× faster cold start at current sizing
+  (2345 ms vs 441 ms), a third less memory,
   smaller artifact. Its cost is build time — roughly 120–170 s for the native image versus a few seconds
   for the JVM zip — and a harder failure mode, since four native-only defects had to be fixed before it
   worked at all (see `#35`).
 - **JVM remains the default** in the CDK stack, because it needs no GraalVM toolchain, so a first deploy
   works from a plain `mvn package`. That trade is about onboarding, not performance.
-- **Neither is near a memory limit**, so the service is not a candidate for memory tuning until something
-  changes its working set. The obvious candidate is a build with many more inputs: `missingDigests` and
-  the presigning loop scale with input count, and nothing here exercises a large classpath. Worth
-  re-measuring against a realistic project rather than the example app.
+- **Both are now sized close to their measured peaks** (62% and 57%), so there is little left to trim and
+  the next change should go the other way if anything grows. The obvious risk is a build with many more
+  inputs: `missingDigests` and the presigning loop scale with input count, and nothing here exercises a
+  large classpath. Re-measure against a realistic project before assuming these figures hold.
 
 ## Caveats worth keeping
 

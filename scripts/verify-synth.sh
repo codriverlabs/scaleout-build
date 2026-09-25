@@ -49,11 +49,11 @@ def check(mode, label, actual, expected):
 for mode, want in {
     # JVM: architecture-neutral bytecode, so arm64 is a free price/performance choice. run.sh is the
     # handler because the Web Adapter's exec wrapper starts it; the script derives its own jar name.
-    "jvm":    {"runtime": "java25",          "arch": "arm64",  "handler": "run.sh",    "mem": 1024,
+    "jvm":    {"runtime": "java25",          "arch": "arm64",  "handler": "run.sh",    "mem": 384,
                "lwa": "Arm64"},
     # Native: architecture-specific binary, so x86_64 must match the Mandrel image that built it.
     # bootstrap IS the binary, renamed.
-    "native": {"runtime": "provided.al2023", "arch": "x86_64", "handler": "bootstrap", "mem": 512,
+    "native": {"runtime": "provided.al2023", "arch": "x86_64", "handler": "bootstrap", "mem": 256,
                "lwa": "X86"},
 }.items():
     resources = json.load(open(f"/tmp/scaleout-synth-{mode}.json"))["Resources"]
