@@ -399,15 +399,27 @@ architecture-coverage question, not the cost question, is where the value sits.
 
 ## 9. Assumptions, restated
 
-Figures above that are **retrieved**: all Fargate on-demand rates, all Lambda rates, all EC2
-on-demand rates, all Compute Savings Plan rates, and every configuration value in §2.
+Figures above that are **retrieved**: all Fargate on-demand rates (ARM and x86_64, vCPU and memory), all
+Lambda rates (ARM and x86_64), all EC2 on-demand rates, all Compute Savings Plan rates, and every
+configuration value in §2. Rates were re-verified against the Price List API on 2026-09-25.
+
+Figures that are **measured** (§4, and the two documents it links): billed task window, image pull
+duration, provisioning delay, `native-image` compile time, Fargate CPU/memory/storage utilisation, and
+Lambda memory, duration and cold start in both modes.
 
 Figures that are **assumed and should be measured**:
 
 - Fargate Spot discount (−70% used; AWS publishes "up to 70%"). Not available from any pricing API.
-- 400 s billed task window for a 300 s compile — driven by agent image pull time, which nothing in
-  the repository records. Worth instrumenting: it sets both compute and streaming cost.
-- Reaper per-invocation duration (~300 ms assumed for a warm 512 MB JVM doing one GSI query).
+- ~~400 s billed task window for a 300 s compile — driven by agent image pull time, which nothing in
+  the repository records.~~ **Now measured** (§4): 96–122 s per task, with an 8–9 s pull. The estimate was
+  high by roughly 3.5×, mostly because it assumed a 60–90 s pull. See
+  [`design/control-plane/fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md).
+- Reaper per-invocation duration (~300 ms assumed for a warm 512 MB JVM doing one GSI query). Not
+  measured; it is the one Lambda in the stack that `scripts/lambda-usage.sh` does not cover.
+- Whether these figures hold for a realistic project. Everything here is the example app, whose classpath
+  is two jars. A build with hundreds of dependencies will upload more inputs, hold more memory during
+  `native-image`, and compile for longer — which is precisely why the 16 GiB task memory has not been
+  trimmed on a 7% utilisation reading.
 - CloudWatch Logs / DynamoDB / S3 lumped at ~$0.003. Individually sub-cent; the S3 component is
   near-zero on repeat builds because staging is content-addressed (see
   `docs/design/control-plane/storage-layout-and-isolation.md`).
