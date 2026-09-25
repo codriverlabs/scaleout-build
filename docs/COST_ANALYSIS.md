@@ -21,9 +21,16 @@ host-matching cell requires `scaleout-build.forceRemote`.
 The offload only pays for the architecture you don't own hardware for (GraalVM cannot
 cross-compile) and for running matrix cells concurrently.
 
-**The non-obvious finding: the SSE Lambda costs about as much as the Fargate Spot compute it is
-watching** — roughly a third of the per-build bill goes to a Lambda sitting in a 3-second polling
-loop. See §5 for the sizing levers and §6 for why the relay is nonetheless the right mechanism.
+**The original non-obvious finding — that the SSE Lambda cost about as much as the Fargate compute it
+watched — no longer holds, and it is worth saying why it was wrong.** It rested on a 1024 MB function and
+an estimated 400-second build. Measured, the build is ~100 s per cell and the function is 256 MB native,
+so the relay is **$0.0005 of a $0.0075 build, about 7%**, against 49% for the two Fargate cells. §5 is
+retained for its sizing levers but its premise is superseded by §4.
+
+**The live improvable line is Fargate memory, not the Lambda.** The task reserves 16 GiB and peaks at
+1179 MB — 7% — while saturating all four vCPU. That is a ~15% saving available on the largest line item,
+though not one to take on this evidence: see §4 for why the example app is the wrong thing to size
+against.
 
 ## 2. What the code pins down
 
@@ -95,7 +102,74 @@ figure. Everything else in this table was retrieved.
 | `m7g.xlarge` (4 vCPU / 16 GiB, ARM) | $0.1819/h | $0.1381/h (−24%) | $0.0956/h (−47%) |
 | `m7i.xlarge` (4 vCPU / 16 GiB, x86) | $0.2247/h | $0.17056/h (−24%) | $0.11806/h (−47%) |
 
-## 4. Per-build cost: one 5-minute `native-image` build
+
+## 4. Per-build cost, measured
+
+The section that follows was written from an estimated 400-second billed window and a single task. Both
+assumptions are now measured and both were wrong in ways that matter. Figures and method in
+[`design/control-plane/fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md).
+
+**A build runs two tasks, not one.** The default matrix compiles `x86_64` and `arm64` concurrently, so
+Fargate cost is the *sum of both cells*. The SSE relay is not doubled: one stream serves both cells with
+per-cell watermarks, which is why `LogEvent.nextSince` is a map rather than a scalar.
+
+**The billed window is ~100 s, not 400 s.** Measured `createdAt` → `stoppedAt`: 96 s and 102 s for
+`x86_64`, 108 s and 122 s for `arm64`. The estimate assumed a 60–90 s image pull; the actual pull is
+**8–9 s** for a 612 MB image, in-region.
+
+### Verified rates, `eu-west-1` (AWS Price List API, 2026-09-25)
+
+| | vCPU-hour | GB-hour | Lambda GB-second |
+|---|---|---|---|
+| ARM / Graviton | $0.03238 | $0.00356 | $0.0000133334 |
+| x86_64 | $0.04048 | $0.004445 | $0.0000166667 |
+
+x86_64 costs **25% more** than ARM on both Fargate dimensions and on Lambda. That ratio is why the
+arm64 cell is cheaper than the x86_64 cell despite taking longer.
+
+### Per build, both cells, `FARGATE_SPOT`
+
+| Line item | Cost | Note |
+|---|---|---|
+| Fargate `arm64` cell, 4 vCPU / 16 GiB, 115 s | $0.0018 | $0.18648/h on-demand, −70% Spot |
+| Fargate `x86_64` cell, 4 vCPU / 16 GiB, 99 s | $0.0019 | $0.23304/h on-demand, −70% Spot |
+| SSE Lambda, native 256 MB **arm64**, ~140 s | $0.0005 | one stream for both cells |
+| Public IPv4, two tasks × ~105 s | $0.0003 | $0.005/h each |
+| CloudWatch Logs, DynamoDB, S3 staging | ~$0.0030 | unchanged from the estimate below; not independently measured |
+| **Total, Spot path** | **≈ $0.0075** | |
+| *Fargate on-demand instead* | *$0.0124* | |
+| **Total, on-demand fallback** | **≈ $0.0162** | |
+
+So a two-architecture build costs roughly **$0.008 on Spot**, against the $0.012 the estimate below
+predicted for a single cell. Two tasks at a quarter of the assumed duration is cheaper than one task at
+the assumed duration.
+
+### Lambda architecture: arm64 is the target
+
+The service is deployed `native/x86_64` only because a native image cannot be cross-compiled and the
+workstation building it is x86_64. **The intended production deployment is arm64**, which is 25% cheaper
+per GB-second and is what the table above prices. Reaching it needs the native image built on an arm64
+runner — `deploy.yml` already selects `ubuntu-24.04-arm` for that combination, so it is a CI concern
+rather than a code change.
+
+JVM mode is architecture-neutral bytecode and already deploys arm64.
+
+### The memory provision is the open question, not the vCPU
+
+Container Insights over these tasks: **CPU peaks at 4096 of 4096 reserved — saturated** — while **memory
+peaks at 1179 MB of 16384 reserved, 7%**. Fargate bills both dimensions independently.
+
+Dropping to the smallest legal pairing for 4 vCPU (8 GiB) would cut the task rate ~15%, taking the Spot
+total to about $0.0031 for both cells. **It has not been changed**, because the example app's classpath is
+two jars and `native-image` memory scales with application size — 16 GiB is provisioned for a real project
+with hundreds of dependencies, which this measurement does not exercise. The 7% figure says the example is
+small, not that the provision is wrong.
+
+## 4b. Original estimate (superseded by §4)
+
+> **Superseded by §4.** Retained for its method and sensitivity analysis. Its 400-second window and
+> single-task assumption are both contradicted by measurement; the pull is 8–9 s, not 60–90 s, and a build
+> runs two cells.
 
 ### Billed task window
 
@@ -139,10 +213,15 @@ amortises to ~$0.01/build — the same order as the build itself. At 100+ builds
 Both compute and the streaming Lambda scale linearly with the window, so shortening the image pull
 improves both simultaneously. That makes agent image size a cost lever, not just a latency one.
 
-## 5. The SSE Lambda is the most improvable line
+## 5. SSE Lambda sizing levers (premise superseded by §4)
 
-$0.0020 of a $0.012 build — about **16%**, down from 34% before the function was resized — is a
-Lambda holding a connection open and running a
+> Written when the relay was 1024 MB and the build was assumed to run 400 s, making it ~34% of the bill.
+> Measured, it is **$0.0005 of $0.0075 — about 7%** — so the levers below are real but no longer the
+> priority. Retained because the second one, the poll interval, has a DynamoDB consequence that is
+> independent of Lambda cost.
+
+$0.0005 of a $0.0075 build — about **7%**, down from 34% before the function was resized and the window
+measured — is a Lambda holding a connection open and running a
 3-second `FilterLogEvents` + `refreshFromEcs` loop. Two changes, neither of which touches the wire
 contract in `scaleout-build-control-plane-api`:
 
@@ -254,7 +333,8 @@ a vCPU): `LogStreamResource` uses `.onOverflow().drop()`, so an overrunning tick
 wider next window rather than an error, meaning the effective poll rate can silently fall below the
 configured one.
 
-Net effect: the log path drops from $0.0053 to ~$0.001 per build with no architectural change and no
+Net effect: the log path drops from the original $0.0053 to ~$0.0005 measured (§4) with no architectural
+change and no
 new failure modes. That is a ~$0.004 saving — worth doing because it is two configuration values,
 not because it is material money.
 
@@ -269,22 +349,24 @@ Launch, build, terminate. 400 s of work plus EC2 boot and a Docker pull ≈ 550 
 | `m7g.xlarge`, Compute SP 1 yr | $0.0211 |
 | gp3 root, 30 GiB | $0.0006 |
 | Public IPv4 | $0.0008 |
-| Log streaming / orchestration (still needed) | $0.0053 |
-| **Total** | **≈ $0.028** |
+| Log streaming / orchestration (still needed) | $0.0005 |
+| **Total** | **≈ $0.023** |
 
-**Loses to Fargate Spot at $0.012**, and you inherit AMI patching plus a launch/terminate
+**Loses to Fargate Spot at $0.0075**, and you inherit AMI patching plus a launch/terminate
 orchestrator the current design does not need.
 
 ### Always-on build box
 
-| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.012/build |
+| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.0075/build |
 |---|---|---|
-| On-demand | $132.79 | ~8,500 builds/month |
-| Compute SP 1 yr | $100.81 | **~6,460 builds/month (~215/day)** |
-| Compute SP 3 yr | $69.79 | ~4,470 builds/month (~149/day) |
+| On-demand | $132.79 | ~17,700 builds/month |
+| Compute SP 1 yr | $100.81 | **~13,400 builds/month (~450/day)** |
+| Compute SP 3 yr | $69.79 | ~9,300 builds/month (~310/day) |
 
-Below those volumes the dedicated box loses on cost, and it additionally serialises concurrent
-matrix cells that Fargate runs in parallel.
+Below those volumes the dedicated box loses on cost, and it additionally serialises the concurrent matrix
+cells that Fargate runs in parallel — which is the point of the offload, not a side benefit. The
+break-evens roughly doubled once the billed window was measured rather than estimated, so the dedicated
+box is a worse trade than the original analysis suggested.
 
 ### Two subtleties that matter more than the rate table
 

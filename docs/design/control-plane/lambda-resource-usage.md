@@ -48,8 +48,15 @@ memory on a purely CPU-bound function would have saved nothing.
 
 ### On architecture
 
-The JVM runs arm64 and native runs x86_64, so the two columns are not a clean size comparison. Native
-takes the architecture of whatever built it, because a native image cannot be cross-compiled.
+**arm64 is the intended production target for both modes.** Native currently reports x86_64 only because a
+native image cannot be cross-compiled and the workstation building it is x86_64 — that is a property of
+the test setup, not a deployment decision. `deploy.yml` already selects an `ubuntu-24.04-arm` runner for
+native+arm64, so reaching it is a CI matter rather than a code change.
+
+Treat the x86_64 column below as a measurement artifact. For cost purposes use the arm64 rate; see
+[`../../COST_ANALYSIS.md`](../../COST_ANALYSIS.md) §4.
+
+The JVM runs arm64 and native runs x86_64, so the two columns are not a clean size comparison.
 
 That also has a billing consequence the cost document now reflects: Lambda charges x86_64 at
 $0.0000166667/GB-s against arm64's $0.0000133334 in `eu-west-1` — 25% more — so native's saving is
