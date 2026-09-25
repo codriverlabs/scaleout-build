@@ -28,9 +28,14 @@ set -euo pipefail
 IMAGE="${1:?Usage: verify-agent-image.sh <image-uri>}"
 FAILURES=0
 
+# Both by default, which is what a consumer pulls. CI overrides this to check one architecture on its
+# own native runner, so the per-arch checks need no QEMU emulation:
+#   PLATFORMS=linux/arm64 ./scripts/verify-agent-image.sh <uri>
+read -r -a PLATFORM_LIST <<<"${PLATFORMS:-linux/amd64 linux/arm64}"
+
 fail() { echo "  FAIL: $*" >&2; FAILURES=$((FAILURES + 1)); }
 
-for platform in linux/amd64 linux/arm64; do
+for platform in "${PLATFORM_LIST[@]}"; do
     echo "==> ${IMAGE} on ${platform}"
 
     out="$(docker run --rm --platform "$platform" --entrypoint sh "$IMAGE" -c '
@@ -67,6 +72,17 @@ for platform in linux/amd64 linux/arm64; do
         fail "entrypoint did not reach AgentMain cleanly: ${entry}"
     fi
 done
+
+if [[ "${PLATFORMS:-}" != "" && ${#PLATFORM_LIST[@]} -lt 2 ]]; then
+    echo
+    echo "==> skipping the manifest-list assertion (PLATFORMS pinned to ${PLATFORM_LIST[*]})"
+    if (( FAILURES > 0 )); then
+        echo "${FAILURES} check(s) failed for ${IMAGE}" >&2
+        exit 1
+    fi
+    echo "Checks passed for ${IMAGE} on ${PLATFORM_LIST[*]}"
+    exit 0
+fi
 
 echo
 echo "==> manifest"
