@@ -6,6 +6,10 @@ every invocation. Both figures come from real end-to-end builds of
 
 Reproduce with `./scripts/lambda-usage.sh [minutes]`.
 
+Companion documents: [`fargate-task-resource-usage.md`](fargate-task-resource-usage.md) measures the build
+tasks this service launches; [`../../COST_ANALYSIS.md`](../../COST_ANALYSIS.md) turns both into per-build
+cost.
+
 ## Measurements
 
 Two rounds. The first sized both functions generously before anything had been measured; the second
