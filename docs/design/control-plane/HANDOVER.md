@@ -60,42 +60,29 @@ State that does NOT survive a restart, and whether it matters:
 * Docker buildx builders — only needed for the Dockerfile image path, and `-Djib` does not need Docker
   at all.
 
+## Pipeline
+
+Four workflows on `main`, all verified running green:
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| `ci.yml` | push to `main`, PR | reactor `verify`, JVM zip coherence, `verify-synth.sh` both modes |
+| `build-agent-image.yml` | agent/shared/workflow changes | per-arch native-runner builds, multi-arch manifest, `verify-agent-image.sh` per arch + on the manifest |
+| `deploy.yml` | manual | OIDC, mode/arch selection, deploy, body-asserting smoke test |
+| `publish.yml` | `v*` tag | plugin + libraries to GitHub Packages, agent image re-tagged |
+
+`deploy.yml` is the only one that cannot run yet: it needs an `AWS_DEPLOY_ROLE_ARN` secret naming a role
+that trusts this repository through GitHub's OIDC provider. It fails on its first step with that message
+rather than an opaque credentials error.
+
 ## Outstanding
 
-### 1. Two Dependabot PRs blocked on a token scope
+### 1. ~~Two Dependabot PRs blocked on a token scope~~ — done
 
-`#25` (`actions/checkout` 4 → 7) and `#28` (`docker/login-action` 3 → 4) are open. Both were verified
-locally: they auto-merge cleanly, the YAML parses, the reactor builds, and the result puts every action
-in the workflow on a current major.
-
-They cannot be merged with the current `gh` token:
-
-```
-refusing to allow a Personal Access Token to create or update workflow
-`.github/workflows/build-agent-image.yml` without `workflow` scope
-```
-
-`#24` slipped through earlier because it merged cleanly; `#25`/`#28` sit behind `main`, so merging them
-requires GitHub to *write* the workflow file, which trips the restriction.
-
-Two ways to close it, needing a decision rather than more investigation:
-
-* Add the `workflow` scope to the token (`gh auth refresh -h github.com -s workflow`), then
-  `gh pr merge 25 --merge` and `gh pr merge 28 --merge`. Keeps the PR audit trail. Preferred.
-* Merge locally and push over SSH, which bypasses the OAuth check. Same content, but it is a direct
-  push to `main`, so it needs explicit sign-off.
-
-To re-verify locally first:
-
-```bash
-git fetch origin 'refs/pull/25/head:pr25' 'refs/pull/28/head:pr28'
-git checkout -b scratch/actions main && git merge --no-edit pr28 && git merge --no-edit pr25
-python3 -c "import yaml;d=yaml.safe_load(open('.github/workflows/build-agent-image.yml'));print(sorted({s['uses'] for j in d['jobs'].values() for s in j.get('steps',[]) if s.get('uses')}))"
-mvn -B clean verify
-```
-
-Note `#28` force-pushed on 2026-09-25 (Dependabot rebased it), so it may now merge through the API
-without the scope. Worth one retry before doing anything else.
+`#25` and `#28` are closed: their changes went in with the CI pipeline (`#32`), which touched the same
+workflow file. Worth recording why the block dissolved rather than needing the token scope — pushing a
+workflow file over **SSH** is not subject to the OAuth `workflow` scope check that rejected
+`gh pr merge` on the Dependabot branches.
 
 ### 2. Native mode has never been deployed
 
