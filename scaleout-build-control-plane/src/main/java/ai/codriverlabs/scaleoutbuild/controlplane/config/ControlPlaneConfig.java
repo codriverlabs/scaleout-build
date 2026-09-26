@@ -94,10 +94,33 @@ public interface ControlPlaneConfig {
         @WithDefault("4096")
         String defaultCpu();
 
-        @WithDefault("16384")
+        /*
+         * 8 GiB, the smallest pairing Fargate permits with 4 vCPU.
+         *
+         * Was 16384. Measured peak RSS for native-image on a 233-jar Quarkus application is 5.3-5.6 GB, so
+         * 8 GiB runs at about 68% with roughly 2.5 GB spare, and a build at this size succeeded on both
+         * architectures. 4 GiB is not an option: the floor is the workload rather than a setting, and
+         * capping the builder's heap does not move peak RSS -- it is dominated by native memory and the
+         * image heap being constructed, not the Java heap.
+         *
+         * CPU is deliberately left at 4 vCPU. native-image saturates it regardless of project size, so
+         * halving it roughly doubles build time; that is a latency trade rather than reclaimed slack.
+         */
+        @WithDefault("8192")
         String defaultMemory();
 
-        @WithDefault("40")
+        /*
+         * 0, meaning "do not specify it", which gets Fargate's included 20 GiB at no charge.
+         *
+         * Was 40, so every task paid for the 20 GiB above the included allowance while measured consumption
+         * was 1.87-2 GB, on both a two-jar example and a 233-jar Quarkus application.
+         *
+         * Not 20: ECS rejects an explicit size below 21 with "EphemeralStorage size should be at least 21".
+         * The included 20 GiB is what you get by omitting the field, not by asking for it -- found by
+         * setting it to 20 and watching every task fail to launch. TaskDefinitionRegistrar omits the field
+         * when this is 0, so 0 is how you express "the free allowance".
+         */
+        @WithDefault("0")
         int defaultEphemeralStorageGiB();
 
         @WithDefault("16384")

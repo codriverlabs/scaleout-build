@@ -170,7 +170,7 @@ public class BuildMojo extends AbstractMojo {
 
     @Parameter(property = "scaleout-build.requestedCpu", defaultValue = "4096")
     private String requestedCpu;
-    @Parameter(property = "scaleout-build.requestedMemory", defaultValue = "16384")
+    @Parameter(property = "scaleout-build.requestedMemory", defaultValue = "8192")
     private String requestedMemory;
     @Parameter(property = "scaleout-build.requestedEphemeralStorageGiB", defaultValue = "0")
     private int requestedEphemeralStorageGiB;

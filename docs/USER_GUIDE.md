@@ -178,13 +178,23 @@ visible rather than silent.
 | Parameter | Property | Default |
 |---|---|---|
 | `requestedCpu` | `scaleout-build.requestedCpu` | `4096` (4 vCPU) |
-| `requestedMemory` | `scaleout-build.requestedMemory` | `16384` (16 GiB) |
-| `requestedEphemeralStorageGiB` | `scaleout-build.requestedEphemeralStorageGiB` | `0` (provider default, 20 GiB) |
+| `requestedMemory` | `scaleout-build.requestedMemory` | `8192` (8 GiB) |
+| `requestedEphemeralStorageGiB` | `scaleout-build.requestedEphemeralStorageGiB` | `0` (server default, 20 GiB) |
 
 Measured: `native-image` **saturates all 4 vCPU** regardless of project size, so reducing CPU lengthens
-builds proportionally. Memory peaked at 5.2 GB for a 233-jar Quarkus application and 1.2 GB for a
-two-dependency one — so 16 GiB has headroom, but `native-image` memory grows with application size. See
-[`fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md).
+builds proportionally — a latency trade, not reclaimed slack.
+
+Peak RSS is 5.3–5.6 GB for a 233-jar Quarkus application and 1.2 GB for a two-dependency one, which is why
+the default is 8 GiB (about 68% used, the smallest pairing Fargate allows with 4 vCPU). **4 GiB does not
+work** for a project of that size, and capping the builder's heap will not make it fit: peak RSS is
+dominated by native memory and the image heap being constructed, not the Java heap.
+
+The builder is given `-J-XX:MaxRAMPercentage=80` by default, which is read from the container's cgroup
+limit and so stays correct if you resize the task. Pass your own `-J-Xmx` or `-J-XX:MaxRAMPercentage` in
+`extraNativeImageArgs` to override it — later `-J` arguments win. Measured on a 233-jar application, the
+percentage form did roughly half the garbage collections and finished faster than an absolute `-J-Xmx6g`.
+
+See [`fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md).
 
 ## What to expect
 

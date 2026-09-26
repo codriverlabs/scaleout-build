@@ -20,6 +20,9 @@ import java.util.Locale;
 @ApplicationScoped
 public class ResourcePolicy {
 
+    /** Fargate includes this much ephemeral storage; an explicit size must exceed it. */
+    private static final int FARGATE_INCLUDED_EPHEMERAL_GIB = 20;
+
     private final ControlPlaneConfig config;
 
     @Inject
@@ -36,8 +39,28 @@ public class ResourcePolicy {
                 limits.defaultMemory()), limits.maxMemory(), limits.defaultMemory());
         int storage = requested == null || requested.ephemeralStorageGiB() <= 0
                 ? limits.defaultEphemeralStorageGiB()
-                : Math.min(requested.ephemeralStorageGiB(), limits.maxEphemeralStorageGiB());
+                : clampEphemeralStorage(requested.ephemeralStorageGiB(),
+                        limits.maxEphemeralStorageGiB());
         return new RequestedResources(cpu, memory, storage);
+    }
+
+    /**
+     * ECS accepts either no ephemeral storage size, or one of at least 21 GiB — a request between 1 and 20
+     * fails the launch with "EphemeralStorage size should be at least 21".
+     *
+     * <p>Anything in that range is therefore mapped to 0, which omits the field and yields Fargate's
+     * included 20 GiB at no charge. That matches what such a request means: the caller wants a small
+     * footprint, and 20 GiB free is the smallest available. Passing it through instead produces an ECS
+     * error naming a constant nobody configured.
+     */
+    private int clampEphemeralStorage(int requested, int max) {
+        if (requested <= 0) {
+            return 0;
+        }
+        if (requested <= FARGATE_INCLUDED_EPHEMERAL_GIB) {
+            return 0;
+        }
+        return Math.min(requested, max);
     }
 
     /** @return the effective per-cell wall-clock ceiling in minutes */

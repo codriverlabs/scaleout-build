@@ -31,6 +31,65 @@ large factor.
 The pull and compile phases are comparable, so this is capacity allocation, not the workload. It is worth
 knowing when moving to arm64 everywhere, because it lands directly in the billed window.
 
+## Slimming the task: what was changed and why
+
+Driven by a requirement to fit a Lambda MicroVM or AgentCore footprint rather than a Fargate one. Three
+defaults changed, each measured on the 233-jar Quarkus project.
+
+| | Before | After |
+|---|---|---|
+| Task memory | 16384 MB | **8192 MB** |
+| Ephemeral storage | 40 GiB explicit | **omitted** (Fargate's included 20 GiB) |
+| `native-image` budget | unset | **`-J-XX:MaxRAMPercentage=80`** |
+| vCPU | 4096 | 4096, unchanged |
+
+### Memory: 8 GiB is the floor, and the floor is the workload
+
+Peak RSS is 5.3–5.6 GB whatever is configured. 8 GiB runs at ~68% with about 2.5 GB spare, verified across
+several full builds on both architectures. **4 GiB is not available**: capping the builder's heap does not
+move peak RSS, because RSS is dominated by native memory and the image heap being constructed rather than
+the Java heap. Shrinking further needs a smaller application, not a smaller setting.
+
+### The budget is a percentage, and that measured *faster* than an absolute cap
+
+A percentage is read from the container's cgroup limit — verified, `MaxHeapSize` resolved to 6.4 GiB in an
+8 GiB task — so it stays correct if the task is resized. An absolute `-J-Xmx` is correct only at the size it
+was chosen for, and too large a value in a smaller container is an OOM kill rather than a slowdown.
+
+It was also the better performer, which is not what a slimming change usually does:
+
+| 8 GiB task | `-J-Xmx6g` | `MaxRAMPercentage=80` |
+|---|---|---|
+| Peak RSS | 5.46 / 5.37 GB | 5.28 / 5.49 GB |
+| GC count | 2321 / 2578 | **1542 / 1206** |
+| Compile | 3m47s / 4m40s | **3m19s / 3m27s** |
+
+`native-image` reads the percentage and sets its own build budget from it, reporting
+`6.11GB of memory (71.1% of system memory)`. That is more headroom than the absolute cap allowed, so it
+does roughly half the collections. GraalVM asks for this directly in its build output: *"HEAP: Set max heap
+for improved and more predictable memory usage."*
+
+Callers can override it — the default is placed before caller-supplied arguments and later `-J` flags win.
+
+### Ephemeral storage: omitted, not 20
+
+**ECS rejects an explicit size below 21 GiB**: `EphemeralStorage size should be at least 21`. Fargate's
+included 20 GiB is what you get by *not specifying* the field, which is why the default is 0 and
+`TaskDefinitionRegistrar` omits it.
+
+Found by setting it to 20 and watching every task fail to launch — the "free tier" number and the
+"minimum explicit" number are not the same, and assuming they were cost a deploy cycle. `ResourcePolicy`
+now maps any request of 1–20 onto 0 rather than passing it to ECS, so the mistake produces the free
+allowance instead of an error naming a constant nobody configured.
+
+Measured consumption is 1.87–2 GB on both projects, so 20 GiB is ten times the observed peak.
+
+### CPU left alone
+
+`native-image` saturates all four vCPU regardless of project size, so halving it roughly doubles build
+time. That is a latency trade rather than reclaimed slack, and it was left as a deliberate decision rather
+than taken silently.
+
 ## Real project vs example app
 
 Re-measured 2026-09-26 against KubeMicroVM `operator-controller`: a Quarkus 3.39.4 operator with **233
