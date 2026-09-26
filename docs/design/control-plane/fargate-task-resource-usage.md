@@ -4,6 +4,9 @@ Measured 2026-09-25 in `eu-west-1` from four real build tasks — two builds, ea
 an `arm64` cell in parallel. Sources: ECS `DescribeTasks` lifecycle timestamps, CloudWatch Container
 Insights (`ECS/ContainerInsights`), and the agent's own log output.
 
+Whether these requirements fit Lambda MicroVMs or AgentCore Runtime is assessed against documented quotas
+in [`microvm-platform-fit.md`](microvm-platform-fit.md).
+
 Companion to [`lambda-resource-usage.md`](lambda-resource-usage.md), which covers the control-plane
 service. Cost implications are in [`../../COST_ANALYSIS.md`](../../COST_ANALYSIS.md).
 
