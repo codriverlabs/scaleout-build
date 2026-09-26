@@ -14,6 +14,14 @@ short-lived remote workers, using S3 as a content-addressed staging layer for cl
 build outputs, and attaches the resulting binaries back to the reactor with per-architecture
 classifiers.
 
+## Using it
+
+See the [**user guide**](docs/USER_GUIDE.md) for setup, framework-specific steps (Quarkus, Spring Boot AOT,
+Helidon, plain GraalVM), the full configuration reference, and troubleshooting.
+
+A developer needs one configuration value — the control plane endpoint — and two IAM permissions
+(`lambda:InvokeFunctionUrl`, `lambda:InvokeFunction`). No ECS, S3, CloudWatch or ECR access.
+
 ## Modules
 
 - **`scaleout-build-shared`** — build matrix types, staging layout, and the native-image
