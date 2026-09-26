@@ -7,6 +7,7 @@ import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactListResponse;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.BuildSpec;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.BuildStatus;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.CellState;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDownload;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.CellStatus;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.CreateBuildRequest;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.CreateBuildResponse;
@@ -303,8 +304,10 @@ public final class ServiceBuildBackend implements BuildBackend {
             Path destinationDir = options.workDirectory().resolve("remote-artifacts")
                     .resolve(cellArtifacts.cell().replace('/', '-'));
             List<Path> downloaded = new ArrayList<>();
-            for (UploadTarget download : cellArtifacts.downloads()) {
-                Path destination = destinationDir.resolve(options.imageName());
+            for (ArtifactDownload download : cellArtifacts.downloads()) {
+                // download.path(), not options.imageName(): several artifacts per cell must not collapse
+                // into one file, and imageName is absent for a framework-generated argfile.
+                Path destination = destinationDir.resolve(download.path());
                 client.getPresigned(download.url(), destination);
                 downloaded.add(destination);
             }

@@ -6,6 +6,7 @@ package ai.codriverlabs.scaleoutbuild.controlplane.service;
 import ai.codriverlabs.scaleoutbuild.build.Architecture;
 import ai.codriverlabs.scaleoutbuild.build.BuildKind;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDescriptor;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDownload;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactListResponse;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.BuildSpec;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.BuildState;
@@ -233,7 +234,22 @@ public class BuildService {
                                 staging.stagingPath(record.getOwnerKey(), record.getBuildId(), buildKind, architecture),
                                 ai.codriverlabs.scaleoutbuild.build.StagingLayout.DEFAULT_ARGS_FILE_NAME)
                         .s3Bucket(config.ecs().agentUsesDirectS3Io() ? config.stagingBucket() : null)
-                        .expectedArtifacts(List.of(record.getBuildSpec().imageName()))
+                        /*
+                         * imageName is legitimately absent for a pass-through build.
+                         *
+                         * In QUARKUS_NATIVE_SOURCES mode the argfile Quarkus generated already names its
+                         * own output (-o <finalName>-runner), so the client sends no imageName and the
+                         * agent discovers artifacts by scanning the output directory afterwards --
+                         * exactly as NativeImageInputPlanner.planFromNativeSources documents when it
+                         * returns an empty expectedArtifacts list.
+                         *
+                         * List.of(null) throws NullPointerException, so this previously failed every
+                         * Quarkus build at launch with a bare NPE and "launch failed: null" on the
+                         * client. Found by running a real 233-jar Quarkus application through the
+                         * service; the two-jar example app always sets imageName, so nothing caught it.
+                         */
+                        .expectedArtifacts(record.getBuildSpec().imageName() == null
+                                ? List.of() : List.of(record.getBuildSpec().imageName()))
                         .extraNativeImageArgs(record.getBuildSpec().extraNativeImageArgs())
                         .timeoutMinutes(record.getBuildSpec().timeoutMinutes())
                         .build();
@@ -319,14 +335,28 @@ public class BuildService {
         return repository.findOwned(buildId, caller.ownerKey()).map(record -> {
             List<ArtifactListResponse.CellArtifacts> cells = new ArrayList<>();
             for (BuildRecord.CellRecord cell : record.getCells()) {
-                List<UploadTarget> downloads = new ArrayList<>();
+                List<ArtifactDownload> downloads = new ArrayList<>();
                 if (cell.getState() == CellState.SUCCEEDED) {
                     BuildKind buildKind = BuildKind.parse(cell.getCell().split("/")[0]);
                     Architecture architecture = Architecture.parse(cell.getCell().split("/")[1]);
                     String prefix = staging.outputPrefix(record.getOwnerKey(), record.getBuildId(), buildKind, architecture);
-                    for (String artifact : cell.getArtifactPaths()) {
+                    /*
+                     * Listed from S3 rather than read from the build record. The record only knows an
+                     * artifact name when the client supplied imageName, which a framework-generated
+                     * argfile never does -- it names its own output. Listing also reports what was
+                     * actually uploaded rather than what was expected, which is the more useful answer
+                     * either way. Falls back to the record if the listing is empty, so a transient S3
+                     * read does not silently report a successful build as artifact-less.
+                     */
+                    List<String> names = staging.listOutputNames(record.getOwnerKey(),
+                            record.getBuildId(), buildKind, architecture);
+                    if (names.isEmpty()) {
+                        names = cell.getArtifactPaths();
+                    }
+                    for (String artifact : names) {
                         String key = prefix.endsWith("/") ? prefix + artifact : prefix + "/" + artifact;
-                        downloads.add(staging.presignDownload(key, null));
+                        UploadTarget target = staging.presignDownload(key, null);
+                        downloads.add(new ArtifactDownload(artifact, target.url(), target.expiresAt()));
                     }
                 }
                 cells.add(new ArtifactListResponse.CellArtifacts(cell.getCell(), downloads));
@@ -368,7 +398,15 @@ public class BuildService {
                     cell.setExitCode(exitCode);
                     if (exitCode != null && exitCode == 0) {
                         cell.setState(CellState.SUCCEEDED);
-                        if (cell.getArtifactPaths().isEmpty()) {
+                        /*
+                         * Second place imageName was assumed non-null. It is absent for a pass-through
+                         * build, where the argfile names its own output, so List.of(null) threw and every
+                         * status poll for a Quarkus build returned HTTP 500 -- after the compile had
+                         * already succeeded. Left empty in that case: the agent discovers artifacts by
+                         * scanning and the artifact listing reports what it actually uploaded.
+                         */
+                        if (cell.getArtifactPaths().isEmpty()
+                                && record.getBuildSpec().imageName() != null) {
                             cell.setArtifactPaths(
                                     new ArrayList<>(List.of(record.getBuildSpec().imageName())));
                         }

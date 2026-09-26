@@ -21,6 +21,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
@@ -178,6 +179,26 @@ public class StagingService {
     }
 
     /** Key prefix the agent writes produced artifacts to. */
+    /**
+     * Object names directly under a cell's output prefix.
+     *
+     * <p>Needed because the build record cannot always say what was produced. A pass-through argfile names
+     * its own output, so the service never learns the artifact name and the agent discovers it by scanning.
+     * Listing S3 is then the only way to report artifacts, and it is also more truthful than the record for
+     * a derived build: it reports what was uploaded rather than what was expected.
+     */
+    public List<String> listOutputNames(String ownerKey, String buildId, BuildKind buildKind,
+                                        Architecture architecture) {
+        String prefix = outputPrefix(ownerKey, buildId, buildKind, architecture);
+        String normalized = prefix.endsWith("/") ? prefix : prefix + "/";
+        return s3.listObjectsV2Paginator(ListObjectsV2Request.builder()
+                        .bucket(config.stagingBucket()).prefix(normalized).build())
+                .contents().stream()
+                .map(object -> object.key().substring(normalized.length()))
+                .filter(name -> !name.isBlank() && !name.contains("/"))
+                .toList();
+    }
+
     public String outputPrefix(String ownerKey, String buildId, BuildKind buildKind,
                                Architecture architecture) {
         return layoutFor(ownerKey).outputPath(buildId, buildKind, architecture);
