@@ -31,6 +31,44 @@ large factor.
 The pull and compile phases are comparable, so this is capacity allocation, not the workload. It is worth
 knowing when moving to arm64 everywhere, because it lands directly in the billed window.
 
+## Real project vs example app
+
+Re-measured 2026-09-26 against KubeMicroVM `operator-controller`: a Quarkus 3.39.4 operator with **233
+jars and a 71.9 MB runtime classpath**, against the example app's 2 jars and 0.72 MB. Two runs, both
+architectures, per-task figures separated by the `TaskDefinitionFamily` dimension.
+
+| | Example app (2 jars) | Real Quarkus (233 jars) |
+|---|---|---|
+| Memory peak, per task | 1179 MB | **5203–5312 MB** |
+| Memory, % of 16 GiB reserved | 7% | **32%** |
+| CPU peak | 4096 / 4096 | 4024–4095 / 4096 |
+| Ephemeral storage | 2 GB | 1.9 GB |
+| `native-image` compile | 40–55 s | 3m 6s – 5m 1s |
+| Total billed per task | 96–122 s | **250–258 s** |
+| Image pull | 8–9 s | 8 s |
+
+**This settles the memory question, and the answer is: leave 16 GiB alone.** The 7% reading was an
+artifact of a trivial example, exactly as suspected. A mid-size real application uses **4.5× more memory**
+— 5.2 GB — and `native-image` memory scales with application size, so a larger codebase will use more
+still.
+
+Trimming to the smallest legal pairing for 4 vCPU (8 GiB) would put this project at **65% utilisation with
+2.9 GB headroom**. That is too thin for a provision meant to serve arbitrary projects, and an overrun is a
+task failure rather than a slowdown. The ~15% saving is not worth it.
+
+**CPU saturates regardless of project size**, so 4 vCPU is doing real work in both cases and reducing it
+would extend every build proportionally.
+
+**Image pull is 8 s in both cases**, which follows: the pull is the agent image, not the project. Project
+size affects the S3 input download instead, which sits inside the execution phase.
+
+**arm64 provisioning is consistently slower** — 20 s against 11 s here, 22–24 s against 11–13 s
+previously. Reproduced across four runs now, and it lands in the billed window.
+
+**Compile time varied more than expected between runs** on identical inputs: 3m 37s and 5m 1s on the first
+pass, 3m 7s and 3m 6s on the second. Spot capacity variance is the likely cause. Treat a single compile
+timing as indicative only.
+
 ## CPU, memory and storage
 
 From Container Insights over the task window. Note the sampling caveat below.
@@ -48,16 +86,15 @@ request is doing real work and reducing it would lengthen the build roughly prop
 independently, so the unused 15 GiB is paid for. 4 vCPU permits 8–30 GiB, so the smallest legal pairing is
 4 vCPU / 8 GiB, which would cut the memory component in half — about 15% off the task rate.
 
-**That reduction has not been made, and should not be on this evidence alone.** The example app's
-classpath is two jars. `native-image` memory scales with the size of the application and its reachable
-heap, and a real project with hundreds of dependencies is the case 16 GiB was chosen for. Measure a
-representative build before touching it; the 7% figure says the *example* is small, not that the
-provision is wrong.
+**That reduction was not made, and the section above now explains why it should not be.** A real 233-jar
+project uses 5.2 GB, not 1.2 GB, which would be 65% of an 8 GiB provision. The 7% figure said the
+*example* was small, not that the provision was wrong — and re-measuring confirmed it.
 
 ## Sampling caveats
 
-- **Four tasks.** Enough to see that arm64 provisioning is consistently slower and that the pull is fast;
-  not enough for confident percentiles.
+- **Eight tasks now**, across two projects and four runs. Enough to be confident that arm64 provisioning is
+  slower and the pull is fast; still not enough for percentiles, and compile time in particular varied by
+  60% between runs on identical inputs.
 - **Container Insights samples at one-minute intervals** and these tasks run 96–122 s, so there are only
   two or three samples per task. A brief memory spike during compilation could fall between them, which
   makes 1179 MB a lower bound on the true peak.
