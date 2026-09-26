@@ -1,92 +1,108 @@
-# Running the build agent on MicroVM platforms
+# Running on MicroVM platforms: AgentCore client, MicroVM workers
 
-Whether the `native-image` workload fits AWS Lambda MicroVMs or Amazon Bedrock AgentCore Runtime, checked
-against documented quotas rather than assumed. Measured requirements come from
-[`fargate-task-resource-usage.md`](fargate-task-resource-usage.md).
+Two separate questions that an earlier draft of this document conflated, to its cost:
 
-## What the agent needs
+1. **Where the client runs** — the thing invoking Maven with this plugin. Intended target: an agent on
+   Amazon Bedrock AgentCore Runtime, plausibly a Harness loop.
+2. **Where the `native-image` work runs** — the build workers the control plane launches. Today Fargate;
+   Lambda MicroVMs are a candidate.
 
-Per cell, measured on a 233-jar Quarkus application:
+Their requirements differ by an order of magnitude, so a limit that blocks one may be irrelevant to the
+other. Measured figures come from [`fargate-task-resource-usage.md`](fargate-task-resource-usage.md).
 
-| | |
+```
+AgentCore Runtime (agent + Maven + this plugin)     modest: HTTP, uploads, SSE
+        │  HTTPS + SigV4
+        ▼
+Control plane Lambda (orchestrator)                 384 MB
+        │  launches
+        ▼
+Build workers (native-image)                        4 vCPU, 5.3-5.6 GB peak RSS
+        ├── Fargate            x86_64 and arm64
+        └── Lambda MicroVM     arm64 only, suspend/resume
+```
+
+## The client on AgentCore Runtime
+
+AgentCore Runtime microVMs cap at **2 vCPU / 8 GB per session**, not adjustable
+([quotas](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)).
+
+That is comfortable for a client. Its work is: resolve the classpath, run framework augmentation, upload
+inputs, hold an SSE connection, download artifacts. The heaviest part is Quarkus augmentation of a
+233-jar application, which is a normal Maven JVM rather than a `native-image` builder — nothing close to
+the 5.6 GB the *worker* needs.
+
+Two limits that do apply:
+
+- **2 GB container image.** A client image needs a JDK and Maven, not Mandrel. Well inside.
+- **8 hour session.** A two-architecture build of a real project takes about 6 minutes, so this only
+  matters for a long-lived agent doing many builds — which is the intended shape.
+
+## Lambda MicroVM workers, and why suspend/resume matters here
+
+Lambda MicroVMs reach 16 vCPU / 32 GB with 8-hour lifetimes
+([quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html)), so capacity is not the
+constraint. **They are ARM64 only**, per the same page: *"Lambda MicroVMs support the ARM64 (AWS Graviton)
+architecture."*
+
+Since GraalVM does not cross-compile, that makes them viable for the `arm64` cell and unusable for
+`x86_64`. A mixed backend follows — MicroVMs for arm64, Fargate for x86_64 — rather than a replacement.
+
+### What suspend/resume buys: PGO
+
+Profile-guided optimisation is inherently two-phase, and today the two phases are unrelated builds.
+`BuildKind`'s own javadoc is explicit that *"running the instrumented binary against a representative
+workload to collect the `.iprof` profile that `NATIVE_PGO_OPTIMIZE` consumes happens entirely outside this
+tool."*
+
+So a PGO cycle currently pays the full setup cost twice:
+
+| Per phase | Measured |
 |---|---|
-| Peak RSS | 5.3–5.6 GB |
-| CPU | saturates 4 vCPU (load 3.1–3.7) |
-| Compile time at 4 vCPU | ~3 min |
-| Container image | 1.19 GB uncompressed, 0.61 GB in ECR |
-| Disk | ~2 GB |
-| Architectures needed | **both** `x86_64` and `arm64` |
+| Provisioning | ~20 s (arm64) |
+| Image pull | ~8 s |
+| Classpath staged into the worker | 54 MB from S3 |
+| `native-image` | ~3 min at 4 vCPU |
 
-That last row is the constraint everything else hangs off: GraalVM cannot cross-compile, so an `x86_64`
-binary must be produced on `x86_64` hardware. It is the entire reason this project exists.
+A MicroVM that suspends between phases keeps its memory *and* disk state, so the second phase resumes with
+the classpath already present and page cache warm. The instrument phase's staging is paid once instead of
+twice, and provisioning and pull disappear entirely for phase two.
 
-## AWS Lambda MicroVMs — cannot serve the x86_64 cell
+More valuable than the byte savings: the profiling run can happen **inside the same environment** that
+produced the instrumented binary and will produce the optimised one. Today it happens wherever the user
+arranges, on unspecified hardware, which is a weaker basis for a profile that then shapes code generation.
 
-Sizes go to 16 vCPU / 32 GB ([Lambda
-quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html), inferred from the
-per-MicroVM throughput table: *"40 (4 vCPU / 8 GB), 160 (16 vCPU / 32 GB)"*), and execution runs to 8
-hours. Both comfortably exceed what a build needs.
+### What suspend/resume buys: iterative recompilation
 
-**But the same page states: "Lambda MicroVMs support the ARM64 (AWS Graviton) architecture."** ARM64 only.
+The same mechanism addresses the ordinary case. Dependency jars are content-addressed and stable between
+builds, so today they are deduplicated in S3 but still **downloaded into each fresh worker**. A resumed
+MicroVM already has them on disk.
 
-Combined with no cross-compilation, that rules Lambda MicroVMs out for the `x86_64` cell entirely — not as
-a tuning problem, but as an impossibility. It remains a candidate for the `arm64` cell.
+For the measured project that is 54 MB and the tail of a ~250 s task, per build, per architecture. Whether
+that is worth the lifecycle complexity depends on build frequency: negligible for a few builds a day,
+material for an agent iterating continuously — which is the AgentCore use case.
 
-A split deployment (arm64 on MicroVMs, x86_64 elsewhere) is possible but buys little: it doubles the
-operational surface to move one of two cells.
+## What this would require
 
-## AgentCore Runtime, microVM compute — fits memory, halves CPU
+Not a configuration change. The worker lifecycle differs structurally:
 
-From [AgentCore
-quotas](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html), both
-marked not adjustable:
+- **Today:** `RunTask` → poll `DescribeTasks` → container exits → task gone. One task per cell, stateless.
+- **MicroVM:** `RunMicrovm` → `SuspendMicrovm` → `ResumeMicrovm` → `TerminateMicrovm`, with an endpoint and
+  auth token per instance, and state that outlives a phase.
 
-| Limit | Value | Against our requirement |
-|---|---|---|
-| Maximum hardware allocation per session | **2 vCPU / 8 GB** | memory fits at ~70%; **CPU is half** |
-| Maximum Docker image size | **2 GB** | 1.19 GB fits, ~800 MB spare |
+That means a second backend alongside `EcsTaskLauncher`, and a control plane that tracks a *suspended*
+cell state — which the current `CellState` enum has no notion of, since it assumes a cell runs once and
+reaches a terminal state.
 
-**Memory fits, and the fit is tight by coincidence rather than design.** Peak RSS of 5.6 GB against 8 GB is
-about 70%. The 8 GiB default this project just adopted happens to be exactly the AgentCore ceiling, so no
-further slimming is available there — and none is possible, since peak RSS is dominated by native memory
-and the image heap rather than the Java heap, so capping the heap does not move it.
+Also worth noting: MicroVM auth tokens expire after at most 60 minutes, so a suspend spanning longer than
+that needs a token refresh rather than a stored one.
 
-**CPU is the real cost.** `native-image` saturates 4 vCPU, so 2 vCPU roughly doubles compile time: ~3 min
-becomes ~6 min per cell. Whether that matters is a product decision, not a technical obstacle.
+## Honest status
 
-**The image fits but the headroom is not ours.** 1.19 GB of the 2 GB limit, of which the Mandrel builder
-base is 1.18 GB — our additions are about 10 MB. So headroom is entirely a function of upstream base image
-growth, and a future Mandrel release could breach the limit without any change on our side. Worth a check
-in CI if this platform is adopted; `scripts/verify-agent-image.sh` is the natural place.
+Nothing has been run on either platform. This is documented quotas and measured requirements placed side by
+side. The PGO and recompilation arguments follow from the measurements, but the same kind of reasoning said
+Quarkus support was sound before a real project found six defects in it — so treat the conclusions as a
+design case to test, not a validated result.
 
-## AgentCore Runtime, Instances compute — the best technical fit
-
-The [FAQ](https://aws.amazon.com/bedrock/agentcore/faqs/) describes Instances as *"AWS-managed Amazon EC2
-instances that run in your own AWS account, for specialized workloads"*, with a broad choice of instance
-types and sessions up to 14 days. Billing is the EC2 On-Demand price plus a management fee.
-
-No 2 vCPU / 8 GB ceiling: you pick the instance, so the 4 vCPU the compile actually wants is available, and
-both architectures are available since you choose the instance family. For a CPU-bound batch workload this
-is the closer match of the two AgentCore compute types.
-
-## Summary
-
-| Platform | Memory | CPU | Both architectures | Verdict |
-|---|---|---|---|---|
-| Fargate (today) | ✅ 8 GiB | ✅ 4 vCPU | ✅ | works, measured |
-| Lambda MicroVMs | ✅ to 32 GB | ✅ to 16 vCPU | ❌ **ARM64 only** | **x86_64 impossible** |
-| AgentCore microVMs | ✅ 8 GB, at 70% | ⚠️ 2 vCPU, ~2× slower | ✅ | workable, CPU-constrained |
-| AgentCore Instances | ✅ your choice | ✅ your choice | ✅ | best technical fit |
-
-**Nothing here has been run.** These are documented quotas checked against measured requirements; no build
-has executed on either platform. The conclusions about fit are sound, but the same was true of the Quarkus
-support before a real project found six defects in it.
-
-## If AgentCore microVMs are chosen anyway
-
-The 8 GiB memory default already matches the ceiling, so no change is needed there. Two things would:
-
-- **Expect ~6 min per cell rather than ~3.** The plugin's `timeoutMinutes` default comes from server
-  policy; a deployment on 2 vCPU should raise it.
-- **Add an image-size assertion.** 1.19 GB against a 2 GB hard limit, with 99% of it upstream, is the kind
-  of headroom that disappears without warning.
+The narrower claim I would defend: **AgentCore is a fine home for the client**, and **the ARM64 restriction
+means MicroVM workers supplement Fargate rather than replace it**.
