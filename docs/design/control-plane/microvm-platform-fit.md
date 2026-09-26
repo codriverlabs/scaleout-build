@@ -82,6 +82,11 @@ For the measured project that is 54 MB and the tail of a ~250 s task, per build,
 that is worth the lifecycle complexity depends on build frequency: negligible for a few builds a day,
 material for an agent iterating continuously — which is the AgentCore use case.
 
+## Design
+
+A full design for this backend — lifecycle, state machine, the profiling-workload decision, resume hazards
+and open questions — is in [`microvm-build-backend.md`](microvm-build-backend.md).
+
 ## What this would require
 
 Not a configuration change. The worker lifecycle differs structurally:
