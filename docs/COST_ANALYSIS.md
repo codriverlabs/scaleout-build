@@ -21,6 +21,13 @@ host-matching cell requires `scaleout-build.forceRemote`.
 The offload only pays for the architecture you don't own hardware for (GraalVM cannot
 cross-compile) and for running matrix cells concurrently.
 
+**Against an always-on build box, the scale-out architecture wins by two orders of magnitude at ordinary
+volumes, on plain on-demand rates with no commitment.** A two-architecture setup of always-on machines is
+about $503/month before a single build; 100 builds a month through a small `t4g.large` client plus Fargate
+is **$2.04**. The always-on box only overtakes at roughly 600-800 builds a day, sustained. Full working
+in §7 — and note that a single x86_64 box cannot produce the arm64 binary at all, so the comparison is
+also one architecture against two.
+
 **The original non-obvious finding — that the SSE Lambda cost about as much as the Fargate compute it
 watched — no longer holds, and it is worth saying why it was wrong.** It rested on a 1024 MB function and
 an estimated 400-second build. Measured, the build is ~100 s per cell and the function is 256 MB native,
@@ -373,7 +380,85 @@ change and no
 new failure modes. That is a ~$0.004 saving — worth doing because it is two configuration values,
 not because it is material money.
 
-## 7. Versus EC2, with Compute Savings Plans
+## 7. Versus an always-on box, on plain on-demand rates
+
+The comparison that matters for a decision, and the one §7 did not make: §7 priced an always-on
+`m7g.xlarge` against a per-build cost, using Savings Plans. Two problems with that as a decision aid — it
+compares a box sized for *building* against the scale-out architecture, when the whole point is that the
+client does not need to build; and Savings Plans require a one- or three-year commitment, which is not the
+position most people are in when they first look at this.
+
+**All figures below are plain on-demand, no commitment** — the saving available today, without signing
+anything. Verified against the Price List API for
+`eu-west-1` on 2026-09-27. Savings Plans reduce every EC2 row by roughly 24% (1-year) or 47% (3-year), and
+Fargate by about 21% or 46%, so the ranking does not change — the numbers here are the ones available
+immediately.
+
+### The machines
+
+| Instance | vCPU / RAM | On-demand | Always-on monthly (730 h) |
+|---|---|---|---|
+| `r6a.2xlarge` — a developer workstation of the size this project was developed on | 8 / 64 GiB | $0.5076/h | **$370.55** |
+| `r6a.xlarge` | 4 / 32 GiB | $0.2538/h | $185.27 |
+| `m7g.xlarge` — §7's build box | 4 / 16 GiB | $0.1819/h | $132.79 |
+| **`t4g.large` — enough to run Maven and this plugin** | 2 / 8 GiB | $0.0736/h | **$53.73** |
+| `t4g.medium` | 2 / 4 GiB | $0.0368/h | $26.86 |
+
+`t4g.large` is the client recommendation, at 2 vCPU / 8 GiB: the same envelope that makes AgentCore Runtime
+viable for the client (see
+[`microvm-platform-fit.md`](design/control-plane/microvm-platform-fit.md)). `t4g.medium`'s 4 GiB is likely
+too tight for Quarkus augmentation of a 233-jar application, which is an ordinary Maven JVM but not a small
+one — untested, so not recommended.
+
+### Cost per two-architecture build
+
+| | |
+|---|---|
+| `t4g.large` client, for a ~6 minute build | $0.0074 |
+| Fargate Spot, both cells | $0.0130 |
+| **Total, client billed only while building** | **$0.0204** |
+| *with Fargate on-demand instead of Spot* | *$0.0379* |
+
+### Monthly totals
+
+| Builds/month | Client on-demand + Fargate | Client always-on + Fargate | `r6a.2xlarge` always-on |
+|---|---|---|---|
+| 10 | **$0.20** | $53.86 | $370.55 |
+| 50 | **$1.02** | $54.38 | $370.55 |
+| 100 | **$2.04** | $55.03 | $370.55 |
+| 500 | **$10.18** | $60.23 | $370.55 |
+| 1,000 | **$20.36** | $66.73 | $370.55 |
+| 5,000 | **$101.80** | $118.73 | $370.55 |
+
+The always-on box costs the same whether you build once a month or five thousand times. Scale-out
+overtakes it at about **24,000 builds/month** with an always-on client, or **18,000** if the client is
+billed only while building — roughly 600–800 builds a day, sustained.
+
+### The argument that is not about cost
+
+A single x86_64 box **cannot produce the arm64 binary at all**. GraalVM does not cross-compile, so the
+alternatives are QEMU emulation — impractical for a `native-image` compile — or a second machine. An
+honest comparison of the always-on box against scale-out is therefore between *one architecture* and
+*two*, and the $370.55 buys the lesser capability.
+
+So a two-architecture always-on setup is $370.55 for the x86_64 box plus an arm64 one. Pairing it with the
+`m7g.xlarge` priced above gives **$503.34/month** before anyone has run a single build — against $0.20 for
+ten builds on the scale-out path.
+
+### Where the always-on box still wins
+
+- **Sustained very high volume** — past roughly 600 builds/day the always-on box is cheaper, and it has no
+  per-build provisioning or image-pull overhead.
+- **Latency on small projects.** Measured on the example app: local compile 40–55 s, against ~100 s billed
+  Fargate time including ~20 s provisioning and ~8 s image pull. For a trivial project the offload is
+  slower, which is why the plugin runs host-matching cells locally by default.
+- **No network dependency.** A build that cannot reach the control plane cannot proceed.
+
+## 7b. Versus EC2, with Compute Savings Plans
+
+> §7 above makes the same comparison on plain on-demand rates, against a correctly-sized client. This
+> section is retained for its Savings Plan figures, which apply a further ~24% (1-year) or ~47% (3-year) to
+> every EC2 row.
 
 ### Ephemeral instance per build
 
