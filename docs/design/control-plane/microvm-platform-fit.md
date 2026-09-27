@@ -22,6 +22,16 @@ Build workers (native-image)                        4 vCPU, 5.3-5.6 GB peak RSS
         └── Lambda MicroVM     arm64 only, suspend/resume
 ```
 
+## Why the client envelope matters more than it looks
+
+A small client is not merely cheaper. Isolation removes the ability to amortise, so every agent in its own
+MicroVM must be sized for its own peak — and if it compiles in-session that peak is a `native-image` build,
+5.3–5.6 GB. Offloading makes the agent small, which multiplies how many fit inside a pooled account quota:
+200 concurrent agents at 2 GB against 50 at 8 GB, within Lambda MicroVM's 400 GB default.
+
+That is a capacity ceiling moving rather than a cost saving. Quantified in
+[`../../COST_ANALYSIS.md`](../../COST_ANALYSIS.md) §8.
+
 ## The client on AgentCore Runtime
 
 AgentCore Runtime microVMs cap at **2 vCPU / 8 GB per session**, not adjustable

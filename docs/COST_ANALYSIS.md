@@ -21,6 +21,12 @@ host-matching cell requires `scaleout-build.forceRemote`.
 The offload only pays for the architecture you don't own hardware for (GraalVM cannot
 cross-compile) and for running matrix cells concurrently.
 
+**The strongest case is many isolated agents.** Isolation removes the ability to amortise, so every agent
+in its own MicroVM must be sized for its peak — and a `native-image` build needs 5.3–5.6 GB. An agent that
+offloads needs a fraction of that, which moves a **capacity ceiling**, not just a bill: 200 concurrent
+agents within Lambda MicroVM's 400 GB account quota instead of 50, a 4× increase no budget can buy. Plus 4×
+less memory billed across a session that spends most of its time idle. See §8.
+
 **Against an always-on build box, the scale-out architecture wins by two orders of magnitude at ordinary
 volumes, on plain on-demand rates with no commitment.** A two-architecture setup of always-on machines is
 about $503/month before a single build; 100 builds a month through a small `t4g.large` client plus Fargate
@@ -504,7 +510,73 @@ the account has bought. That is the right default for an account with no commitm
 one for an account with an underconsumed commitment — which argues for making the capacity
 provider strategy configurable rather than hardcoding Spot-first.
 
-## 8. Where the offload actually pays
+## 8. Isolated agents: the case where the saving multiplies
+
+The use cases above assume one client. The one that changes the economics is **many isolated agents**, each
+in its own MicroVM, each occasionally needing a native build — an AI agent working on a codebase, a
+multi-tenant CI executor, a per-session sandbox.
+
+Isolation is the point of that topology: hardware-enforced separation per tenant or session, which is
+exactly what you cannot get by sharing one build box. The problem is that isolation removes the ability to
+amortise, so **every** agent must be sized for its peak.
+
+### Sizing every agent for a compile it rarely runs
+
+Measured, a `native-image` build of a 233-jar application needs 5.3–5.6 GB peak RSS and saturates 4 vCPU.
+An agent that compiles in-session must therefore be provisioned for that — on AgentCore Runtime that means
+the 2 vCPU / 8 GB session ceiling, and at 2 vCPU the compile takes roughly twice as long.
+
+An agent that offloads needs only enough to run Maven and this plugin: resolve a classpath, run framework
+augmentation, upload inputs, hold an SSE connection, download artifacts. That is a small envelope, and the
+compile burst goes to shared Fargate capacity billed per build.
+
+### Consequence 1: concurrency within a fixed quota
+
+Lambda MicroVM account memory is a **pooled quota across `RUNNING` and `SUSPENDED` instances**
+([quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html)) — so a suspended agent
+still consumes it.
+
+| Region group | Quota | Agents at 8 GB (compiles locally) | Agents at 2 GB (offloads) |
+|---|---|---|---|
+| Most regions | 400 GB | **50** concurrent | **200** concurrent |
+| `us-east-1`, `us-west-2`, `us-east-2`, `ap-northeast-1` | 1,024 GB | 128 concurrent | 512 concurrent |
+
+**A 4× increase in concurrent isolated agents within the same account quota**, burstable to 4× that again.
+This is not a cost saving — it is a capacity ceiling moving, and no amount of budget raises it without a
+quota increase request.
+
+### Consequence 2: the session pays for its envelope throughout
+
+An agent session runs up to 8 hours and compiles for minutes of it. Sizing the session for the compile
+means paying build-sized memory for the whole session:
+
+| | Session envelope | Memory billed for a 60-minute session |
+|---|---|---|
+| Compiles in-session | 8 GB | 8.0 GB-hours |
+| Offloads | 2 GB | **2.0 GB-hours** |
+
+For a session doing three 6-minute builds — 30% of the hour compiling — that is **4× less memory billed**,
+plus $0.0130 per build on Fargate Spot. The ratio improves as the session gets longer or builds get rarer,
+which is the normal shape for an agent that spends most of its time waiting on a model or a human.
+
+AgentCore Runtime bills CPU and memory consumption per second and reclaims idle memory after 120 seconds
+([pricing](https://aws.amazon.com/bedrock/agentcore/pricing/)), which softens this — but reclamation cannot
+help with a session sized large enough to compile, because the envelope is still provisioned and the CPU
+allocation still follows the memory. **The dollar figure depends on AgentCore consumption rates not verified
+here**; the GB-hour ratio and the concurrency multiplier are from documented quotas and measured usage.
+
+### Why the architecture fits rather than merely costs less
+
+Isolation is needed where tenant state lives — the agent, holding a workspace and credentials. It is not
+needed for the compile, which is stateless: inputs in, binary out, content-addressed, no tenant context
+beyond the per-owner prefix the control plane already enforces
+([`storage-layout-and-isolation.md`](design/control-plane/storage-layout-and-isolation.md)). A Fargate task
+per cell is itself a fresh container, so the offload does not weaken isolation; it moves the expensive part
+to where sharing is safe.
+
+Which is the argument in one line: **isolate what holds state, pool what does not.**
+
+## 9. Where the offload actually pays
 
 Not on cost per build for a host-matching single architecture. On the two things that cannot be
 bought locally:
@@ -517,7 +589,7 @@ bought locally:
 At ~1.6¢ per cell, compute cost is negligible against a developer's 5–7 minutes of wall clock. The
 architecture-coverage question, not the cost question, is where the value sits.
 
-## 9. Assumptions, restated
+## 10. Assumptions, restated
 
 Figures above that are **retrieved**: all Fargate on-demand rates (ARM and x86_64, vCPU and memory), all
 Lambda rates (ARM and x86_64), all EC2 on-demand rates, all Compute Savings Plan rates, and every
