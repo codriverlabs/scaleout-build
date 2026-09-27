@@ -410,6 +410,12 @@ Lambda memory, duration and cold start in both modes.
 Figures that are **assumed and should be measured**:
 
 - Fargate Spot discount (−70% used; AWS publishes "up to 70%"). Not available from any pricing API.
+- **That the Spot path is the one actually taken.** `spot-preferred` is the default capacity strategy, and
+  the assumption behind it is that a 3–5 minute build rarely overlaps a reclamation. Observed: 20 tasks
+  launched during development, zero interruptions. Being wrong costs a relaunch rather than a failure —
+  `EcsTaskSupervisor` retries and escalates to on-demand after two interruptions — so the on-demand row in
+  the table above is the realistic worst case rather than a separate scenario. Deployments that cannot
+  absorb a retry can set `-c fargateCapacityStrategy=on-demand-preferred`.
 - ~~400 s billed task window for a 300 s compile — driven by agent image pull time, which nothing in
   the repository records.~~ **Now measured** (§4): 96–122 s per task, with an 8–9 s pull. The estimate was
   high by roughly 3.5×, mostly because it assumed a 60–90 s pull. See

@@ -29,8 +29,30 @@ import software.amazon.awssdk.services.ecs.model.CapacityProviderStrategyItem;
 public enum FargateCapacityStrategy {
 
     /**
-     * Spot preferred, on-demand as fallback. The historical behaviour and still the default: a build is
-     * retryable, and the discount is large.
+     * Spot preferred, on-demand as fallback. <b>The default, and it should stay the default.</b>
+     *
+     * <p>The reasoning, since a default that nobody can justify tends to get changed by whoever is
+     * nervous that day:
+     *
+     * <ul>
+     *   <li><b>The exposure window is short.</b> A build is a few minutes — measured 3–5 minutes of
+     *       {@code native-image} on a 233-jar Quarkus application, ~250 s of total billed task time. Spot
+     *       reclamation is unlikely to land inside a window that small, and unlike a long-running service
+     *       there is no accumulating risk.</li>
+     *   <li><b>Being wrong costs time, not correctness.</b> {@link EcsTaskSupervisor} detects the
+     *       interruption and relaunches, escalating to on-demand after
+     *       {@code maxSpotInterruptionsBeforeOnDemand} (default 2). A reclaimed build is retried, not
+     *       failed — so the downside is a delay, against roughly a 70% discount on every build that is
+     *       not interrupted.</li>
+     *   <li><b>Observed: zero interruptions.</b> Across 20 tasks launched during this project's
+     *       development and testing, on {@code FARGATE_SPOT} in {@code eu-west-1}, none were reclaimed.
+     *       Not a statistically meaningful sample, but it is consistent with the exposure-window
+     *       argument rather than contradicting it.</li>
+     * </ul>
+     *
+     * <p>Deployments that disagree have {@link #ON_DEMAND_PREFERRED} — appropriate where a retry is
+     * genuinely expensive, such as a release pipeline, or a PGO cycle whose earlier phase would have to
+     * be redone.
      *
      * <p>Both providers are listed, so ECS falls back rather than failing when Spot capacity is
      * unavailable. {@code base(1)} on the preferred provider places the first task there; the weights
