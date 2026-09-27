@@ -223,7 +223,14 @@ heartbeat grace period, so you are not billed indefinitely.
 ## Running in an ephemeral agent sandbox
 
 Hosted agent sandboxes — [Kiro cloud sessions](https://kiro.dev/docs/cloud-sessions/), a CI container, any
-per-session MicroVM — are a good fit, because **the client needs no GraalVM or Mandrel toolchain**. Set:
+per-session MicroVM — are a good fit, and for `arm64` they are usually the *only* fit.
+
+**If the sandbox is `x86_64` and you cannot choose otherwise, `arm64` is not producible inside it.** GraalVM
+does not cross-compile, and QEMU emulation of a compile that saturates 4 vCPU for minutes is not a practical
+substitute. Kiro cloud sessions are `x86_64` in `us-east-1` with no architecture selection (observed, not
+published), which is the common case rather than an unusual one.
+
+Offloading also means **the client needs no GraalVM or Mandrel toolchain**. Set:
 
 ```
 -Dscaleout-build.forceRemote=true

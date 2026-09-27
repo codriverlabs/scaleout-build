@@ -569,9 +569,22 @@ here**; the GB-hour ratio and the concurrency multiplier are from documented quo
 
 [Kiro cloud sessions](https://kiro.dev/docs/cloud-sessions/) are this shape — an isolated sandbox is
 provisioned, repositories are cloned server-side, the agent runs builds and shell commands inside it, and
-it is torn down. The sandbox's vCPU and memory are not published.
+it is torn down.
 
-**The argument here is capability, not cost, and the difference matters.**
+**Observed specs, not published.** Kiro documents the sandbox lifecycle, network access, and environment
+configuration, but not its hardware. Inspection of a live session shows a VM with **Podman and root access,
+on `x86_64`, with no way to select a different architecture**, in `us-east-1` only. Treat this as an
+observation that could change, not a contract — but it is the situation as of 2026-09-27.
+
+**That makes `arm64` impossible rather than merely awkward.** This is the strongest form of the case for
+offloading, and it is not a cost argument at all. GraalVM does not cross-compile. Root and Podman do not
+help: the only local route to a foreign architecture is QEMU, and emulating a compile that saturates 4 vCPU
+for 3–5 minutes is not a workaround. Measured natively that compile is 3m06s–5m01s
+([`fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md)); the emulated
+figure was not measured here because the approach was never a candidate.
+
+So for anyone who wants to work in an agent sandbox *and* ship `arm64` native binaries, the sandbox alone
+cannot do it. **The rest of this section is about cost; this part is about whether the workflow exists.**
 
 Verified against this plugin's code: with `scaleout-build.forceRemote=true`, `splitLocalAndRemote` returns
 an empty local list, `NativeImageBuildExecutor` is never constructed, and no `native-image` command is
