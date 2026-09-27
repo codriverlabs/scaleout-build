@@ -220,6 +220,36 @@ anything.
 shutdown — `kill -9`, a closed terminal, a crash — a server-side reaper stops the tasks within the
 heartbeat grace period, so you are not billed indefinitely.
 
+## Running in an ephemeral agent sandbox
+
+Hosted agent sandboxes — [Kiro cloud sessions](https://kiro.dev/docs/cloud-sessions/), a CI container, any
+per-session MicroVM — are a good fit, because **the client needs no GraalVM or Mandrel toolchain**. Set:
+
+```
+-Dscaleout-build.forceRemote=true
+```
+
+Every cell then goes to the control plane and the local `native-image` path is never reached. The build
+environment lives in the agent container image in ECR, pinned and multi-arch, so the sandbox does not have
+to reproduce a toolchain it was never given.
+
+The sandbox needs:
+
+| | |
+|---|---|
+| Maven and a JDK | for the client and, with Quarkus, augmentation |
+| `scaleout-build.endpoint` | the control plane Function URL |
+| AWS credentials with `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` | set as sandbox environment variables |
+| Egress to the Function URL | it is a public HTTPS endpoint with `AWS_IAM` auth |
+
+**Deploy the control plane in the same region as the sandbox.** Otherwise every artifact download crosses a
+region boundary and is billed as inter-region transfer — about 256 MB per two-architecture build. Kiro cloud
+sessions run in `us-east-1` only.
+
+Cost and capability trade-offs for this topology are in
+[`COST_ANALYSIS.md`](COST_ANALYSIS.md) §8 — including what offloading does *not* buy, since hosted sandbox
+compute is often bundled into a subscription rather than billed separately.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

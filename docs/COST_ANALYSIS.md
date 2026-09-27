@@ -565,6 +565,55 @@ help with a session sized large enough to compile, because the envelope is still
 allocation still follows the memory. **The dollar figure depends on AgentCore consumption rates not verified
 here**; the GB-hour ratio and the concurrency multiplier are from documented quotas and measured usage.
 
+### A concrete instance: hosted agent sandboxes
+
+[Kiro cloud sessions](https://kiro.dev/docs/cloud-sessions/) are this shape — an isolated sandbox is
+provisioned, repositories are cloned server-side, the agent runs builds and shell commands inside it, and
+it is torn down. The sandbox's vCPU and memory are not published.
+
+**The argument here is capability, not cost, and the difference matters.**
+
+Verified against this plugin's code: with `scaleout-build.forceRemote=true`, `splitLocalAndRemote` returns
+an empty local list, `NativeImageBuildExecutor` is never constructed, and no `native-image` command is
+built. There is no upfront `GRAALVM_HOME` validation either. **The client needs Maven, a JDK, this plugin,
+and two IAM permissions — no GraalVM or Mandrel toolchain.** For Quarkus, `-Dquarkus.native.sources-only=true`
+produces `target/native-sources` without invoking `native-image`, so that path needs no toolchain either.
+
+What that buys in an ephemeral sandbox:
+
+- **No toolchain to provision per session.** A fresh sandbox would otherwise need a multi-hundred-megabyte
+  GraalVM install inside its setup-command budget, every session.
+- **The build environment is the agent container image**, pinned and multi-arch in ECR, rather than
+  something the sandbox must reproduce. That directly addresses the usual objection to cloud sandboxes —
+  that a customised local build environment is not present in a fresh one.
+- **No dependence on undocumented sandbox specs.** A `native-image` compile wants 5.3–5.6 GB and saturates
+  4 vCPU. Against an unpublished envelope that is a gamble; the offloading client's footprint is small and
+  known.
+- **Both architectures, concurrently.** A sandbox is one architecture and cannot cross-compile, so locally
+  the choice is one binary or none. Remotely both cells run in parallel: ~6 minutes for both.
+
+### What it does not buy, stated plainly
+
+- **It is not a cost saving on the hosted side.** Kiro's documentation is explicit that cloud sessions carry
+  *no separate charge for cloud compute*. Offloading therefore **adds** about $0.0130 per build to *your*
+  AWS bill; it does not remove a charge from somewhere else.
+- **It does not relieve a session concurrency cap.** Kiro caps concurrent sessions (10) rather than pooled
+  memory, so the 4× multiplier above **does not transfer**. That multiplier applies to a self-hosted fleet
+  on Lambda MicroVMs or AgentCore Runtime, where the account quota is pooled memory and agent size
+  therefore determines how many fit.
+- **It does not shorten the wall clock.** The agent streams logs and waits; a six-minute compile is still
+  six minutes of session.
+
+### Two operational prerequisites
+
+- The sandbox needs **AWS credentials carrying the two IAM permissions** and egress to the Function URL.
+  Kiro sandboxes support environment variables and setup commands, which is where that belongs.
+- **Co-locate the control plane with the sandbox.** Kiro cloud sessions run in `us-east-1` only; this
+  project's control plane is deployed in `eu-west-1`. Split across regions, every artifact download crosses
+  a region boundary and is billed as inter-region transfer on top of the build — roughly 256 MB per
+  two-architecture build, on measured artifact sizes. Deploying the control plane in the sandbox's region
+  avoids it. The rate is not quoted here because it was not verified.
+
 ### Why the architecture fits rather than merely costs less
 
 Isolation is needed where tenant state lives — the agent, holding a workspace and credentials. It is not
