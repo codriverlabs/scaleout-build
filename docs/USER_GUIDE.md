@@ -9,17 +9,20 @@ This guide is for people *using* the plugin. For how it works internally see
 
 ## What problem this solves
 
-GraalVM cannot cross-compile. A native image is built by, and for, the machine it runs on — so producing
-an `arm64` binary from an `x86_64` laptop means either QEMU emulation (slow enough to be impractical for
+GraalVM cannot cross-compile. A native image is built by, and for, the machine it runs on — so producing an
+`arm64` binary from an `x86_64` host means either QEMU emulation (slow enough to be impractical for
 `native-image`) or owning hardware for every target.
 
-This plugin computes a build matrix of *build kind × architecture*, runs locally whatever matches your
-host, and sends the rest to short-lived remote workers — one per cell, in parallel. Artifacts come back
-attached to your Maven build with per-architecture classifiers.
+This plugin computes a build matrix of *build kind × architecture*, runs locally whatever matches your host,
+and sends the rest to short-lived remote workers — one per cell, in parallel. Artifacts come back attached to
+your Maven build with per-architecture classifiers.
 
-**It is not a general build accelerator.** For a single architecture that matches your host, offloading is
-strictly slower and costs money: a local build has no upload, no image pull, and no provisioning delay.
-The plugin runs host-matching cells locally for exactly that reason.
+**It is not a general build accelerator.** For a single architecture matching your host, offloading is
+strictly slower and costs money: a local build has no upload, no image pull, and no provisioning delay. The
+plugin runs host-matching cells locally for exactly that reason.
+
+**Where it is the only option:** a hosted agent sandbox you do not control. See
+[Running in an ephemeral agent sandbox](#running-in-an-ephemeral-agent-sandbox).
 
 ## Prerequisites
 
@@ -32,12 +35,17 @@ The plugin runs host-matching cells locally for exactly that reason.
    lambda:InvokeFunction
    ```
 
-   No ECS, S3, CloudWatch, or ECR access. If you were previously given those for native builds, they can
-   be revoked.
-3. **Java 17+** to run Maven. The remote workers supply their own GraalVM, so you do **not** need
-   GraalVM or Mandrel installed unless you also want host-matching cells built locally.
+   No ECS, S3, CloudWatch, or ECR access. If you were previously given those for native builds, they can be
+   revoked.
+3. **Java 17+** to run Maven. The remote workers supply their own GraalVM, so you do **not** need GraalVM or
+   Mandrel installed — unless you also want host-matching cells built locally.
 
 ## Quickstart
+
+Three steps. Pick your framework's row in [Framework support](#framework-support) first, because two of them
+need one extra command.
+
+### 1. Add the plugin
 
 ```xml
 <plugin>
@@ -58,188 +66,177 @@ The plugin runs host-matching cells locally for exactly that reason.
             <architecture>x86_64</architecture>
             <architecture>arm64</architecture>
         </architectures>
-        <mainClass>com.example.Main</mainClass>
-        <imageName>my-app</imageName>
         <endpoint>https://REPLACE.lambda-url.eu-west-1.on.aws/</endpoint>
     </configuration>
 </plugin>
 ```
 
+### 2. Build
+
 ```bash
 mvn package
 ```
 
-Artifacts land in `target/scaleout-build/remote-artifacts/NATIVE-<ARCH>/`.
+### 3. Collect
 
-**Keep the endpoint out of your POM if the POM is shared.** Read it from a gitignored properties file
-instead — see [the example app](examples/scaleout-build-example-app) for the pattern, which uses
-`properties-maven-plugin` at the `validate` phase.
+Artifacts land in `target/scaleout-build/remote-artifacts/NATIVE-<ARCH>/` and are attached to the reactor with
+classifiers like `native-linux-arm64-my-app`.
+
+```bash
+file target/scaleout-build/remote-artifacts/NATIVE-ARM64/my-app
+# ELF 64-bit LSB executable, ARM aarch64, ...
+```
+
+**Keep the endpoint out of a shared POM.** Read it from a gitignored properties file instead — see
+[the example app](examples/scaleout-build-example-app) for the pattern, which uses `properties-maven-plugin`
+bound to `validate`.
 
 ## Framework support
 
-The plugin detects how your project builds and adapts. You do not choose a mode; you may need to make your
-framework emit its arguments first.
+The plugin detects how your project builds; you do not choose a mode. Some frameworks need one command first,
+to make them emit their `native-image` arguments instead of running the compile themselves.
 
-| Your project | What you do | Detected by |
-|---|---|---|
-| **Plain GraalVM** | nothing | no framework output found |
-| **Quarkus** | add two properties to the build (below) | `target/native-sources/` exists |
-| **Spring Boot AOT** | run `mvn native:write-args-file`, set `argsFileDirectory` | `argsFileDirectory` is set and exists |
-| **Helidon** | same as Spring Boot | same |
-
-### Why frameworks need an extra step
-
-A framework native build is not a plain `native-image` invocation. Quarkus augmentation, and Spring Boot's
-AOT processing, generate a *complete* command line — feature registrations, reflection and resource
-configuration, `--exclude-config` regexes, dozens of `-J-D` properties. None of that can be reconstructed
-from a classpath.
-
-So the plugin reuses the argument file your framework generated rather than writing its own. The extra step
-is what makes the framework emit that file instead of going straight to a binary.
-
-**If you skip it**, the plugin falls back to deriving arguments from your classpath. That does not error —
-it produces a binary that builds successfully and then misbehaves at runtime, because the generated
-configuration is missing. Follow the step for your framework.
+| Your project | Extra step | Detected by | Verified |
+|---|---|---|---|
+| **Plain GraalVM** | none | nothing else matched | Example app, both arches |
+| **Quarkus** | build with `sources-only` (below) | `target/native-sources/` exists | 3.39.4, 233 deps, both arches |
+| **Spring Boot AOT** | `mvn native:write-args-file` (below) | `argsFileDirectory` is set | Spring Boot 4.1.0, both arches |
+| **Helidon** | same as Spring Boot | `argsFileDirectory` is set | **Not tested** — same code path |
 
 ### Quarkus
+
+Make Quarkus emit sources rather than compile:
 
 ```bash
 mvn package -Dquarkus.native.enabled=true -Dquarkus.native.sources-only=true
 ```
 
-Verified against Quarkus 3.39.4. On older Quarkus (before roughly 3.9) the equivalent was
-`-Dquarkus.package.jar.type=native-sources`; current versions reject that outright.
-
-Leave `mainClass` and `imageName` unset — the generated argument file already names its own output.
+The plugin finds `target/native-sources/` on its own; no configuration needed.
 
 ### Spring Boot AOT and Helidon
 
-Both build through GraalVM's `native-maven-plugin`, which can write its arguments to a file:
+These build through `native-maven-plugin`, whose `write-args-file` goal is **not** bound to Spring Boot's
+`native` profile, so run it explicitly:
 
 ```bash
-mvn native:write-args-file
-mvn package -Dscaleout-build.argsFileDirectory=target/<where it wrote>
+mvn -Pnative package          # runs AOT processing
+mvn native:write-args-file    # writes target/native-image-<random>.args
+mvn scaleout-build:build -Dscaleout-build.argsFileDirectory=target
 ```
 
-**There is no default path, deliberately.** `write-args-file` takes its location from the
-`graalvm.native-image.args-file` property, and this path has not been verified end to end against a real
-Spring Boot or Helidon project. Guessing a default would fail silently by falling through to the derived
-strategy, so the plugin requires you to say where the file is. The directory must contain a file named
-`native-image.args`.
+`argsFileDirectory` has **no default** — the plugin refuses to guess, because a wrong guess would silently
+fall through to deriving arguments from the classpath and produce a binary that builds and then fails at run
+time.
 
-If you use this path, please report what worked — it is the one framework route without a real-project
-test behind it.
+The directory must contain exactly one `*.args` file. `write-args-file` uses a randomized name, so stale files
+accumulate across builds; the plugin refuses to choose rather than picking one.
 
-## Configuration reference
+That argfile is written for the machine that produced it — absolute paths throughout — so the plugin
+**rewrites** it: classpath jars into `lib/`, classpath *directories* staged as trees so
+`META-INF/native-image/` survives, `-H:ConfigurationFileDirectories` staged and rewritten, `-o` redirected
+into the staging output directory.
 
-### Required
+Verified against `spring-petclinic` (Spring Boot 4.1.0, `native-maven-plugin` 1.1.1) on the deployed control
+plane: 565 files staged, 0 absolute paths remaining, binaries of 210,767,112 B (`x86_64`) and 204,082,456 B
+(`arm64`); the `x86_64` binary starts AOT-processed in 0.293 s and serves its endpoints. Checked against a
+control build — the unmodified argfile run through `native-image` in a container on the same Mandrel 25.0.4.1 —
+which produced an identical-length binary behaving identically on every endpoint.
 
-| Parameter | Property | Notes |
-|---|---|---|
-| `endpoint` | `scaleout-build.endpoint` | Control plane Function URL. The signing region is parsed from the host, so there is no region to set. |
+> **One known upstream gap in petclinic specifically.** Its `/vets.html` fails with
+> `MissingReflectionRegistrationError` on `org.thymeleaf.expression.Numbers.sequence` — **identically in the
+> control build**, so it is a gap between Thymeleaf's published reachability metadata and what that
+> pagination template exercises, not something this plugin introduces.
 
-### Build matrix
+## Running in an ephemeral agent sandbox
 
-| Parameter | Property | Default | Notes |
-|---|---|---|---|
-| `buildKinds` | `scaleout-build.buildKinds` | `native` | `jvm`, `native`, `native-pgo-instrument`, `native-pgo-optimize` |
-| `architectures` | `scaleout-build.architectures` | host | `x86_64` (or `amd64`, `x64`), `arm64` (or `aarch64`) |
+Hosted agent sandboxes — [Kiro cloud sessions](https://kiro.dev/docs/cloud-sessions/), a CI container, any
+per-session MicroVM — are a good fit, and for `arm64` usually the *only* fit.
 
-The matrix is the cross-product. Two kinds × two architectures is four cells, four remote workers, running
-concurrently.
+**If the sandbox is `x86_64` and you cannot choose otherwise, `arm64` is not producible inside it.** GraalVM
+does not cross-compile, and QEMU emulation of a compile that saturates 4 vCPU for minutes is not a practical
+substitute. Kiro cloud sessions are `x86_64` in `us-east-1` with no architecture selection (observed, not
+published), which is the common case rather than an unusual one.
 
-### Build intent
+Offloading also means the client needs **no GraalVM or Mandrel toolchain**:
 
-| Parameter | Property | Default | Notes |
-|---|---|---|---|
-| `mainClass` | `scaleout-build.mainClass` | `Main-Class` manifest entry | Not needed for framework builds |
-| `imageName` | `scaleout-build.imageName` | — | Not needed for framework builds |
-| `nativeImageCommand` | `scaleout-build.nativeImageCommand` | `native-image` | |
-| `extraNativeImageArgs` | — | — | Appended to the `native-image` invocation |
-| `extraBuildArgs` | — | — | Appended to a *derived* argument file only |
-| `profilePath` | `scaleout-build.profilePath` | — | Required for `native-pgo-optimize`; uploaded as an input |
-| `argsFileDirectory` | `scaleout-build.argsFileDirectory` | — | See Spring Boot / Helidon above |
+```
+-Dscaleout-build.forceRemote=true
+```
 
-### Execution
+Every cell then goes to the control plane and the local `native-image` path is never reached. The build
+environment is the agent container image in ECR, pinned and multi-arch, so the sandbox does not have to
+reproduce a toolchain it was never given.
 
-| Parameter | Property | Default | Notes |
-|---|---|---|---|
-| `skip` | `scaleout-build.skip` | `false` | |
-| `forceRemote` | `scaleout-build.forceRemote` | `false` | Build host-matching cells remotely too |
-| `workDirectory` | `scaleout-build.workDirectory` | `target/scaleout-build` | Where artifacts are downloaded |
-| `timeoutMinutes` | `scaleout-build.timeoutMinutes` | `0` (server policy) | Per cell |
-| `overallTimeoutMinutes` | `scaleout-build.overallTimeoutMinutes` | `120` | Whole matrix |
-
-### Resource requests
-
-Requests, not settings: the server clamps them to its policy and logs the applied values, so a clamp is
-visible rather than silent.
-
-| Parameter | Property | Default |
-|---|---|---|
-| `requestedCpu` | `scaleout-build.requestedCpu` | `4096` (4 vCPU) |
-| `requestedMemory` | `scaleout-build.requestedMemory` | `8192` (8 GiB) |
-| `requestedEphemeralStorageGiB` | `scaleout-build.requestedEphemeralStorageGiB` | `0` (server default, 20 GiB) |
-
-Measured: `native-image` **saturates all 4 vCPU** regardless of project size, so reducing CPU lengthens
-builds proportionally — a latency trade, not reclaimed slack.
-
-Peak RSS is 5.3–5.6 GB for a 233-jar Quarkus application and 1.2 GB for a two-dependency one, which is why
-the default is 8 GiB (about 68% used, the smallest pairing Fargate allows with 4 vCPU). **4 GiB does not
-work** for a project of that size, and capping the builder's heap will not make it fit: peak RSS is
-dominated by native memory and the image heap being constructed, not the Java heap.
-
-The builder is given `-J-XX:MaxRAMPercentage=80` by default, which is read from the container's cgroup
-limit and so stays correct if you resize the task. Pass your own `-J-Xmx` or `-J-XX:MaxRAMPercentage` in
-`extraNativeImageArgs` to override it — later `-J` arguments win. Measured on a 233-jar application, the
-percentage form did roughly half the garbage collections and finished faster than an absolute `-J-Xmx6g`.
-
-See [`fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md).
-
-## What to expect
-
-From a real 233-jar Quarkus application, both architectures concurrently:
+The sandbox needs:
 
 | | |
 |---|---|
-| First build (uploads whole classpath) | ~54 MB uploaded |
-| Later builds | 1 input re-uploaded; the rest deduplicated |
-| Provisioning + image pull | ~20 s + ~8 s per worker |
-| `native-image` | ~3 min per cell |
-| Total wall clock | ~6 min for both |
+| Maven and a JDK 17+ | for the client and, with Quarkus, augmentation |
+| `scaleout-build.endpoint` | the control plane Function URL |
+| AWS credentials with the two IAM permissions | set as sandbox environment variables |
+| Egress to the Function URL | a public HTTPS endpoint with `AWS_IAM` auth |
 
-Dependency jars are content-addressed and stable between builds, so they upload once. Your own jar
-re-uploads every time — Maven embeds timestamps, so it is never byte-identical.
+**Deploy the control plane in the same region as the sandbox.** Otherwise every artifact download crosses a
+region boundary and is billed as inter-region transfer — about 256 MB per two-architecture build.
 
-Logs stream back live, labelled per cell. Long builds reconnect transparently; you do not need to do
-anything.
+Trade-offs for this topology, including what offloading does *not* save when sandbox compute is bundled into a
+subscription, are in [`COST_ANALYSIS.md`](COST_ANALYSIS.md) §8.
 
-## Cancelling
+## Configuration reference
 
-`Ctrl+C` cancels the remote build and stops the workers. If your client dies in a way that skips
-shutdown — `kill -9`, a closed terminal, a crash — a server-side reaper stops the tasks within the
-heartbeat grace period, so you are not billed indefinitely.
+Every parameter is settable as `-Dscaleout-build.<name>` or as a `<configuration>` element.
+
+| Property | Default | Purpose |
+|---|---|---|
+| `endpoint` | *required* | Control plane Function URL |
+| `buildKinds` | all | `jvm`, `native`, `native-pgo-instrument`, `native-pgo-optimize` |
+| `architectures` | host + others | `x86_64`, `arm64` |
+| `imageName` | `finalName` | Output binary name |
+| `mainClass` | from manifest | Required for plain GraalVM with no `Main-Class` |
+| `argsFileDirectory` | *none* | Required for Spring Boot AOT and Helidon |
+| `forceRemote` | `false` | Send every cell remotely, including host-matching ones |
+| `skip` | `false` | Skip the goal entirely |
+| `nativeImageCommand` | `native-image` | Local binary, for host-matching cells only |
+| `profilePath` | — | PGO profile, for `native-pgo-optimize` |
+| `workDirectory` | — | Local staging directory |
+| `timeoutMinutes` | `0` (none) | Per-cell timeout |
+| `overallTimeoutMinutes` | `120` | Whole-build timeout |
+| `requestedCpu` | `4096` | Worker vCPU units; 4096 = 4 vCPU |
+| `requestedMemory` | `8192` | Worker MiB. 8 GiB is a floor — 4 GiB OOMs on real projects |
+| `requestedEphemeralStorageGiB` | `0` | `0` means omit, which yields the free 20 GiB |
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `scaleout-build.endpoint is required` | Not set, or the properties file was not read | Check the value resolves; a shared POM needs `properties-maven-plugin` bound to `validate` |
+| `scaleout-build.endpoint is required` | Not set, or the properties file was not read | A shared POM needs `properties-maven-plugin` bound to `validate` |
 | `403` on the first call | Credentials lack `lambda:InvokeFunctionUrl` **and** `lambda:InvokeFunction` | Both are needed; the second is easy to miss |
-| Binary builds but fails at runtime, framework project | The extra step was skipped, so arguments were derived | Follow the framework step above |
-| `Found native-sources but no native-image.args` | An ordinary native build left the directory behind | Re-run with the sources-only properties |
-| `Cannot determine the main class` | No `Main-Class` manifest entry, plain GraalVM project | Set `mainClass` |
-| `Runtime classpath entry … is a directory` | A reactor dependency is not packaged | `mvn package` or `mvn install` the dependency first |
-| Cell fails, no obvious reason | The remote log is the record | Read the streamed output; the agent logs the full `native-image` invocation |
-| Build is slower than local | Host-matching cell offloaded | Remove `forceRemote` |
+| `contains no *.args file` | `write-args-file` was not run, or ran elsewhere | Run it, and point `argsFileDirectory` at its output directory |
+| `contains N *.args files` | Stale argfiles from earlier builds | Delete the old ones; the name is randomized so they accumulate |
+| `Found native-sources but no native-image.args` | An ordinary Quarkus native build left the directory behind | Re-run with the `sources-only` properties |
+| `Classpath entry … does not exist` | The argfile outlived a `mvn clean` | Re-run `native:write-args-file` after a full build |
+| `Cannot determine the main class` | Plain GraalVM project with no `Main-Class` manifest entry | Set `mainClass` |
+| `Runtime classpath entry … is a directory` | A reactor dependency is not packaged | `mvn package` or `mvn install` it first |
+| Binary builds, then fails at run time | Framework step skipped, so arguments were derived from the classpath | Follow the framework step above |
+| Build slower than local | A host-matching cell was offloaded | Remove `forceRemote` |
+| Cell fails with no obvious reason | The remote log is the record | Read the streamed output; the agent logs the full `native-image` invocation |
 
 ## Limits worth knowing
 
-- **One architecture matching your host is better built locally.** The plugin does this by default.
-- **`jvm` build kind does not need remote workers** — it produces an architecture-neutral jar. It exists
-  in the matrix for completeness.
-- **Artifact digests are not reproducible between runs** because Maven embeds timestamps in jars. Two
-  builds of identical source produce different digests at identical sizes. Don't use digests to verify a
-  remote build matches a local one; compare architecture, linker path, and execution.
-- **Spring Boot and Helidon are untested end to end.** The mechanism is in place and the configuration is
-  documented; nobody has run a real project through it yet.
+- **An architecture matching your host is better built locally.** The plugin does this by default; only
+  `forceRemote` overrides it.
+- **`jvm` build kind does not need remote workers** — it produces an architecture-neutral jar. It is in the
+  matrix for completeness.
+- **PGO does not parallelise within an architecture.** Instrument → run workload → optimize is inherently
+  ordered, so those cells are sequential per architecture and only concurrent across them.
+- **Do not compare binaries by digest.** `native-image` output is not bit-reproducible: two builds of
+  identical inputs with the same toolchain produced binaries of *exactly* the same length differing in
+  135,362,134 bytes, starting at the GNU build-id. Compare architecture, length, and behaviour instead.
+- **8 GiB of worker memory is a floor, not a preference.** Peak RSS is dominated by native memory and the
+  image heap rather than the Java heap, so capping the builder's heap does not reduce it; 4 GiB OOMs on a
+  233-dependency project.
+- **A Spot interruption fails the build.** There is no server-side retry — see
+  [`design/control-plane/HANDOVER.md`](design/control-plane/HANDOVER.md). Set
+  `-c fargateCapacityStrategy=on-demand-preferred` at deploy time where a lost build is expensive.
+- **Helidon is untested.** It shares the Spring Boot code path, which is verified, but no Helidon project has
+  been run through it.

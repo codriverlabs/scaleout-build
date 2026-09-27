@@ -21,7 +21,6 @@ import ai.codriverlabs.scaleoutbuild.ecs.CloudWatchLogTailer;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsClusterSettings;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsLaunchType;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsTaskLauncher;
-import ai.codriverlabs.scaleoutbuild.ecs.EcsTaskSupervisor;
 import ai.codriverlabs.scaleoutbuild.ecs.TaskDefinitionRegistrar;
 import ai.codriverlabs.scaleoutbuild.planner.InputPlanningException;
 import ai.codriverlabs.scaleoutbuild.planner.NativeImageInputPlan;
@@ -63,7 +62,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  * <p>Every requested cell whose architecture matches the host runs directly, in-process, via
  * {@link NativeImageBuildExecutor} — no AWS involved. Cells that don't match the host (and every
  * {@link BuildKind#JVM} cell needs no build at all — it is the project's already-packaged jar) each
- * get their own {@code RunTask} call and their own {@link EcsTaskSupervisor}, run concurrently
+ * are submitted to the control plane, which launches one task per cell, run concurrently
  * on a bounded thread pool sized to the number of remote cells.
  */
 @Mojo(name = "build", defaultPhase = LifecyclePhase.PACKAGE, requiresDependencyResolution = ResolutionScope.RUNTIME)

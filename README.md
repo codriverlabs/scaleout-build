@@ -14,6 +14,32 @@ short-lived remote workers, using S3 as a content-addressed staging layer for cl
 build outputs, and attaches the resulting binaries back to the reactor with per-architecture
 classifiers.
 
+### The case where there is no alternative
+
+"Own hardware for every target" assumes you control the machine. In a **hosted agent sandbox you do
+not** — and increasingly that is where builds run.
+
+Kiro cloud sessions, for example, provision an `x86_64` sandbox in `us-east-1` with **no way to select a
+different architecture** (observed, not published — Kiro documents the sandbox lifecycle but not its
+specs). So an `arm64` native binary is not slow to produce there, or expensive. It is **not producible at
+all**. Root access and Podman inside the sandbox do not change that: the only local route to a foreign
+architecture is QEMU, and emulating a compile that saturates 4 vCPU for 3–5 minutes is not a workaround.
+
+This plugin turns that from blocked into a configuration value:
+
+```
+-Dscaleout-build.forceRemote=true
+```
+
+The client then needs Maven, a JDK, this plugin, and two IAM permissions — **no GraalVM or Mandrel
+toolchain**, because the local `native-image` path is never reached. The build environment is the agent
+container image in ECR, pinned and multi-arch, so an ephemeral sandbox does not have to reproduce a
+toolchain it was never given.
+
+See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md#running-in-an-ephemeral-agent-sandbox) for the setup, and
+[`docs/COST_ANALYSIS.md`](docs/COST_ANALYSIS.md) §8 for what this does and does not save — hosted sandbox
+compute is often bundled into a subscription, so the honest claim is capability, not cost.
+
 ## Using it
 
 See the [**user guide**](docs/USER_GUIDE.md) for setup, framework-specific steps (Quarkus, Spring Boot AOT,

@@ -21,16 +21,31 @@ host-matching cell requires `scaleout-build.forceRemote`.
 The offload only pays for the architecture you don't own hardware for (GraalVM cannot
 cross-compile) and for running matrix cells concurrently.
 
+**The strongest case is many isolated agents.** Isolation removes the ability to amortise, so every agent
+in its own MicroVM must be sized for its peak — and a `native-image` build needs 5.3–5.6 GB. An agent that
+offloads needs a fraction of that, which moves a **capacity ceiling**, not just a bill: 200 concurrent
+agents within Lambda MicroVM's 400 GB account quota instead of 50, a 4× increase no budget can buy. Plus 4×
+less memory billed across a session that spends most of its time idle. See §8.
+
+**Against an always-on build box, the scale-out architecture wins by two orders of magnitude at ordinary
+volumes, on plain on-demand rates with no commitment.** A two-architecture setup of always-on machines is
+about $503/month before a single build; 100 builds a month through a small `t4g.large` client plus Fargate
+is **$2.04**. The always-on box only overtakes at roughly 600-800 builds a day, sustained. Full working
+in §7 — and note that a single x86_64 box cannot produce the arm64 binary at all, so the comparison is
+also one architecture against two.
+
 **The original non-obvious finding — that the SSE Lambda cost about as much as the Fargate compute it
 watched — no longer holds, and it is worth saying why it was wrong.** It rested on a 1024 MB function and
 an estimated 400-second build. Measured, the build is ~100 s per cell and the function is 256 MB native,
-so the relay is **$0.0005 of a $0.0075 build, about 7%**, against 49% for the two Fargate cells. §5 is
+so the relay is **$0.0018 of a $0.0130 real-project build, about 14%**, against 58% for the two Fargate
+cells. §5 is
 retained for its sizing levers but its premise is superseded by §4.
 
-**The live improvable line is Fargate memory, not the Lambda.** The task reserves 16 GiB and peaks at
-1179 MB — 7% — while saturating all four vCPU. That is a ~15% saving available on the largest line item,
-though not one to take on this evidence: see §4 for why the example app is the wrong thing to size
-against.
+**~~The live improvable line is Fargate memory~~ — resolved.** The task reserved 16 GiB and peaked at
+1179 MB on the example app, which looked like obvious waste. Measuring a real 233-jar project showed 5.2 GB
+instead, so the task is now **8 GiB** and there is little left to trim. That reversal is the most useful
+thing in this document: sizing against a trivial workload would have set up a failure on somebody's large
+project. See [`fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md).
 
 ## 2. What the code pins down
 
@@ -39,9 +54,9 @@ how the system might be deployed:
 
 | Parameter | Value | Source |
 |---|---|---|
-| Task size | 4 vCPU / 16 GiB | `BuildMojo` `requestedCpu=4096`, `requestedMemory=16384` |
+| Task size | **4 vCPU / 8 GiB** | `BuildMojo` `requestedCpu=4096`, `requestedMemory=8192`; server default `8192` |
 | Capacity provider | `FARGATE_SPOT` preferred, `FARGATE` fallback | `EcsTaskLauncher` |
-| Ephemeral storage | 20 GiB (included, unbilled) | `requestedEphemeralStorageGiB=0` |
+| Ephemeral storage | 20 GiB included, unbilled | `requestedEphemeralStorageGiB=0` — ECS rejects an explicit size below 21, so omitting it is how you get the free allowance |
 | Networking | public subnets, `natGateways(0)`, `assignPublicIp` | `ControlPlaneInfraStack` — one public IPv4 per task, no NAT gateway |
 | SSE Lambda | **384 MB** JVM / **256 MB** native, held open for the whole build | `memorySize(jvmMode ? 384 : 256)` — sized against measured usage, see [`lambda-resource-usage.md`](design/control-plane/lambda-resource-usage.md) |
 | SSE poll cadence | 3 s (`FilterLogEvents` + `refreshFromEcs` per tick) | `LogStreamResource.POLL_INTERVAL` |
@@ -74,7 +89,17 @@ All rates `eu-west-1`, retrieved from the AWS Price List API and from the Saving
 `DescribeSavingsPlansOfferingRates` API (Compute Savings Plan, No Upfront), September 2026.
 Re-verify before reusing — AWS republishes the price list continuously.
 
-### Fargate, 4 vCPU / 16 GiB ARM64
+### Fargate, 4 vCPU ARM64
+
+Per-unit rates are the same at any size; the task rate depends on the memory paired with the vCPU. The
+**8 GiB** row is the current default; 16 GiB is retained because earlier sections were computed with it.
+
+| Task size | arm64 on-demand | x86_64 on-demand |
+|---|---|---|
+| **4 vCPU / 8 GiB** | **$0.15800/h** | **$0.19748/h** |
+| 4 vCPU / 16 GiB | $0.18648/h | $0.23304/h |
+
+### Fargate per-unit, 4 vCPU / 16 GiB ARM64
 
 | Pricing | Per vCPU-h | Per GB-h | Task rate | vs. on-demand |
 |---|---|---|---|---|
@@ -129,20 +154,36 @@ arm64 cell is cheaper than the x86_64 cell despite taking longer.
 
 ### Per build, both cells, `FARGATE_SPOT`
 
-| Line item | Cost | Note |
-|---|---|---|
-| Fargate `arm64` cell, 4 vCPU / 16 GiB, 115 s | $0.0018 | $0.18648/h on-demand, −70% Spot |
-| Fargate `x86_64` cell, 4 vCPU / 16 GiB, 99 s | $0.0019 | $0.23304/h on-demand, −70% Spot |
-| SSE Lambda, native 256 MB **arm64**, ~140 s | $0.0005 | one stream for both cells |
-| Public IPv4, two tasks × ~105 s | $0.0003 | $0.005/h each |
-| CloudWatch Logs, DynamoDB, S3 staging | ~$0.0030 | unchanged from the estimate below; not independently measured |
-| **Total, Spot path** | **≈ $0.0075** | |
-| *Fargate on-demand instead* | *$0.0124* | |
-| **Total, on-demand fallback** | **≈ $0.0162** | |
+Two workloads, because they differ by 2.4× and neither is "typical". Task rate is **4 vCPU / 8 GiB** —
+$0.15800/h arm64, $0.19748/h x86_64 — which is the current default, down from 16 GiB.
 
-So a two-architecture build costs roughly **$0.008 on Spot**, against the $0.012 the estimate below
-predicted for a single cell. Two tasks at a quarter of the assumed duration is cheaper than one task at
-the assumed duration.
+| Line item | Example app (2 jars) | Real Quarkus (233 jars) |
+|---|---|---|
+| Fargate `arm64` cell | $0.0015 (115 s) | $0.0034 (258 s) |
+| Fargate `x86_64` cell | $0.0016 (99 s) | $0.0041 (250 s) |
+| **SSE Lambda** — `jvm` 384 MB arm64, *as deployed* | $0.0007 (140 s) | $0.0018 (360 s) |
+| Public IPv4, two tasks | $0.0003 | $0.0007 |
+| CloudWatch Logs, DynamoDB, S3 staging | ~$0.0030 | ~$0.0030 |
+| **Total, Spot path** | **≈ $0.0071** | **≈ $0.0130** |
+| *Fargate on-demand instead* | *$0.0105* | *$0.0250* |
+| **Total, on-demand** | **≈ $0.0145** | **≈ $0.0305** |
+
+The SSE Lambda line is priced for the **deployed** configuration, `jvm/arm64` at 384 MB, rather than the
+cheapest available. The alternatives, for the real project's 360 s stream:
+
+| Service mode | Lambda line | Note |
+|---|---|---|
+| `jvm` 384 MB arm64 | $0.0018 | deployed today; no GraalVM toolchain needed |
+| `native` 256 MB arm64 | $0.0012 | cheapest, but needs an arm64 runner to build |
+| `native` 256 MB x86_64 | $0.0015 | what a local native build from an x86_64 workstation produces |
+
+So switching to native saves about **$0.0006 per build** on a $0.013 build — roughly 5%. Worth having,
+not worth contorting a deployment for; the real reason to prefer native is the 5× faster cold start
+(441 ms against 2345 ms), which is a latency property rather than a cost one. Figures in
+[`lambda-resource-usage.md`](design/control-plane/lambda-resource-usage.md).
+
+**The Lambda is 14% of a real build and 10% of a trivial one.** The two Fargate cells are 58% and 44%
+respectively. Earlier drafts of this document had that relationship inverted — see §5.
 
 ### Lambda architecture: arm64 is the target
 
@@ -154,16 +195,23 @@ rather than a code change.
 
 JVM mode is architecture-neutral bytecode and already deploys arm64.
 
-### The memory provision is the open question, not the vCPU
+### The memory provision: asked, answered, and the answer reversed the conclusion
 
-Container Insights over these tasks: **CPU peaks at 4096 of 4096 reserved — saturated** — while **memory
-peaks at 1179 MB of 16384 reserved, 7%**. Fargate bills both dimensions independently.
+Container Insights: **CPU peaks at 4096 of 4096 reserved — saturated at any project size**, so 4 vCPU is
+doing real work and reducing it lengthens every build proportionally.
 
-Dropping to the smallest legal pairing for 4 vCPU (8 GiB) would cut the task rate ~15%, taking the Spot
-total to about $0.0031 for both cells. **It has not been changed**, because the example app's classpath is
-two jars and `native-image` memory scales with application size — 16 GiB is provisioned for a real project
-with hundreds of dependencies, which this measurement does not exercise. The 7% figure says the example is
-small, not that the provision is wrong.
+Memory was the open question. On the example app it peaked at 1179 MB of 16384 reserved — 7%, which looked
+like obvious waste worth ~15% of the largest line item. It was deliberately **not** cut on that evidence,
+because `native-image` memory scales with application size and the example has two dependencies.
+
+Re-measuring a real 233-jar project gave **5.2 GB, 4.5× more**. The task is now **8 GiB**, the smallest
+pairing Fargate allows with 4 vCPU, running at about 68% with ~2.5 GB spare. There is little left to trim,
+and nothing below 8 GiB is available: peak RSS is dominated by native memory and the image heap being
+constructed rather than the Java heap, so capping the builder's heap does not move it.
+
+Declining to act on the 7% reading was therefore the right call — trimming to 8 GiB *on that basis* would
+have been the same number reached for the wrong reason, and the next size down would have failed on
+somebody's large project.
 
 ## 4b. Original estimate (superseded by §4)
 
@@ -216,11 +264,11 @@ improves both simultaneously. That makes agent image size a cost lever, not just
 ## 5. SSE Lambda sizing levers (premise superseded by §4)
 
 > Written when the relay was 1024 MB and the build was assumed to run 400 s, making it ~34% of the bill.
-> Measured, it is **$0.0005 of $0.0075 — about 7%** — so the levers below are real but no longer the
+> Measured, it is **$0.0018 of $0.0130 — about 14%** — so the levers below are real but no longer the
 > priority. Retained because the second one, the poll interval, has a DynamoDB consequence that is
 > independent of Lambda cost.
 
-$0.0005 of a $0.0075 build — about **7%**, down from 34% before the function was resized and the window
+$0.0018 of a $0.0130 build — about **14%**, down from 34% before the function was resized and the window
 measured — is a Lambda holding a connection open and running a
 3-second `FilterLogEvents` + `refreshFromEcs` loop. Two changes, neither of which touches the wire
 contract in `scaleout-build-control-plane-api`:
@@ -338,7 +386,85 @@ change and no
 new failure modes. That is a ~$0.004 saving — worth doing because it is two configuration values,
 not because it is material money.
 
-## 7. Versus EC2, with Compute Savings Plans
+## 7. Versus an always-on box, on plain on-demand rates
+
+The comparison that matters for a decision, and the one §7 did not make: §7 priced an always-on
+`m7g.xlarge` against a per-build cost, using Savings Plans. Two problems with that as a decision aid — it
+compares a box sized for *building* against the scale-out architecture, when the whole point is that the
+client does not need to build; and Savings Plans require a one- or three-year commitment, which is not the
+position most people are in when they first look at this.
+
+**All figures below are plain on-demand, no commitment** — the saving available today, without signing
+anything. Verified against the Price List API for
+`eu-west-1` on 2026-09-27. Savings Plans reduce every EC2 row by roughly 24% (1-year) or 47% (3-year), and
+Fargate by about 21% or 46%, so the ranking does not change — the numbers here are the ones available
+immediately.
+
+### The machines
+
+| Instance | vCPU / RAM | On-demand | Always-on monthly (730 h) |
+|---|---|---|---|
+| `r6a.2xlarge` — a developer workstation of the size this project was developed on | 8 / 64 GiB | $0.5076/h | **$370.55** |
+| `r6a.xlarge` | 4 / 32 GiB | $0.2538/h | $185.27 |
+| `m7g.xlarge` — §7's build box | 4 / 16 GiB | $0.1819/h | $132.79 |
+| **`t4g.large` — enough to run Maven and this plugin** | 2 / 8 GiB | $0.0736/h | **$53.73** |
+| `t4g.medium` | 2 / 4 GiB | $0.0368/h | $26.86 |
+
+`t4g.large` is the client recommendation, at 2 vCPU / 8 GiB: the same envelope that makes AgentCore Runtime
+viable for the client (see
+[`microvm-platform-fit.md`](design/control-plane/microvm-platform-fit.md)). `t4g.medium`'s 4 GiB is likely
+too tight for Quarkus augmentation of a 233-jar application, which is an ordinary Maven JVM but not a small
+one — untested, so not recommended.
+
+### Cost per two-architecture build
+
+| | |
+|---|---|
+| `t4g.large` client, for a ~6 minute build | $0.0074 |
+| Fargate Spot, both cells | $0.0130 |
+| **Total, client billed only while building** | **$0.0204** |
+| *with Fargate on-demand instead of Spot* | *$0.0379* |
+
+### Monthly totals
+
+| Builds/month | Client on-demand + Fargate | Client always-on + Fargate | `r6a.2xlarge` always-on |
+|---|---|---|---|
+| 10 | **$0.20** | $53.86 | $370.55 |
+| 50 | **$1.02** | $54.38 | $370.55 |
+| 100 | **$2.04** | $55.03 | $370.55 |
+| 500 | **$10.18** | $60.23 | $370.55 |
+| 1,000 | **$20.36** | $66.73 | $370.55 |
+| 5,000 | **$101.80** | $118.73 | $370.55 |
+
+The always-on box costs the same whether you build once a month or five thousand times. Scale-out
+overtakes it at about **24,000 builds/month** with an always-on client, or **18,000** if the client is
+billed only while building — roughly 600–800 builds a day, sustained.
+
+### The argument that is not about cost
+
+A single x86_64 box **cannot produce the arm64 binary at all**. GraalVM does not cross-compile, so the
+alternatives are QEMU emulation — impractical for a `native-image` compile — or a second machine. An
+honest comparison of the always-on box against scale-out is therefore between *one architecture* and
+*two*, and the $370.55 buys the lesser capability.
+
+So a two-architecture always-on setup is $370.55 for the x86_64 box plus an arm64 one. Pairing it with the
+`m7g.xlarge` priced above gives **$503.34/month** before anyone has run a single build — against $0.20 for
+ten builds on the scale-out path.
+
+### Where the always-on box still wins
+
+- **Sustained very high volume** — past roughly 600 builds/day the always-on box is cheaper, and it has no
+  per-build provisioning or image-pull overhead.
+- **Latency on small projects.** Measured on the example app: local compile 40–55 s, against ~100 s billed
+  Fargate time including ~20 s provisioning and ~8 s image pull. For a trivial project the offload is
+  slower, which is why the plugin runs host-matching cells locally by default.
+- **No network dependency.** A build that cannot reach the control plane cannot proceed.
+
+## 7b. Versus EC2, with Compute Savings Plans
+
+> §7 above makes the same comparison on plain on-demand rates, against a correctly-sized client. This
+> section is retained for its Savings Plan figures, which apply a further ~24% (1-year) or ~47% (3-year) to
+> every EC2 row.
 
 ### Ephemeral instance per build
 
@@ -352,16 +478,16 @@ Launch, build, terminate. 400 s of work plus EC2 boot and a Docker pull ≈ 550 
 | Log streaming / orchestration (still needed) | $0.0005 |
 | **Total** | **≈ $0.023** |
 
-**Loses to Fargate Spot at $0.0075**, and you inherit AMI patching plus a launch/terminate
+**Loses to Fargate Spot at $0.0130** (real-project build), and you inherit AMI patching plus a launch/terminate
 orchestrator the current design does not need.
 
 ### Always-on build box
 
-| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.0075/build |
+| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.0130/build |
 |---|---|---|
-| On-demand | $132.79 | ~17,700 builds/month |
-| Compute SP 1 yr | $100.81 | **~13,400 builds/month (~450/day)** |
-| Compute SP 3 yr | $69.79 | ~9,300 builds/month (~310/day) |
+| On-demand | $132.79 | ~10,200 builds/month |
+| Compute SP 1 yr | $100.81 | **~7,750 builds/month (~260/day)** |
+| Compute SP 3 yr | $69.79 | ~5,370 builds/month (~180/day) |
 
 Below those volumes the dedicated box loses on cost, and it additionally serialises the concurrent matrix
 cells that Fargate runs in parallel — which is the point of the offload, not a side benefit. The
@@ -384,7 +510,135 @@ the account has bought. That is the right default for an account with no commitm
 one for an account with an underconsumed commitment — which argues for making the capacity
 provider strategy configurable rather than hardcoding Spot-first.
 
-## 8. Where the offload actually pays
+## 8. Isolated agents: the case where the saving multiplies
+
+The use cases above assume one client. The one that changes the economics is **many isolated agents**, each
+in its own MicroVM, each occasionally needing a native build — an AI agent working on a codebase, a
+multi-tenant CI executor, a per-session sandbox.
+
+Isolation is the point of that topology: hardware-enforced separation per tenant or session, which is
+exactly what you cannot get by sharing one build box. The problem is that isolation removes the ability to
+amortise, so **every** agent must be sized for its peak.
+
+### Sizing every agent for a compile it rarely runs
+
+Measured, a `native-image` build of a 233-jar application needs 5.3–5.6 GB peak RSS and saturates 4 vCPU.
+An agent that compiles in-session must therefore be provisioned for that — on AgentCore Runtime that means
+the 2 vCPU / 8 GB session ceiling, and at 2 vCPU the compile takes roughly twice as long.
+
+An agent that offloads needs only enough to run Maven and this plugin: resolve a classpath, run framework
+augmentation, upload inputs, hold an SSE connection, download artifacts. That is a small envelope, and the
+compile burst goes to shared Fargate capacity billed per build.
+
+### Consequence 1: concurrency within a fixed quota
+
+Lambda MicroVM account memory is a **pooled quota across `RUNNING` and `SUSPENDED` instances**
+([quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html)) — so a suspended agent
+still consumes it.
+
+| Region group | Quota | Agents at 8 GB (compiles locally) | Agents at 2 GB (offloads) |
+|---|---|---|---|
+| Most regions | 400 GB | **50** concurrent | **200** concurrent |
+| `us-east-1`, `us-west-2`, `us-east-2`, `ap-northeast-1` | 1,024 GB | 128 concurrent | 512 concurrent |
+
+**A 4× increase in concurrent isolated agents within the same account quota**, burstable to 4× that again.
+This is not a cost saving — it is a capacity ceiling moving, and no amount of budget raises it without a
+quota increase request.
+
+### Consequence 2: the session pays for its envelope throughout
+
+An agent session runs up to 8 hours and compiles for minutes of it. Sizing the session for the compile
+means paying build-sized memory for the whole session:
+
+| | Session envelope | Memory billed for a 60-minute session |
+|---|---|---|
+| Compiles in-session | 8 GB | 8.0 GB-hours |
+| Offloads | 2 GB | **2.0 GB-hours** |
+
+For a session doing three 6-minute builds — 30% of the hour compiling — that is **4× less memory billed**,
+plus $0.0130 per build on Fargate Spot. The ratio improves as the session gets longer or builds get rarer,
+which is the normal shape for an agent that spends most of its time waiting on a model or a human.
+
+AgentCore Runtime bills CPU and memory consumption per second and reclaims idle memory after 120 seconds
+([pricing](https://aws.amazon.com/bedrock/agentcore/pricing/)), which softens this — but reclamation cannot
+help with a session sized large enough to compile, because the envelope is still provisioned and the CPU
+allocation still follows the memory. **The dollar figure depends on AgentCore consumption rates not verified
+here**; the GB-hour ratio and the concurrency multiplier are from documented quotas and measured usage.
+
+### A concrete instance: hosted agent sandboxes
+
+[Kiro cloud sessions](https://kiro.dev/docs/cloud-sessions/) are this shape — an isolated sandbox is
+provisioned, repositories are cloned server-side, the agent runs builds and shell commands inside it, and
+it is torn down.
+
+**Observed specs, not published.** Kiro documents the sandbox lifecycle, network access, and environment
+configuration, but not its hardware. Inspection of a live session shows a VM with **Podman and root access,
+on `x86_64`, with no way to select a different architecture**, in `us-east-1` only. Treat this as an
+observation that could change, not a contract — but it is the situation as of 2026-09-27.
+
+**That makes `arm64` impossible rather than merely awkward.** This is the strongest form of the case for
+offloading, and it is not a cost argument at all. GraalVM does not cross-compile. Root and Podman do not
+help: the only local route to a foreign architecture is QEMU, and emulating a compile that saturates 4 vCPU
+for 3–5 minutes is not a workaround. Measured natively that compile is 3m06s–5m01s
+([`fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md)); the emulated
+figure was not measured here because the approach was never a candidate.
+
+So for anyone who wants to work in an agent sandbox *and* ship `arm64` native binaries, the sandbox alone
+cannot do it. **The rest of this section is about cost; this part is about whether the workflow exists.**
+
+Verified against this plugin's code: with `scaleout-build.forceRemote=true`, `splitLocalAndRemote` returns
+an empty local list, `NativeImageBuildExecutor` is never constructed, and no `native-image` command is
+built. There is no upfront `GRAALVM_HOME` validation either. **The client needs Maven, a JDK, this plugin,
+and two IAM permissions — no GraalVM or Mandrel toolchain.** For Quarkus, `-Dquarkus.native.sources-only=true`
+produces `target/native-sources` without invoking `native-image`, so that path needs no toolchain either.
+
+What that buys in an ephemeral sandbox:
+
+- **No toolchain to provision per session.** A fresh sandbox would otherwise need a multi-hundred-megabyte
+  GraalVM install inside its setup-command budget, every session.
+- **The build environment is the agent container image**, pinned and multi-arch in ECR, rather than
+  something the sandbox must reproduce. That directly addresses the usual objection to cloud sandboxes —
+  that a customised local build environment is not present in a fresh one.
+- **No dependence on undocumented sandbox specs.** A `native-image` compile wants 5.3–5.6 GB and saturates
+  4 vCPU. Against an unpublished envelope that is a gamble; the offloading client's footprint is small and
+  known.
+- **Both architectures, concurrently.** A sandbox is one architecture and cannot cross-compile, so locally
+  the choice is one binary or none. Remotely both cells run in parallel: ~6 minutes for both.
+
+### What it does not buy, stated plainly
+
+- **It is not a cost saving on the hosted side.** Kiro's documentation is explicit that cloud sessions carry
+  *no separate charge for cloud compute*. Offloading therefore **adds** about $0.0130 per build to *your*
+  AWS bill; it does not remove a charge from somewhere else.
+- **It does not relieve a session concurrency cap.** Kiro caps concurrent sessions (10) rather than pooled
+  memory, so the 4× multiplier above **does not transfer**. That multiplier applies to a self-hosted fleet
+  on Lambda MicroVMs or AgentCore Runtime, where the account quota is pooled memory and agent size
+  therefore determines how many fit.
+- **It does not shorten the wall clock.** The agent streams logs and waits; a six-minute compile is still
+  six minutes of session.
+
+### Two operational prerequisites
+
+- The sandbox needs **AWS credentials carrying the two IAM permissions** and egress to the Function URL.
+  Kiro sandboxes support environment variables and setup commands, which is where that belongs.
+- **Co-locate the control plane with the sandbox.** Kiro cloud sessions run in `us-east-1` only; this
+  project's control plane is deployed in `eu-west-1`. Split across regions, every artifact download crosses
+  a region boundary and is billed as inter-region transfer on top of the build — roughly 256 MB per
+  two-architecture build, on measured artifact sizes. Deploying the control plane in the sandbox's region
+  avoids it. The rate is not quoted here because it was not verified.
+
+### Why the architecture fits rather than merely costs less
+
+Isolation is needed where tenant state lives — the agent, holding a workspace and credentials. It is not
+needed for the compile, which is stateless: inputs in, binary out, content-addressed, no tenant context
+beyond the per-owner prefix the control plane already enforces
+([`storage-layout-and-isolation.md`](design/control-plane/storage-layout-and-isolation.md)). A Fargate task
+per cell is itself a fresh container, so the offload does not weaken isolation; it moves the expensive part
+to where sharing is safe.
+
+Which is the argument in one line: **isolate what holds state, pool what does not.**
+
+## 9. Where the offload actually pays
 
 Not on cost per build for a host-matching single architecture. On the two things that cannot be
 bought locally:
@@ -397,7 +651,7 @@ bought locally:
 At ~1.6¢ per cell, compute cost is negligible against a developer's 5–7 minutes of wall clock. The
 architecture-coverage question, not the cost question, is where the value sits.
 
-## 9. Assumptions, restated
+## 10. Assumptions, restated
 
 Figures above that are **retrieved**: all Fargate on-demand rates (ARM and x86_64, vCPU and memory), all
 Lambda rates (ARM and x86_64), all EC2 on-demand rates, all Compute Savings Plan rates, and every
@@ -410,6 +664,16 @@ Lambda memory, duration and cold start in both modes.
 Figures that are **assumed and should be measured**:
 
 - Fargate Spot discount (−70% used; AWS publishes "up to 70%"). Not available from any pricing API.
+- **That the Spot path is the one actually taken.** `spot-preferred` is the default, on the basis that a
+  3–5 minute build rarely overlaps a reclamation. Observed: 20 tasks during development, zero
+  interruptions.
+
+  **Being wrong costs the whole build, not a relaunch.** The control plane does not retry an interrupted
+  task — `refreshFromEcs` marks the cell `FAILED` with the stopped reason. So the on-demand row above is
+  not a worst case that happens automatically; it is what you pay by choosing
+  `-c fargateCapacityStrategy=on-demand-preferred` up front. Deployments where a lost build is expensive
+  should do that rather than rely on a retry that does not exist. See
+  [`design/control-plane/HANDOVER.md`](design/control-plane/HANDOVER.md) for the gap.
 - ~~400 s billed task window for a 300 s compile — driven by agent image pull time, which nothing in
   the repository records.~~ **Now measured** (§4): 96–122 s per task, with an 8–9 s pull. The estimate was
   high by roughly 3.5×, mostly because it assumed a 60–90 s pull. See
@@ -418,8 +682,9 @@ Figures that are **assumed and should be measured**:
   measured; it is the one Lambda in the stack that `scripts/lambda-usage.sh` does not cover.
 - Whether these figures hold for a realistic project. Everything here is the example app, whose classpath
   is two jars. A build with hundreds of dependencies will upload more inputs, hold more memory during
-  `native-image`, and compile for longer — which is precisely why the 16 GiB task memory has not been
-  trimmed on a 7% utilisation reading.
+  `native-image`, and compile for longer. This was the reason not to trim task memory on a 7% reading, and
+  re-measuring against a real project confirmed it: 5.2 GB rather than 1.2 GB, so the task settled at
+  8 GiB rather than the 8 GiB minimum-for-4-vCPU being a lucky guess.
 - CloudWatch Logs / DynamoDB / S3 lumped at ~$0.003. Individually sub-cent; the S3 component is
   near-zero on repeat builds because staging is content-addressed (see
   `docs/design/control-plane/storage-layout-and-isolation.md`).

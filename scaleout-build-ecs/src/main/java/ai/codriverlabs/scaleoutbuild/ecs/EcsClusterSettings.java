@@ -88,7 +88,21 @@ public record EcsClusterSettings(
         String capacityProviderName,
         String logGroupName,
         String region,
-        boolean agentUsesDirectS3Io) {
+        boolean agentUsesDirectS3Io,
+        FargateCapacityStrategy fargateCapacityStrategy) {
+
+    /** Defaults the capacity strategy, for callers that do not care which Fargate capacity is used. */
+    public EcsClusterSettings(EcsLaunchType launchType, String clusterArn, List<String> subnetIds,
+                              List<String> securityGroupIds, boolean assignPublicIp,
+                              String executionRoleArn, String taskRoleArn, String s3FilesFileSystemArn,
+                              String s3FilesRootDirectory, String s3FilesAccessPointArn,
+                              String ec2HostMountPath, String capacityProviderName, String logGroupName,
+                              String region, boolean agentUsesDirectS3Io) {
+        this(launchType, clusterArn, subnetIds, securityGroupIds, assignPublicIp, executionRoleArn,
+                taskRoleArn, s3FilesFileSystemArn, s3FilesRootDirectory, s3FilesAccessPointArn,
+                ec2HostMountPath, capacityProviderName, logGroupName, region, agentUsesDirectS3Io,
+                FargateCapacityStrategy.SPOT_PREFERRED);
+    }
 
     public EcsClusterSettings(EcsLaunchType launchType, String clusterArn, List<String> subnetIds,
                               List<String> securityGroupIds, boolean assignPublicIp,
@@ -96,7 +110,8 @@ public record EcsClusterSettings(
                               String s3FilesFileSystemArn, String s3FilesRootDirectory,
                               String s3FilesAccessPointArn, String ec2HostMountPath,
                               String capacityProviderName, String logGroupName, String region,
-                              boolean agentUsesDirectS3Io) {
+                              boolean agentUsesDirectS3Io,
+        FargateCapacityStrategy fargateCapacityStrategy) {
         this.launchType = Objects.requireNonNull(launchType, "launchType");
         this.clusterArn = requireNonBlank(clusterArn, "clusterArn");
         this.subnetIds = requireNonEmpty(subnetIds, "subnetIds");
@@ -137,6 +152,10 @@ public record EcsClusterSettings(
             this.s3FilesAccessPointArn = null;
             this.ec2HostMountPath = requireNonBlank(ec2HostMountPath, "ec2HostMountPath");
         }
+
+        // Null-tolerant: only FARGATE consults it, and a null there means "the default preset".
+        this.fargateCapacityStrategy = fargateCapacityStrategy == null
+                ? FargateCapacityStrategy.SPOT_PREFERRED : fargateCapacityStrategy;
 
         if (launchType == EcsLaunchType.MANAGED_INSTANCES) {
             this.capacityProviderName = requireNonBlank(capacityProviderName, "capacityProviderName");

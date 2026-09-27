@@ -15,6 +15,7 @@ Delete this file once the outstanding items are closed; it is a snapshot, not a 
 | Runtime mode | **`jvm/arm64`, 384 MB** (last deployed 2026-09-26 20:05 UTC) |
 | Native mode | works and was verified end to end, but is **not currently deployed** — see below |
 | Task defaults | 4 vCPU, **8 GiB**, ephemeral storage omitted (Fargate's included 20 GiB) |
+| Fargate capacity | `spot-preferred` (default); set with `cdk deploy -c fargateCapacityStrategy=…` |
 | Endpoint | `https://26usidrly3gc4uo4b2i6fcp5ui0njbjo.lambda-url.eu-west-1.on.aws/` (also in SSM at `/scaleout-build/control-plane/endpoint`) |
 | Agent image | `864899852480.dkr.ecr.eu-west-1.amazonaws.com/scaleout-build-agent:latest`, multi-arch, verified both arches |
 
@@ -184,7 +185,32 @@ probe fails misleadingly:
 mvn -U dependency:get -Dartifact=software.amazon.awssdk:bom:2.55.2 -Dpackaging=pom -Dtransitive=false
 ```
 
-### 4. MicroVM backend is designed, not built
+### 4. A Spot interruption fails the build; there is no server-side retry
+
+Found by asking where `EcsTaskSupervisor` actually runs. It does not: the control plane uses only its
+static `logStreamNameFor` helper. The supervision loop — which relaunches on interruption and escalates to
+on-demand after two — belonged to the deleted direct-ECS path.
+
+Evidence that the retry was intended and not carried over:
+
+- `BuildService` always passes `preferOnDemand=false` to `runTask`; nothing passes `true`.
+- `BuildRecord.CellRecord.spotInterruptions` exists with a setter that is never called.
+- `BuildMojo` still imports `EcsTaskSupervisor` without using it, and its class javadoc still says each
+  cell gets "its own `EcsTaskSupervisor`", which was true only of the direct path.
+
+So `refreshFromEcs` sees a stopped task with a non-zero exit code and marks the cell `FAILED` with the
+stopped reason. A reclamation at minute four of a five-minute compile loses the build.
+
+The default is still `spot-preferred`, and the reasoning holds — the window is short and 20 observed tasks
+saw no interruption. What changes is the consequence of being unlucky, and deployments that cannot absorb
+a lost build should set `-c fargateCapacityStrategy=on-demand-preferred` rather than rely on a retry that
+does not run.
+
+Adding server-side retry is the real fix and is not small: a relaunched task has a new task ARN and a new
+log stream, so `LogStreamResource`'s per-cell watermarks and the SSE stream both need to follow it — which
+is the same hazard commit `7782771` addressed, in a new place.
+
+### 5. MicroVM backend is designed, not built
 
 Two documents, no code: [`microvm-platform-fit.md`](microvm-platform-fit.md) for platform limits and the
 client/worker split, [`microvm-build-backend.md`](microvm-build-backend.md) for the design.
@@ -221,6 +247,10 @@ which could sink it.
 * **ECS rejects an explicit ephemeral storage size below 21 GiB** — `EphemeralStorage size should be at
   least 21`. Fargate's included 20 GiB is what you get by *omitting* the field, not by requesting it. The
   default is 0 for that reason, and `ResourcePolicy` maps any request of 1–20 onto 0.
+* **Fargate capacity is server policy, not a client parameter.** `spot-preferred`,
+  `on-demand-preferred`, `spot-only`, `on-demand-only`. A client that could demand on-demand capacity
+  could raise everyone else's bill — the same reasoning that removed `launchType` from the plugin.
+  `spot-only` is a cost ceiling that escalation deliberately will not breach.
 * **`native-image` peak RSS is not governed by the Java heap.** It is ~5.4 GB for a 233-jar application
   whether or not `-J-Xmx` is set, because it is dominated by native memory and the image heap being
   constructed. 8 GiB is the floor for that class of project; you cannot configure your way below it.

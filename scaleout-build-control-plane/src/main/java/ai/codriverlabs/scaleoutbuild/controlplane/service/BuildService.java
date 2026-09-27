@@ -25,6 +25,7 @@ import ai.codriverlabs.scaleoutbuild.controlplane.store.BuildRepository;
 import ai.codriverlabs.scaleoutbuild.ecs.AgentContainerSettings;
 import ai.codriverlabs.scaleoutbuild.ecs.AgentEnvironment;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsClusterSettings;
+import ai.codriverlabs.scaleoutbuild.ecs.FargateCapacityStrategy;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsLaunchType;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsTaskLauncher;
 import ai.codriverlabs.scaleoutbuild.ecs.TaskDefinitionRegistrar;
@@ -438,7 +439,10 @@ public class BuildService {
                 ecsConfig.assignPublicIp(), ecsConfig.executionRoleArn(), ecsConfig.taskRoleArn(),
                 null, null, null, null, ecsConfig.capacityProviderName().orElse(null),
                 ecsConfig.logGroupName(), regionOf(ecsConfig.clusterArn()),
-                ecsConfig.agentUsesDirectS3Io());
+                ecsConfig.agentUsesDirectS3Io(),
+                // Parsed per call rather than cached: cheap, and it means a bad value surfaces as a
+                // named error on the first build instead of a startup failure with no build to blame.
+                FargateCapacityStrategy.parse(ecsConfig.fargateCapacityStrategy()));
     }
 
     /** ECS cluster ARNs are {@code arn:aws:ecs:<region>:<account>:cluster/<name>}. */

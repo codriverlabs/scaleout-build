@@ -118,6 +118,16 @@ public class ControlPlaneInfraStack extends Stack {
          * populates. Distinct filenames per mode, so building JVM and deploying native fails with a
          * missing file instead of starting a function that cannot execute its own handler.
          */
+        /*
+         * Not validated here: the enum lives in scaleout-build-ecs, which the CDK module deliberately does
+         * not depend on. A bad value therefore fails on the first build with a message naming the accepted
+         * set, rather than at synth. Worth knowing, but adding a module dependency to move the error a few
+         * minutes earlier is the wrong trade.
+         */
+        String capacityStrategy = String.valueOf(
+                this.getNode().tryGetContext("fargateCapacityStrategy") == null ? "spot-preferred"
+                        : this.getNode().tryGetContext("fargateCapacityStrategy"));
+
         boolean development = !"false".equals(
                 String.valueOf(this.getNode().tryGetContext("development")));
         String serviceZip = development
@@ -303,6 +313,16 @@ public class ControlPlaneInfraStack extends Stack {
                 .environment(Map.ofEntries(
                         Map.entry("SCALEOUT_BUILDS_TABLE", buildsTable.getTableName()),
                         Map.entry("SCALEOUT_STAGING_BUCKET", stagingBucket.getBucketName()),
+                        /*
+                         * Capacity policy, settable per deployment without editing code:
+                         *   cdk deploy -c fargateCapacityStrategy=on-demand-preferred
+                         *
+                         * Spot reclaims tasks mid-build and a native-image compile is three to five
+                         * minutes of work to lose, so a release deployment may want on-demand while a
+                         * development one takes the discount. Accepted values are validated by
+                         * FargateCapacityStrategy.parse, which names them all on a typo.
+                         */
+                        Map.entry("SCALEOUT_ECS_FARGATE_CAPACITY_STRATEGY", capacityStrategy),
                         Map.entry("SCALEOUT_ECS_CLUSTER_ARN", cluster.getClusterArn()),
                         Map.entry("SCALEOUT_ECS_SUBNET_IDS", String.join(",",
                                 vpc.selectSubnets(SubnetSelection.builder()
