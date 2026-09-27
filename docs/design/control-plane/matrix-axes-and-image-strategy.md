@@ -79,27 +79,54 @@ deployed control plane:
 
 **The binary runs.** Started AOT-processed in **0.293 s**; `GET /` and `GET /actuator/health` both 200.
 
-#### One failure remains, and its ownership is not proven
+#### The Thymeleaf failure is upstream, established by a control build
 
-`GET /vets.html` returns 500:
+`GET /vets.html` returns 500 on both the remote build and a local control:
 
 ```
 MissingReflectionRegistrationError: Cannot reflectively invoke method
 'public java.lang.Integer[] org.thymeleaf.expression.Numbers.sequence(java.lang.Integer,java.lang.Integer)'
 ```
 
-What is established: the metadata for that type **was delivered**. `org.thymeleaf/thymeleaf/3.1.5.RELEASE` is
-among the 57 staged config directories, and all four copies of that metadata on disk declare
-`org.thymeleaf.expression.Numbers` with `allPublicMethods: true` — `sequence` is public. The same page
-returns 200 on the JVM build, so it is native-specific rather than an application bug.
+**The control.** `native-maven-plugin` has no container mode — `native:compile` requires a local GraalVM, and
+this workstation has OpenJDK 25. But the agent image carries **Mandrel 25.0.4.1**, the same toolchain the
+remote build used, so the control was run in that image with the **unmodified** argfile and the project and
+`~/.m2` bind-mounted at their original paths, so every absolute path resolved:
 
-What is **not** established: whether a *local* native build fails identically. It probably does — the remote
-build received the same argfile semantics and the same metadata — but this workstation has OpenJDK 25, not
-GraalVM, so the control experiment has not been run. **Do not record this as a pre-existing upstream gap
-until it has been.**
+```
+docker run --platform linux/amd64 \
+  -v /home/ubuntu/projects/tests/spring-petclinic:/home/ubuntu/projects/tests/spring-petclinic \
+  -v /home/ubuntu/.m2:/home/ubuntu/.m2:ro \
+  --entrypoint native-image "$AGENT_IMAGE" "@target/native-image-<id>.args" -o target/control-petclinic
+```
 
-A third URL, `/owners/find.html`, returned 400. That was a bad test URL, not a defect: the route is
-`/owners/{ownerId}` and `find.html` failed Integer conversion.
+That isolates the rewrite from the toolchain: same `native-image`, same metadata, original absolute paths, no
+staging.
+
+| | Control (original argfile, container) | Remote (rewritten argfile, Fargate) |
+|---|---|---|
+| Size | **210,767,112 B** | **210,767,112 B** |
+| Compile | 3m22s | 5m21s |
+| `GET /` | 200 | 200 |
+| `GET /actuator/health` | 200 | 200 |
+| `GET /vets.html` | **500** | **500** |
+| Error | `MissingReflectionRegistrationError`, `Numbers.sequence` | identical |
+
+**Conclusion: the rewrite is faithful and the Thymeleaf gap is upstream.** A plain `native-image` invocation
+of the untouched argfile fails identically, so nothing the rewrite does causes it. The metadata declares
+`org.thymeleaf.expression.Numbers` with `allPublicMethods: true` and GraalVM still refuses the invoke — a
+gap between the published reachability metadata and what petclinic's pagination template exercises.
+
+#### Byte-identity is not an available gate, and §1.2 was wrong to propose one
+
+This document previously said the gate was a byte-for-byte comparison. That is not achievable: the two
+binaries are **exactly the same length** and **135,362,134 bytes differ**, from the GNU build-id at byte 645
+onward. `native-image` output is not bit-reproducible across runs in this configuration.
+
+Identical length with differing content is itself informative — same structure, non-deterministic contents —
+but the gate that actually settles faithfulness is **behavioural equivalence against a control built from the
+unmodified inputs with the same toolchain**. That is what was run, and what future framework verification
+should use.
 
 ## 3. Matrix axes
 

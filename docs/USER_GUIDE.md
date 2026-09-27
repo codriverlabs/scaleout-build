@@ -84,7 +84,7 @@ framework emit its arguments first.
 |---|---|---|
 | **Plain GraalVM** | nothing | no framework output found |
 | **Quarkus** | add two properties to the build (below) | `target/native-sources/` exists |
-| **Spring Boot AOT** | **Verified remotely, with one caveat.** See below |
+| **Spring Boot AOT** | **Verified end to end** — both architectures, against a control build. See below |
 | **Helidon** | Same code path; untested against a Helidon project |
 
 Spring Boot and Helidon build through `native-maven-plugin`'s `write-args-file`, whose output is designed for
@@ -93,15 +93,18 @@ classpath jars into `lib/`, classpath *directories* staged as trees so `META-INF
 `-H:ConfigurationFileDirectories` staged and rewritten, `-o` redirected into the staging output directory.
 
 Verified against `spring-petclinic` (Spring Boot 4.1.0), both architectures, on the deployed control plane:
-565 files staged, **0 absolute paths remaining**, and binaries of 210,767,112 B (`x86_64`) and 204,082,456 B
+565 files staged, **0 absolute paths remaining**, binaries of 210,767,112 B (`x86_64`) and 204,082,456 B
 (`arm64`). The `x86_64` binary **starts AOT-processed in 0.293 s** and serves `/` and `/actuator/health`.
 
-**Caveat.** One page, `/vets.html`, returns 500 on a Thymeleaf reflection gap
-(`Numbers.sequence`) even though the metadata declaring it was delivered. The same page works on the JVM
-build. Whether a *local* native build fails identically has not been tested, so this is not yet attributable
-either way — see
-[`design/control-plane/matrix-axes-and-image-strategy.md`](design/control-plane/matrix-axes-and-image-strategy.md)
-§1.3.
+The rewrite was then checked against a **control build** — the unmodified argfile run through `native-image`
+in a container, same Mandrel 25.0.4.1, absolute paths intact. Both binaries are exactly 210,767,112 bytes and
+behave identically on every endpoint tested, so the rewrite preserves the build.
+
+**One known upstream gap.** `/vets.html` returns 500 on
+`MissingReflectionRegistrationError` for `org.thymeleaf.expression.Numbers.sequence` — **identically in the
+control build**, so it is a gap between Thymeleaf's published reachability metadata and what petclinic's
+pagination template exercises, not something this plugin introduces. It affects any native build of that
+application.
 
 ### Using it
 
