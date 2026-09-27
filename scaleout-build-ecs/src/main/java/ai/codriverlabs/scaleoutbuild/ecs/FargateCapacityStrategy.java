@@ -29,7 +29,7 @@ import software.amazon.awssdk.services.ecs.model.CapacityProviderStrategyItem;
 public enum FargateCapacityStrategy {
 
     /**
-     * Spot preferred, on-demand as fallback. <b>The default, and it should stay the default.</b>
+     * Spot preferred, on-demand as fallback. <b>The default.</b>
      *
      * <p>The reasoning, since a default that nobody can justify tends to get changed by whoever is
      * nervous that day:
@@ -39,20 +39,28 @@ public enum FargateCapacityStrategy {
      *       {@code native-image} on a 233-jar Quarkus application, ~250 s of total billed task time. Spot
      *       reclamation is unlikely to land inside a window that small, and unlike a long-running service
      *       there is no accumulating risk.</li>
-     *   <li><b>Being wrong costs time, not correctness.</b> {@link EcsTaskSupervisor} detects the
-     *       interruption and relaunches, escalating to on-demand after
-     *       {@code maxSpotInterruptionsBeforeOnDemand} (default 2). A reclaimed build is retried, not
-     *       failed — so the downside is a delay, against roughly a 70% discount on every build that is
-     *       not interrupted.</li>
      *   <li><b>Observed: zero interruptions.</b> Across 20 tasks launched during this project's
      *       development and testing, on {@code FARGATE_SPOT} in {@code eu-west-1}, none were reclaimed.
-     *       Not a statistically meaningful sample, but it is consistent with the exposure-window
-     *       argument rather than contradicting it.</li>
+     *       Not a statistically meaningful sample, but consistent with the exposure-window argument
+     *       rather than contradicting it.</li>
      * </ul>
      *
-     * <p>Deployments that disagree have {@link #ON_DEMAND_PREFERRED} — appropriate where a retry is
-     * genuinely expensive, such as a release pipeline, or a PGO cycle whose earlier phase would have to
-     * be redone.
+     * <p><b>But be clear about the cost of being wrong, because it is worse than it looks.</b> The control
+     * plane does <em>not</em> retry an interrupted build today. {@code refreshFromEcs} reads a stopped task
+     * with a non-zero exit code and marks the cell {@code FAILED} with the {@code stoppedReason}; there is
+     * no relaunch. So a reclamation at minute four of a five-minute compile loses the build, and the
+     * developer re-runs it.
+     *
+     * <p>{@link EcsTaskSupervisor} does implement relaunch-and-escalate, and the {@code forceOnDemand}
+     * parameter of {@link #toStrategy(boolean)} exists to serve it — but that supervision loop belonged to
+     * the deleted direct-ECS path. The service uses only its static log-stream helper, always passes
+     * {@code false}, and {@code BuildRecord.CellRecord.spotInterruptions} is never incremented. The
+     * escalation path is therefore unreachable in the deployed architecture. It is kept because
+     * server-side retry is worth adding and this is the mechanism it would use, not because it runs.
+     *
+     * <p>Consequence for choosing a strategy: prefer {@link #ON_DEMAND_PREFERRED} wherever a lost build is
+     * expensive — a release pipeline, or a PGO cycle whose earlier phase would have to be redone — rather
+     * than relying on a retry that does not happen.
      *
      * <p>Both providers are listed, so ECS falls back rather than failing when Spot capacity is
      * unavailable. {@code base(1)} on the preferred provider places the first task there; the weights

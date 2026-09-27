@@ -185,7 +185,32 @@ probe fails misleadingly:
 mvn -U dependency:get -Dartifact=software.amazon.awssdk:bom:2.55.2 -Dpackaging=pom -Dtransitive=false
 ```
 
-### 4. MicroVM backend is designed, not built
+### 4. A Spot interruption fails the build; there is no server-side retry
+
+Found by asking where `EcsTaskSupervisor` actually runs. It does not: the control plane uses only its
+static `logStreamNameFor` helper. The supervision loop — which relaunches on interruption and escalates to
+on-demand after two — belonged to the deleted direct-ECS path.
+
+Evidence that the retry was intended and not carried over:
+
+- `BuildService` always passes `preferOnDemand=false` to `runTask`; nothing passes `true`.
+- `BuildRecord.CellRecord.spotInterruptions` exists with a setter that is never called.
+- `BuildMojo` still imports `EcsTaskSupervisor` without using it, and its class javadoc still says each
+  cell gets "its own `EcsTaskSupervisor`", which was true only of the direct path.
+
+So `refreshFromEcs` sees a stopped task with a non-zero exit code and marks the cell `FAILED` with the
+stopped reason. A reclamation at minute four of a five-minute compile loses the build.
+
+The default is still `spot-preferred`, and the reasoning holds — the window is short and 20 observed tasks
+saw no interruption. What changes is the consequence of being unlucky, and deployments that cannot absorb
+a lost build should set `-c fargateCapacityStrategy=on-demand-preferred` rather than rely on a retry that
+does not run.
+
+Adding server-side retry is the real fix and is not small: a relaunched task has a new task ARN and a new
+log stream, so `LogStreamResource`'s per-cell watermarks and the SSE stream both need to follow it — which
+is the same hazard commit `7782771` addressed, in a new place.
+
+### 5. MicroVM backend is designed, not built
 
 Two documents, no code: [`microvm-platform-fit.md`](microvm-platform-fit.md) for platform limits and the
 client/worker split, [`microvm-build-backend.md`](microvm-build-backend.md) for the design.
