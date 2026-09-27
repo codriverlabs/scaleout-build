@@ -15,6 +15,7 @@ Delete this file once the outstanding items are closed; it is a snapshot, not a 
 | Runtime mode | **`jvm/arm64`, 384 MB** (last deployed 2026-09-26 20:05 UTC) |
 | Native mode | works and was verified end to end, but is **not currently deployed** — see below |
 | Task defaults | 4 vCPU, **8 GiB**, ephemeral storage omitted (Fargate's included 20 GiB) |
+| Fargate capacity | `spot-preferred` (default); set with `cdk deploy -c fargateCapacityStrategy=…` |
 | Endpoint | `https://26usidrly3gc4uo4b2i6fcp5ui0njbjo.lambda-url.eu-west-1.on.aws/` (also in SSM at `/scaleout-build/control-plane/endpoint`) |
 | Agent image | `864899852480.dkr.ecr.eu-west-1.amazonaws.com/scaleout-build-agent:latest`, multi-arch, verified both arches |
 
@@ -221,6 +222,10 @@ which could sink it.
 * **ECS rejects an explicit ephemeral storage size below 21 GiB** — `EphemeralStorage size should be at
   least 21`. Fargate's included 20 GiB is what you get by *omitting* the field, not by requesting it. The
   default is 0 for that reason, and `ResourcePolicy` maps any request of 1–20 onto 0.
+* **Fargate capacity is server policy, not a client parameter.** `spot-preferred`,
+  `on-demand-preferred`, `spot-only`, `on-demand-only`. A client that could demand on-demand capacity
+  could raise everyone else's bill — the same reasoning that removed `launchType` from the plugin.
+  `spot-only` is a cost ceiling that escalation deliberately will not breach.
 * **`native-image` peak RSS is not governed by the Java heap.** It is ~5.4 GB for a 233-jar application
   whether or not `-J-Xmx` is set, because it is dominated by native memory and the image heap being
   constructed. 8 GiB is the floor for that class of project; you cannot configure your way below it.

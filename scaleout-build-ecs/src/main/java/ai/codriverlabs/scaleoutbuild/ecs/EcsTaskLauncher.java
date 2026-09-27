@@ -55,8 +55,6 @@ public final class EcsTaskLauncher {
 
     private static final Logger LOG = LoggerFactory.getLogger(EcsTaskLauncher.class);
 
-    private static final String CAPACITY_PROVIDER_SPOT = "FARGATE_SPOT";
-    private static final String CAPACITY_PROVIDER_ON_DEMAND = "FARGATE";
     /**
      * Must be the same container name the task definition was registered with, otherwise the
      * container override silently fails to apply — so it reads the single source in
@@ -152,7 +150,7 @@ public final class EcsTaskLauncher {
     private static List<CapacityProviderStrategyItem> capacityProviderStrategy(
             EcsClusterSettings clusterSettings, boolean preferOnDemand) {
         return switch (clusterSettings.launchType()) {
-            case FARGATE -> fargateCapacityProviderStrategy(preferOnDemand);
+            case FARGATE -> clusterSettings.fargateCapacityStrategy().toStrategy(preferOnDemand);
             case MANAGED_INSTANCES -> List.of(CapacityProviderStrategyItem.builder()
                     .capacityProvider(clusterSettings.capacityProviderName())
                     .weight(1)
@@ -167,19 +165,4 @@ public final class EcsTaskLauncher {
         };
     }
 
-    private static List<CapacityProviderStrategyItem> fargateCapacityProviderStrategy(
-            boolean preferOnDemand) {
-        if (preferOnDemand) {
-            return List.of(
-                    CapacityProviderStrategyItem.builder()
-                            .capacityProvider(CAPACITY_PROVIDER_ON_DEMAND).weight(4).base(1).build(),
-                    CapacityProviderStrategyItem.builder()
-                            .capacityProvider(CAPACITY_PROVIDER_SPOT).weight(1).base(0).build());
-        }
-        return List.of(
-                CapacityProviderStrategyItem.builder()
-                        .capacityProvider(CAPACITY_PROVIDER_SPOT).weight(4).base(1).build(),
-                CapacityProviderStrategyItem.builder()
-                        .capacityProvider(CAPACITY_PROVIDER_ON_DEMAND).weight(1).base(0).build());
-    }
 }

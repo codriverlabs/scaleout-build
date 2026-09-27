@@ -78,6 +78,23 @@ public interface ControlPlaneConfig {
         @WithDefault("FARGATE")
         String launchType();
 
+        /**
+         * Which Fargate capacity to use: {@code spot-preferred} (default), {@code on-demand-preferred},
+         * {@code spot-only}, or {@code on-demand-only}.
+         *
+         * <p>Server configuration rather than a client parameter, for the same reason {@code launchType}
+         * and {@code capacityProviderName} were removed from the plugin: capacity is a cost and
+         * reliability decision belonging to whoever operates the deployment, and a client able to demand
+         * on-demand capacity could raise everyone else's bill.
+         *
+         * <p>Spot reclaims tasks mid-build and a native-image compile is three to five minutes of work to
+         * lose, so a release pipeline may well want {@code on-demand-preferred} where a development
+         * deployment wants the discount. {@code spot-only} makes cost a hard constraint: a build fails to
+         * launch rather than quietly running at full price.
+         */
+        @WithDefault("spot-preferred")
+        String fargateCapacityStrategy();
+
         Optional<String> capacityProviderName();
 
         /** True for the plain-S3 staging mode, which is the settled design. */
