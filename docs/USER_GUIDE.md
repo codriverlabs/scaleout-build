@@ -262,27 +262,38 @@ compute is often bundled into a subscription rather than billed separately.
 | Framework | Status |
 |---|---|
 | **Quarkus** | Verified end to end — 3.39.4, 233 dependencies, both architectures |
-| **Plain GraalVM** via derived classpath | Works; no AOT-generated configuration involved |
-| **Spring Boot AOT** | **Not yet wired up.** See below — the remaining work is path relocation |
-| **Helidon** | Same, same cause |
+| **Plain GraalVM** via derived classpath | Verified end to end against the example application |
+| **Spring Boot AOT** | **Implemented; not yet verified remotely.** See below |
+| **Helidon** | Same code path; untested against a Helidon project |
 
-Spring Boot native builds are perfectly ordinary GraalVM builds; nothing in their output prevents building
-remotely. The gap is on our side: `native-maven-plugin`'s `write-args-file` is designed for local invocation,
-so it emits **absolute host paths** (measured against Spring Boot 4.1.0: 107 references, a classpath pointing
-into `~/.m2/repository`) and a randomized filename, `native-image-<random>.args`. Those need relocating to
-container paths before the argfile can be replayed remotely.
+Spring Boot and Helidon build through `native-maven-plugin`'s `write-args-file`, whose output is designed for
+the machine that produced it — absolute paths, and a randomized filename. The plugin now **rewrites** that
+argfile rather than relaying it: classpath jars are staged into `lib/`, classpath *directories* are staged as
+trees so `META-INF/native-image/` survives, `-o` is redirected into the staging output directory, and
+`-H:ConfigurationFileDirectories` is dropped because GraalVM discovers the same configuration from the
+classpath.
 
-Encouragingly, most of it already works by accident of good design on GraalVM's part: the builder
-auto-discovers configuration from `META-INF/native-image/` anywhere on the classpath, and Spring's AOT step
-populates `target/classes/META-INF/native-image/` — 58 metadata files covering the same libraries the
-argfile's `-H:ConfigurationFileDirectories` entries name. So the AOT configuration travels with the classpath
-we already stage.
+Verified against `spring-petclinic` (Spring Boot 4.1.0, `native-maven-plugin` 1.1.1): 508 files staged — 105
+jars plus 403 from `target/classes`, including all 58 `reachability-metadata.json` files and the
+`native-image.properties` that carries the main class — and **zero absolute paths left** in the rewritten
+argfile.
 
-Until the relocation lands, don't work around it by renaming the argfile — the paths inside still point at
-your workstation. Scoped in
-[`design/control-plane/matrix-axes-and-image-strategy.md`](design/control-plane/matrix-axes-and-image-strategy.md).
+**What is not yet proven:** that the resulting binary is correct. Plan generation is verified; a remote build
+of petclinic and a byte-for-byte comparison against a local one is not. Until that runs, treat Spring Boot as
+working-but-unproven. A binary that builds while silently missing metadata fails at run time, not build time.
 
-## Troubleshooting
+### Using it
+
+```
+mvn -Pnative package
+mvn native:write-args-file
+mvn scaleout-build:build -Dscaleout-build.argsFileDirectory=target
+```
+
+The directory must contain exactly one `*.args` file. `write-args-file` uses a randomized name, so stale
+files accumulate across builds — the plugin refuses to guess which is current rather than picking one.
+
+## Troubleshooting## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|

@@ -51,15 +51,32 @@ So the AOT-generated configuration **travels with the classpath we already stage
 directory references look redundant rather than load-bearing — they point at the downloaded repository cache
 from which those 58 files were selected.
 
-### 1.3 Remaining work, and it is small
+### 1.3 Implemented
 
-1. Glob for `native-image-*.args`; fail if more than one matches.
+All four points below are now implemented in `ArgsFileDirectoryStrategy`, with 16 tests, plus a fifth that
+the work surfaced.
+
+1. Glob for `*.args`; fail if more than one matches.
 2. Stage `-cp` entries through the existing per-blob content-addressed store. `DerivedClasspathStrategy`
    already does exactly this, which is where the measured 234/235 dedup comes from — so Spring Boot inherits
    the upload avoidance for free.
 3. Rewrite `-cp` and `-o` to container paths. Set `-o` explicitly; a bare `-o` resolving to the working
    directory was already a bug once (#36).
 4. Drop `-H:ConfigurationFileDirectories`, or rewrite it if §1.2 turns out to be wrong.
+5. **Tokenize on whitespace, not newlines.** Surfaced by an existing test whose fixture held
+   `-o app -jar app.jar` on one line. That is legal — GraalVM follows Java's `@argfile` convention, where
+   whitespace separates arguments and quoting protects spaces. A line-based parser happens to work for
+   `write-args-file` and Quarkus, which both emit one argument per line, and silently mis-reads anything
+   hand-written.
+
+Measured against the real petclinic output: 508 files staged (105 jars, 403 from `target/classes` including
+all 58 metadata files and the `native-image.properties` carrying the main class), **0 absolute paths
+remaining**.
+
+Also renamed `InputMode`'s values from `QUARKUS_NATIVE_SOURCES`/`DERIVED` to
+`STAGED_ARGS_FILE`/`GENERATED_ARGS_FILE`. The old names read as a framework list, and became actively wrong
+once Spring Boot's argfile was generated rather than staged — it had to report `DERIVED`, which points at an
+unrelated strategy. Internal enum, not part of the wire contract.
 
 **Verification gate before believing §1.2:** build petclinic locally with the full argfile, build it remotely
 without the `-H:` entries, and compare the binaries byte for byte — the same check that validated Quarkus

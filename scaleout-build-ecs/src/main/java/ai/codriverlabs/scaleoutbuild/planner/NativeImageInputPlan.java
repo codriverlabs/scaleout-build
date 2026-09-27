@@ -41,7 +41,7 @@ public final class NativeImageInputPlan {
             throw new IllegalArgumentException(
                     "Pass-through plan must stage its argfile '" + argsFileName + "'");
         }
-        return new NativeImageInputPlan(InputMode.QUARKUS_NATIVE_SOURCES, files, argsFileName, null,
+        return new NativeImageInputPlan(InputMode.STAGED_ARGS_FILE, files, argsFileName, null,
                 expectedArtifacts);
     }
 
@@ -51,7 +51,7 @@ public final class NativeImageInputPlan {
     public static NativeImageInputPlan generated(List<StagedFile> files, String argsFileContent,
                                                  List<String> expectedArtifacts) {
         Objects.requireNonNull(argsFileContent, "argsFileContent");
-        return new NativeImageInputPlan(InputMode.DERIVED, files,
+        return new NativeImageInputPlan(InputMode.GENERATED_ARGS_FILE, files,
                 StagingLayout.DEFAULT_ARGS_FILE_NAME, argsFileContent, expectedArtifacts);
     }
 

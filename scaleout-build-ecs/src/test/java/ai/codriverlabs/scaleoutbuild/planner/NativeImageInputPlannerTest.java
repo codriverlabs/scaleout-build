@@ -38,7 +38,7 @@ class NativeImageInputPlannerTest {
 
         NativeImageInputPlan plan = planner.plan(inputs);
 
-        assertThat(plan.mode()).isEqualTo(InputMode.QUARKUS_NATIVE_SOURCES);
+        assertThat(plan.mode()).isEqualTo(InputMode.STAGED_ARGS_FILE);
         assertThat(plan.argsFileName()).isEqualTo("native-image.args");
         assertThat(plan.generatedArgsContent()).isEmpty();
         assertThat(plan.files()).extracting(StagedFile::relativePath)
@@ -76,7 +76,7 @@ class NativeImageInputPlannerTest {
 
         NativeImageInputPlan plan = planner.plan(inputs);
 
-        assertThat(plan.mode()).isEqualTo(InputMode.DERIVED);
+        assertThat(plan.mode()).isEqualTo(InputMode.GENERATED_ARGS_FILE);
         assertThat(plan.generatedArgsContent()).isPresent();
         String args = plan.generatedArgsContent().get();
         assertThat(args).contains("-cp").contains(finalName + ".jar:lib/dep-1.0.jar")

@@ -40,7 +40,7 @@ class NativeImageInputPlannerStrategyTest {
         NativeImageInputPlan plan = planner.plan(inputs(target, "app", null));
 
         assertThat(planner.selectedStrategyName(inputs(target, "app", null))).isEqualTo("Quarkus");
-        assertThat(plan.mode()).isEqualTo(InputMode.QUARKUS_NATIVE_SOURCES);
+        assertThat(plan.mode()).isEqualTo(InputMode.STAGED_ARGS_FILE);
         assertThat(plan.files()).hasSize(2);
     }
 
@@ -74,12 +74,15 @@ class NativeImageInputPlannerStrategyTest {
     @Test
     void configuredArgsFileDirectoryWins(@TempDir Path target, @TempDir Path argsDir)
             throws IOException, InputPlanningException {
+        // One line, several arguments: legal per Java's @argfile convention, which GraalVM follows.
         Files.writeString(argsDir.resolve("native-image.args"), "-o app -jar app.jar");
 
         ProjectInputs in = inputs(target, "app", argsDir);
 
         assertThat(planner.selectedStrategyName(in)).contains("native-maven-plugin");
-        assertThat(planner.plan(in).mode()).isEqualTo(InputMode.QUARKUS_NATIVE_SOURCES);
+        // Generated, not staged: write-args-file emits absolute host paths, so it is rewritten.
+        assertThat(planner.plan(in).mode()).isEqualTo(InputMode.GENERATED_ARGS_FILE);
+        assertThat(planner.plan(in).expectedArtifacts()).containsExactly("app");
     }
 
     /** Quarkus is consulted first, so its own layout wins even if an argfile directory is also set. */

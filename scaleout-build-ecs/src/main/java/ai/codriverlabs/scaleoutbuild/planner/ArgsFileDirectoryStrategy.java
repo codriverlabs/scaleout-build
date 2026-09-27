@@ -5,63 +5,63 @@ package ai.codriverlabs.scaleoutbuild.planner;
 
 import ai.codriverlabs.scaleoutbuild.build.StagingLayout;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
- * Any framework whose build emits a {@code native-image} argument file via GraalVM's
- * {@code native-maven-plugin}.
+ * Spring Boot AOT, Helidon, and plain GraalVM builds driven by {@code native-maven-plugin}'s
+ * {@code write-args-file} goal.
  *
- * <p>That covers <b>Spring Boot AOT</b>, <b>Helidon</b>, and plain GraalVM projects that use the plugin,
- * because all of them delegate the native build to it rather than inventing their own. One strategy
- * therefore handles three frameworks: the thing worth detecting is the argument file, not the framework
- * that caused it to exist.
+ * <p><b>The directory must be configured explicitly; there is no default.</b> That is a deliberate refusal to
+ * guess. {@code write-args-file} takes its location from the {@code graalvm.native-image.args-file} property,
+ * and a hardcoded wrong path would not fail loudly — it would fail {@link #appliesTo}, fall through to
+ * {@link DerivedClasspathStrategy}, and produce a binary that builds successfully and then misbehaves at run
+ * time, because an AOT-processed application needs generated configuration a derived argfile omits.
  *
- * <p>Generate it with the plugin's own goal, then point this strategy at the result:
+ * <h2>Why the argfile is rewritten rather than relayed</h2>
  *
- * <pre>
- *   mvn native:write-args-file
- *   mvn package -Dscaleout-build.argsFileDirectory=target/&lt;wherever it wrote&gt;
- * </pre>
+ * <p>An earlier version of this strategy staged the directory and reused the argfile verbatim, on the
+ * assumption that its arguments were relative — which is how Quarkus's {@code native-sources} directory
+ * works, because {@code -Dquarkus.native.sources-only=true} exists precisely to make the compile relocatable.
  *
- * <p><b>The directory must be configured explicitly; there is no default.</b> That is a deliberate
- * refusal to guess. {@code write-args-file} takes its location from the
- * {@code graalvm.native-image.args-file} property, and this strategy has not been verified end to end
- * against a Spring Boot or Helidon build. A hardcoded wrong path would not fail loudly — it would fail
- * {@link #appliesTo}, fall through to {@link DerivedClasspathStrategy}, and produce a binary that builds
- * successfully and then misbehaves at run time, because an AOT-processed application needs the generated
- * reflection and resource configuration that a derived argfile omits. Requiring the path makes the
- * unverified part explicit rather than silently wrong.
+ * <p>{@code write-args-file} is different, and correctly so: it records the command for the machine that
+ * produced it, where absolute paths are right. Measured against Spring Boot 4.1.0 with
+ * {@code native-maven-plugin} 1.1.1, one small application emitted 107 absolute path references, a
+ * {@code -cp} of 106 entries pointing into {@code ~/.m2/repository}, and an absolute {@code -o}. Relaying
+ * that to a container cannot work. Nothing about it is a defect in Spring or GraalVM — relocating it is this
+ * plugin's job, and it is mechanical.
  *
- * <p><b>That assumption has been measured and is wrong for {@code write-args-file} — but the consequence is
- * narrower than it first appears.</b> Verified against Spring Boot 4.1.0 with {@code native-maven-plugin}
- * 1.1.1: the goal writes {@code target/native-image-<random long>.args}, a randomized name this strategy
- * will not find, and its arguments are <em>absolute host paths</em> — 107 references in one small
- * application, including a {@code -cp} into {@code ~/.m2/repository}.
+ * <h2>What GraalVM already does for us</h2>
  *
- * <p><b>Nothing about Spring Boot's output is hostile to building elsewhere.</b> {@code write-args-file} is
- * designed for local invocation on the machine that produced it, where absolute paths are correct;
- * generalising from Quarkus's deliberately relocatable {@code native-sources} was this strategy's error, not
- * a defect in Spring or GraalVM. Relocating an argfile is mechanical.
+ * <p>The builder auto-discovers configuration from {@code META-INF/native-image/} and its subdirectories
+ * anywhere on the classpath. Spring's AOT step populates {@code target/classes/META-INF/native-image/} —
+ * measured at 58 {@code reachability-metadata.json} files plus a {@code native-image.properties} that
+ * supplies the main class, which is why the argfile carries no main-class argument at all.
  *
- * <p>It is also mostly already solved here. GraalVM auto-discovers configuration from
- * {@code META-INF/native-image/} anywhere on the classpath, and Spring's AOT processing populates
- * {@code target/classes/META-INF/native-image/} — measured at 58 {@code reachability-metadata.json} files,
- * 1.9 MB, covering the same libraries as the 57 {@code -H:ConfigurationFileDirectories} entries in the
- * argfile. So the AOT-generated configuration travels with the classpath we already stage, and those
- * absolute directory references look redundant rather than load-bearing.
+ * <p>Two consequences, and both matter:
  *
- * <p>What remains is therefore small: glob for {@code native-image-*.args}, stage the {@code -cp} entries
- * through the existing per-blob content-addressed store (which {@link DerivedClasspathStrategy} already
- * does), rewrite {@code -cp} and {@code -o} to container paths, and drop or rewrite
- * {@code -H:ConfigurationFileDirectories}. <b>Not yet implemented, and the redundancy claim needs a
- * byte-comparison against a locally built binary before it is relied upon</b> — scoped in
- * {@code docs/design/control-plane/matrix-axes-and-image-strategy.md}.
+ * <ul>
+ *   <li>Directory entries on the classpath are staged as <b>trees</b>, not skipped and not repackaged, so
+ *       that {@code META-INF/native-image/} travels intact. Dropping the classes directory would lose the
+ *       main class and every reachability entry.</li>
+ *   <li>{@code -H:ConfigurationFileDirectories} is dropped. Its 57 entries addressed the downloaded
+ *       repository cache from which those 58 files were already selected, so the configuration arrives by
+ *       classpath discovery instead. Keeping absolute paths that do not exist in the container would fail;
+ *       rewriting them would stage 37 MB to duplicate 1.9 MB already present.</li>
+ * </ul>
  */
 public final class ArgsFileDirectoryStrategy implements InputPlanStrategy {
+
+    /** {@code write-args-file} emits a randomized name; this matches it and the historical fixed name. */
+    private static final String ARGS_GLOB = "*.args";
+
+    private static final String CLASSES_DIR_PREFIX = "classes";
 
     @Override
     public String name() {
@@ -77,29 +77,237 @@ public final class ArgsFileDirectoryStrategy implements InputPlanStrategy {
     @Override
     public NativeImageInputPlan plan(ProjectInputs inputs) throws InputPlanningException {
         Path directory = inputs.argsFileDirectory();
-        Path argsFile = directory.resolve(StagingLayout.DEFAULT_ARGS_FILE_NAME);
-        if (!Files.isRegularFile(argsFile)) {
-            throw new InputPlanningException(
-                    "Configured argsFileDirectory " + directory + " has no "
-                            + StagingLayout.DEFAULT_ARGS_FILE_NAME + ". Generate one with "
-                            + "'mvn native:write-args-file' and make sure it is named "
-                            + StagingLayout.DEFAULT_ARGS_FILE_NAME + " in that directory, or leave "
-                            + "argsFileDirectory unset to derive the arguments from the runtime "
-                            + "classpath instead.");
+        Path argsFile = locateArgsFile(directory);
+
+        List<String> original;
+        try {
+            original = tokenize(Files.readString(argsFile, StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            throw new InputPlanningException("Failed to read " + argsFile, e);
         }
 
         List<StagedFile> files = new ArrayList<>();
-        try (Stream<Path> tree = Files.walk(directory)) {
+        Set<String> usedNames = new HashSet<>();
+        List<String> rewritten = new ArrayList<>();
+        List<String> expectedArtifacts = new ArrayList<>();
+        int classesDirCount = 0;
+
+        for (int i = 0; i < original.size(); i++) {
+            String line = original.get(i);
+            if (isClasspathFlag(line)) {
+                String value = requireValue(original, i, line, argsFile);
+                i++;
+                List<String> entries = new ArrayList<>();
+                for (String raw : value.split(java.io.File.pathSeparator, -1)) {
+                    if (raw.isBlank()) {
+                        continue;
+                    }
+                    Path entry = Path.of(raw.trim());
+                    if (Files.isDirectory(entry)) {
+                        String name = uniqueName(CLASSES_DIR_PREFIX + (++classesDirCount == 1
+                                ? "" : "-" + classesDirCount), usedNames);
+                        stageTree(entry, name, files);
+                        entries.add(name);
+                    } else if (Files.isRegularFile(entry)) {
+                        String libName = uniqueName(entry.getFileName().toString(), usedNames);
+                        String relativePath = StagingLayout.LIB_DIR_NAME + "/" + libName;
+                        files.add(new StagedFile(relativePath, entry));
+                        entries.add(relativePath);
+                    } else {
+                        throw new InputPlanningException(
+                                "Classpath entry " + entry + " from " + argsFile.getFileName()
+                                        + " does not exist. Re-run 'mvn native:write-args-file' after a "
+                                        + "full build so the argfile matches what is on disk.");
+                    }
+                }
+                rewritten.add(line);
+                rewritten.add(String.join(":", entries));
+                continue;
+            }
+
+            if (line.equals("-o")) {
+                String value = requireValue(original, i, line, argsFile);
+                i++;
+                String imageName = Path.of(value.trim()).getFileName().toString();
+                expectedArtifacts.add(imageName);
+                rewritten.add("-o");
+                rewritten.add(StagingLayout.OUTPUT_DIR_NAME + "/" + imageName);
+                continue;
+            }
+
+            if (line.startsWith("-H:Name=")) {
+                String imageName = line.substring("-H:Name=".length()).trim();
+                if (!imageName.isEmpty()) {
+                    expectedArtifacts.add(imageName);
+                }
+                rewritten.add(line);
+                continue;
+            }
+
+            // Output directory: the staging root's output/ is the only valid destination.
+            if (line.startsWith("-H:Path=")) {
+                rewritten.add("-H:Path=" + StagingLayout.OUTPUT_DIR_NAME);
+                continue;
+            }
+
+            // See the class javadoc: redundant with META-INF/native-image/ on the staged classpath,
+            // and its absolute paths do not exist in the container.
+            if (line.startsWith("-H:ConfigurationFileDirectories=")) {
+                continue;
+            }
+
+            rewritten.add(line);
+        }
+
+        if (expectedArtifacts.isEmpty()) {
+            throw new InputPlanningException(
+                    argsFile.getFileName() + " names no output image: it has neither '-o' nor '-H:Name='. "
+                            + "Without one the remote build cannot know which file to return.");
+        }
+
+        String content = rewritten.stream().map(ArgsFileDirectoryStrategy::quoteIfNeeded)
+                .collect(java.util.stream.Collectors.joining(System.lineSeparator()))
+                + System.lineSeparator();
+        return NativeImageInputPlan.generated(files, content, List.copyOf(expectedArtifacts));
+    }
+
+    /**
+     * Finds the single argfile in the directory.
+     *
+     * <p>{@code write-args-file} names its output {@code native-image-<random long>.args}, so the name cannot
+     * be predicted and a stale one from a previous build would sit alongside the current one. Refusing to
+     * choose is better than picking the wrong one silently.
+     */
+    private Path locateArgsFile(Path directory) throws InputPlanningException {
+        List<Path> candidates;
+        try (Stream<Path> entries = Files.list(directory)) {
+            candidates = entries.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileSystem().getPathMatcher("glob:" + ARGS_GLOB)
+                            .matches(path.getFileName()))
+                    .sorted()
+                    .toList();
+        } catch (IOException e) {
+            throw new InputPlanningException("Failed to list " + directory, e);
+        }
+        if (candidates.isEmpty()) {
+            throw new InputPlanningException(
+                    "Configured argsFileDirectory " + directory + " contains no *.args file. Generate one "
+                            + "with 'mvn native:write-args-file', or leave argsFileDirectory unset to derive "
+                            + "the arguments from the runtime classpath instead.");
+        }
+        if (candidates.size() > 1) {
+            throw new InputPlanningException(
+                    "Configured argsFileDirectory " + directory + " contains " + candidates.size()
+                            + " *.args files " + candidates.stream().map(p -> p.getFileName().toString())
+                            .sorted().toList() + ". 'write-args-file' uses a randomized name, so stale files "
+                            + "accumulate; delete the old ones or point argsFileDirectory at a directory "
+                            + "holding only the current argfile.");
+        }
+        return candidates.get(0);
+    }
+
+    /**
+     * Splits an argument file into arguments.
+     *
+     * <p>GraalVM follows Java's {@code @argfile} convention: arguments are separated by <em>whitespace</em>,
+     * not merely by newlines, and may be single- or double-quoted to contain spaces. Parsing line by line
+     * happens to work for {@code write-args-file} and for Quarkus, both of which emit one argument per line,
+     * but it silently mis-reads a hand-written {@code -o app -jar app.jar}. Tokenizing removes that class of
+     * bug rather than documenting around it.
+     */
+    static List<String> tokenize(String content) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inToken = false;
+        char quote = 0;
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                } else {
+                    current.append(c);
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+                inToken = true;
+                continue;
+            }
+            if (Character.isWhitespace(c)) {
+                if (inToken) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                    inToken = false;
+                }
+                continue;
+            }
+            current.append(c);
+            inToken = true;
+        }
+        if (inToken) {
+            tokens.add(current.toString());
+        }
+        return tokens;
+    }
+
+    /** Re-quotes on output, since a staged jar name may legitimately contain a space. */
+    private static String quoteIfNeeded(String token) {
+        boolean needsQuoting = token.isEmpty()
+                || token.chars().anyMatch(Character::isWhitespace)
+                || token.indexOf('"') >= 0;
+        if (!needsQuoting) {
+            return token;
+        }
+        return "\"" + token.replace("\"", "\\\"") + "\"";
+    }
+
+    /** Stages a classpath directory as a tree, so {@code META-INF/native-image/} survives the move. */
+    private void stageTree(Path root, String destinationName, List<StagedFile> files)
+            throws InputPlanningException {
+        try (Stream<Path> tree = Files.walk(root)) {
             for (Path path : tree.filter(Files::isRegularFile).toList()) {
-                files.add(new StagedFile(toPosix(directory.relativize(path)), path));
+                files.add(new StagedFile(destinationName + "/" + toPosix(root.relativize(path)), path));
             }
         } catch (IOException e) {
-            throw new InputPlanningException("Failed to scan " + directory, e);
+            throw new InputPlanningException("Failed to scan classpath directory " + root, e);
         }
-        return NativeImageInputPlan.passThrough(files, StagingLayout.DEFAULT_ARGS_FILE_NAME, List.of());
+    }
+
+    private boolean isClasspathFlag(String line) {
+        return line.equals("-cp") || line.equals("-classpath") || line.equals("--class-path");
+    }
+
+    private String requireValue(List<String> lines, int index, String flag, Path argsFile)
+            throws InputPlanningException {
+        if (index + 1 >= lines.size()) {
+            throw new InputPlanningException(
+                    argsFile.getFileName() + " ends with '" + flag + "' and no value. The argfile is "
+                            + "malformed; regenerate it with 'mvn native:write-args-file'.");
+        }
+        return lines.get(index + 1);
+    }
+
+    /** Keeps staged names unique when two classpath entries share a file name. */
+    private String uniqueName(String preferredName, Set<String> usedNames) {
+        if (usedNames.add(preferredName)) {
+            return preferredName;
+        }
+        int suffix = 2;
+        while (true) {
+            int dot = preferredName.lastIndexOf('.');
+            String candidate = dot < 0
+                    ? preferredName + "-" + suffix
+                    : preferredName.substring(0, dot) + "-" + suffix + preferredName.substring(dot);
+            if (usedNames.add(candidate)) {
+                return candidate;
+            }
+            suffix++;
+        }
     }
 
     private static String toPosix(Path relativePath) {
-        return relativePath.toString().replace(Path.of("").getFileSystem().getSeparator(), "/");
+        return relativePath.toString().replace('\\', '/');
     }
 }
