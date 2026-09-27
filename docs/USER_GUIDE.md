@@ -257,6 +257,25 @@ Cost and capability trade-offs for this topology are in
 [`COST_ANALYSIS.md`](COST_ANALYSIS.md) §8 — including what offloading does *not* buy, since hosted sandbox
 compute is often bundled into a subscription rather than billed separately.
 
+## Framework support status
+
+| Framework | Status |
+|---|---|
+| **Quarkus** | Verified end to end — 3.39.4, 233 dependencies, both architectures |
+| **Plain GraalVM** via derived classpath | Works; no AOT-generated configuration involved |
+| **Spring Boot AOT** | **Unsupported.** See below |
+| **Helidon** | **Unsupported**, same cause |
+
+Spring Boot AOT and Helidon drive `native-maven-plugin`'s `write-args-file`, which emits **absolute host
+paths** — measured against Spring Boot 4.1.0: 107 absolute references, a classpath pointing into
+`~/.m2/repository`, and 57 configuration directories under `target/`. Those paths do not exist in the remote
+container, so the argfile cannot be relayed as-is. It also writes a randomized filename
+(`native-image-<random>.args`).
+
+Do not work around this by renaming the file — the build will start and then produce a binary missing its
+AOT-generated reflection configuration, which fails at run time rather than build time. The fix is scoped in
+[`design/control-plane/matrix-axes-and-image-strategy.md`](design/control-plane/matrix-axes-and-image-strategy.md).
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

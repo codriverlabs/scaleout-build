@@ -36,8 +36,24 @@ import java.util.stream.Stream;
  * reflection and resource configuration that a derived argfile omits. Requiring the path makes the
  * unverified part explicit rather than silently wrong.
  *
- * <p>Everything alongside the argument file is staged with it, on the assumption the arguments reference it
- * by relative path — which is how Quarkus's equivalent directory works.
+ * <p><b>That assumption has now been measured, and it is wrong for {@code write-args-file}.</b> Verified
+ * against Spring Boot 4.1.0 with {@code native-maven-plugin} 1.1.1: the goal writes
+ * {@code target/native-image-<random long>.args} — a randomized name this strategy will not find — and the
+ * arguments are <em>absolute host paths</em>, not relative. Measured in one small application: 107 absolute
+ * path references, a {@code -cp} pointing into {@code ~/.m2/repository} (outside the staged directory
+ * entirely), and 57 {@code -H:ConfigurationFileDirectories} entries addressing a 37 MB tree under
+ * {@code target/}.
+ *
+ * <p>The generalisation was the error, not bad luck. Quarkus's {@code native-sources} output is designed to
+ * be relocatable — that is the purpose of {@code -Dquarkus.native.sources-only=true}. {@code write-args-file}
+ * is designed for local invocation on the machine that produced it, so absolute paths are correct for its
+ * intended use.
+ *
+ * <p>Consequence: <b>Spring Boot AOT and Helidon are unsupported, not merely unverified.</b> Staging this
+ * directory and relaying the argfile cannot work, because the paths it names do not exist in the container.
+ * The fix is to parse the argfile, stage the classpath jars through the existing per-blob content-addressed
+ * store, stage the referenced metadata directories, and emit a rewritten argfile with container paths —
+ * scoped in {@code docs/design/control-plane/matrix-axes-and-image-strategy.md}.
  */
 public final class ArgsFileDirectoryStrategy implements InputPlanStrategy {
 
