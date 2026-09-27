@@ -182,16 +182,23 @@ rather than a code change.
 
 JVM mode is architecture-neutral bytecode and already deploys arm64.
 
-### The memory provision is the open question, not the vCPU
+### The memory provision: asked, answered, and the answer reversed the conclusion
 
-Container Insights over these tasks: **CPU peaks at 4096 of 4096 reserved — saturated** — while **memory
-peaks at 1179 MB of 16384 reserved, 7%**. Fargate bills both dimensions independently.
+Container Insights: **CPU peaks at 4096 of 4096 reserved — saturated at any project size**, so 4 vCPU is
+doing real work and reducing it lengthens every build proportionally.
 
-Dropping to the smallest legal pairing for 4 vCPU (8 GiB) would cut the task rate ~15%, taking the Spot
-total to about $0.0031 for both cells. **It has not been changed**, because the example app's classpath is
-two jars and `native-image` memory scales with application size — 16 GiB is provisioned for a real project
-with hundreds of dependencies, which this measurement does not exercise. The 7% figure says the example is
-small, not that the provision is wrong.
+Memory was the open question. On the example app it peaked at 1179 MB of 16384 reserved — 7%, which looked
+like obvious waste worth ~15% of the largest line item. It was deliberately **not** cut on that evidence,
+because `native-image` memory scales with application size and the example has two dependencies.
+
+Re-measuring a real 233-jar project gave **5.2 GB, 4.5× more**. The task is now **8 GiB**, the smallest
+pairing Fargate allows with 4 vCPU, running at about 68% with ~2.5 GB spare. There is little left to trim,
+and nothing below 8 GiB is available: peak RSS is dominated by native memory and the image heap being
+constructed rather than the Java heap, so capping the builder's heap does not move it.
+
+Declining to act on the 7% reading was therefore the right call — trimming to 8 GiB *on that basis* would
+have been the same number reached for the wrong reason, and the next size down would have failed on
+somebody's large project.
 
 ## 4b. Original estimate (superseded by §4)
 
