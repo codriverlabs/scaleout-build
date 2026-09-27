@@ -34,55 +34,72 @@ records the command for the machine that produced it, where absolute paths are c
 how Quarkus's equivalent directory works."* Quarkus's `native-sources` is deliberately relocatable; that is
 the whole point of `-Dquarkus.native.sources-only=true`. Generalising from one to the other was our mistake.
 
-### 1.2 The part that already works
+### 1.2 A hypothesis that a real build disproved
 
-GraalVM
+The first implementation **dropped** `-H:ConfigurationFileDirectories`, reasoning that GraalVM
 [auto-discovers configuration](https://www.graalvm.org/latest/reference-manual/native-image/overview/BuildConfiguration/)
-from `META-INF/native-image/` — and any subdirectory — anywhere on the classpath. Spring's AOT step populates
-`target/classes/META-INF/native-image/`:
+from `META-INF/native-image/` on the classpath, that Spring's AOT step populates
+`target/classes/META-INF/native-image/`, and that the two said the same thing. The library sets supported it:
+**56** artifacts named by the flag against **57** on the classpath — a superset, nothing missing.
 
-| | Measured |
+It was documented as unverified, and the verification killed it. The binary compiled for 8m24s and then:
+
+```
+Invalid logger interface org.hibernate.validator.internal.util.logging.Log (implementation not found)
+```
+
+| Source | Version | Reflection entries | `Log_$logger` |
+|---|---|---|---|
+| `-H:ConfigurationFileDirectories` | **7.0.4.Final** | **356** | **10** |
+| `META-INF/native-image/` on the classpath | 9.1.0.Final | 12 | **0** |
+
+Two things combine. The reachability-metadata repository carries far richer metadata than a library ships
+inline, and `native-maven-plugin` falls back to the newest version it holds when it has no exact match —
+it logs `Configuration directory not found. Trying latest version`. So the flag can be the only place a
+needed registration exists, for a *different version* of the same artifact.
+
+**Overlapping names said nothing about overlapping content.** The directories are now staged as trees and the
+flag rewritten. Corroboration that the metadata is genuinely consumed: the binary grew from 205,982,984 to
+210,767,112 bytes.
+
+### 1.3 Implemented and verified remotely
+
+Against `spring-petclinic` (Spring Boot 4.1.0, `native-maven-plugin` 1.1.1), both architectures, via the
+deployed control plane:
+
+| | |
 |---|---|
-| `reachability-metadata.json` files | **58** |
-| Size | 1.9 MB |
-| Libraries covered | the same 56 the argfile's `-H:` entries name — attoparser, classmate, tomcat-embed, HikariCP, jackson, logback, caffeine … |
+| Files staged | **565** — 403 from `target/classes`, 105 jars, 57 config directories |
+| Absolute paths remaining | **0** |
+| Classpath entries preserved | 106 → 106 |
+| Config directories preserved | 57 → 57 |
+| `x86_64` binary | `ELF 64-bit LSB executable, x86-64` — 210,767,112 B, 5m21s |
+| `arm64` binary | `ELF 64-bit LSB executable, ARM aarch64` — 204,082,456 B, 8m46s |
+| CAS dedup on rebuild | 2 inputs uploaded, 495 already staged |
 
-So the AOT-generated configuration **travels with the classpath we already stage**, and the 57 absolute
-directory references look redundant rather than load-bearing — they point at the downloaded repository cache
-from which those 58 files were selected.
+**The binary runs.** Started AOT-processed in **0.293 s**; `GET /` and `GET /actuator/health` both 200.
 
-### 1.3 Implemented
+#### One failure remains, and its ownership is not proven
 
-All four points below are now implemented in `ArgsFileDirectoryStrategy`, with 16 tests, plus a fifth that
-the work surfaced.
+`GET /vets.html` returns 500:
 
-1. Glob for `*.args`; fail if more than one matches.
-2. Stage `-cp` entries through the existing per-blob content-addressed store. `DerivedClasspathStrategy`
-   already does exactly this, which is where the measured 234/235 dedup comes from — so Spring Boot inherits
-   the upload avoidance for free.
-3. Rewrite `-cp` and `-o` to container paths. Set `-o` explicitly; a bare `-o` resolving to the working
-   directory was already a bug once (#36).
-4. Drop `-H:ConfigurationFileDirectories`, or rewrite it if §1.2 turns out to be wrong.
-5. **Tokenize on whitespace, not newlines.** Surfaced by an existing test whose fixture held
-   `-o app -jar app.jar` on one line. That is legal — GraalVM follows Java's `@argfile` convention, where
-   whitespace separates arguments and quoting protects spaces. A line-based parser happens to work for
-   `write-args-file` and Quarkus, which both emit one argument per line, and silently mis-reads anything
-   hand-written.
+```
+MissingReflectionRegistrationError: Cannot reflectively invoke method
+'public java.lang.Integer[] org.thymeleaf.expression.Numbers.sequence(java.lang.Integer,java.lang.Integer)'
+```
 
-Measured against the real petclinic output: 508 files staged (105 jars, 403 from `target/classes` including
-all 58 metadata files and the `native-image.properties` carrying the main class), **0 absolute paths
-remaining**.
+What is established: the metadata for that type **was delivered**. `org.thymeleaf/thymeleaf/3.1.5.RELEASE` is
+among the 57 staged config directories, and all four copies of that metadata on disk declare
+`org.thymeleaf.expression.Numbers` with `allPublicMethods: true` — `sequence` is public. The same page
+returns 200 on the JVM build, so it is native-specific rather than an application bug.
 
-Also renamed `InputMode`'s values from `QUARKUS_NATIVE_SOURCES`/`DERIVED` to
-`STAGED_ARGS_FILE`/`GENERATED_ARGS_FILE`. The old names read as a framework list, and became actively wrong
-once Spring Boot's argfile was generated rather than staged — it had to report `DERIVED`, which points at an
-unrelated strategy. Internal enum, not part of the wire contract.
+What is **not** established: whether a *local* native build fails identically. It probably does — the remote
+build received the same argfile semantics and the same metadata — but this workstation has OpenJDK 25, not
+GraalVM, so the control experiment has not been run. **Do not record this as a pre-existing upstream gap
+until it has been.**
 
-**Verification gate before believing §1.2:** build petclinic locally with the full argfile, build it remotely
-without the `-H:` entries, and compare the binaries byte for byte — the same check that validated Quarkus
-(13,372,680 B x86-64, 13,241,624 B aarch64, identical to the pre-migration baseline). A binary that builds
-but silently lacks metadata fails at run time, which is the failure mode this project has already been bitten
-by and the reason `argsFileDirectory` has no default.
+A third URL, `/owners/find.html`, returned 400. That was a bad test URL, not a defect: the route is
+`/owners/{ownerId}` and `find.html` failed Integer conversion.
 
 ## 3. Matrix axes
 

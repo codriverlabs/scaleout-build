@@ -81,18 +81,38 @@ class ArgsFileDirectoryStrategyTest {
     }
 
     /**
-     * Dropped deliberately: its entries address the downloaded cache from which
-     * {@code META-INF/native-image/} was already populated, and the absolute paths do not exist remotely.
+     * Staged, not dropped. Dropping it produced a petclinic binary that compiled and then failed with
+     * {@code Invalid logger interface org.hibernate.validator...Log (implementation not found)}: the cache
+     * held 356 reflection entries for hibernate-validator 7.0.4.Final including {@code Log_$logger}, while
+     * the classpath copy held 12 for 9.1.0.Final including none.
      */
     @Test
-    void dropsConfigurationFileDirectories(@TempDir Path temp) throws Exception {
+    void stagesConfigurationFileDirectoriesAndRewritesTheFlag(@TempDir Path temp) throws Exception {
         Path project = petclinicLike(temp, "native-image-1.args");
 
         NativeImageInputPlan plan = strategy.plan(inputs(project));
 
+        assertThat(lines(plan)).contains("-H:ConfigurationFileDirectories=config/7.0.2");
+        assertThat(plan.files()).extracting(StagedFile::relativePath)
+                .contains("config/7.0.2/reachability-metadata.json");
+        assertThat(plan.generatedArgsContent().orElseThrow()).doesNotContain("/home/");
+    }
+
+    /** A stale argfile can outlive a clean; native-image tolerates a missing config dir, so skip it. */
+    @Test
+    void skipsConfigurationDirectoriesThatNoLongerExist(@TempDir Path temp) throws Exception {
+        Path project = temp.resolve("target");
+        Files.createDirectories(project);
+        jar(project.resolve("lib/only.jar"));
+        writeArgs(project.resolve("native-image-8.args"), List.of(
+                "-cp", project.resolve("lib/only.jar").toString(),
+                "-o", project.resolve("app").toString(),
+                "-H:ConfigurationFileDirectories=" + temp.resolve("cleaned-away")));
+
+        NativeImageInputPlan plan = strategy.plan(inputs(project));
+
         assertThat(plan.generatedArgsContent().orElseThrow())
-                .doesNotContain("-H:ConfigurationFileDirectories")
-                .doesNotContain("graalvm-reachability-metadata");
+                .doesNotContain("-H:ConfigurationFileDirectories");
     }
 
     /** Arguments the strategy does not understand must survive untouched. */

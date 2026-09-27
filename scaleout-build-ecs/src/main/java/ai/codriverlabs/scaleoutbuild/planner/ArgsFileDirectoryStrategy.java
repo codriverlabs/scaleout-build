@@ -37,24 +37,44 @@ import java.util.stream.Stream;
  * that to a container cannot work. Nothing about it is a defect in Spring or GraalVM — relocating it is this
  * plugin's job, and it is mechanical.
  *
- * <h2>What GraalVM already does for us</h2>
+ * <h2>Why {@code -H:ConfigurationFileDirectories} is staged rather than dropped</h2>
  *
- * <p>The builder auto-discovers configuration from {@code META-INF/native-image/} and its subdirectories
- * anywhere on the classpath. Spring's AOT step populates {@code target/classes/META-INF/native-image/} —
- * measured at 58 {@code reachability-metadata.json} files plus a {@code native-image.properties} that
- * supplies the main class, which is why the argfile carries no main-class argument at all.
+ * <p>An earlier version of this rewrite dropped the flag, reasoning that GraalVM auto-discovers configuration
+ * from {@code META-INF/native-image/} anywhere on the classpath, that Spring's AOT step populates
+ * {@code target/classes/META-INF/native-image/}, and that the two therefore said the same thing. The library
+ * sets do overlap — measured on {@code spring-petclinic}, 56 artifacts named by the flag against 57 present
+ * on the classpath, a superset with nothing missing.
  *
- * <p>Two consequences, and both matter:
+ * <p><b>The contents are not the same, and the resulting binary failed at run time:</b>
  *
- * <ul>
- *   <li>Directory entries on the classpath are staged as <b>trees</b>, not skipped and not repackaged, so
- *       that {@code META-INF/native-image/} travels intact. Dropping the classes directory would lose the
- *       main class and every reachability entry.</li>
- *   <li>{@code -H:ConfigurationFileDirectories} is dropped. Its 57 entries addressed the downloaded
- *       repository cache from which those 58 files were already selected, so the configuration arrives by
- *       classpath discovery instead. Keeping absolute paths that do not exist in the container would fail;
- *       rewriting them would stage 37 MB to duplicate 1.9 MB already present.</li>
- * </ul>
+ * <pre>
+ * Invalid logger interface org.hibernate.validator.internal.util.logging.Log (implementation not found)
+ * </pre>
+ *
+ * <table>
+ *   <caption>hibernate-validator metadata, same artifact, two sources</caption>
+ *   <tr><th>Source</th><th>Version</th><th>Reflection entries</th><th>{@code Log_$logger}</th></tr>
+ *   <tr><td>{@code -H:ConfigurationFileDirectories}</td><td>7.0.4.Final</td><td>356</td><td>10</td></tr>
+ *   <tr><td>{@code META-INF/native-image/} on the classpath</td><td>9.1.0.Final</td><td>12</td><td>0</td></tr>
+ * </table>
+ *
+ * <p>Two things combine. The GraalVM reachability-metadata repository carries far richer metadata than a
+ * library ships inline, and {@code native-maven-plugin} falls back to the newest version it holds when it has
+ * no exact match — it logs {@code Configuration directory not found. Trying latest version}. So the flag can
+ * point at an older artifact's metadata that is nonetheless the only place a needed registration exists.
+ * Overlapping <em>names</em> said nothing about overlapping <em>content</em>.
+ *
+ * <p>The directories are therefore staged as trees and the flag rewritten. They are large — the cache was
+ * 37 MB — but content-addressed staging dedups them across builds, and the alternative is a binary that
+ * compiles for eight minutes and then cannot start.
+ *
+ * <h2>Classpath directories are staged as trees</h2>
+ *
+ * <p>Separately, and still true: directory entries on the classpath are staged whole rather than skipped or
+ * repackaged, because {@code target/classes/META-INF/native-image/} holds the AOT-generated configuration and
+ * a {@code native-image.properties} supplying the main class — which is why the argfile carries no main-class
+ * argument at all. Dropping that directory yields a binary with no entry point.
+ *
  */
 public final class ArgsFileDirectoryStrategy implements InputPlanStrategy {
 
@@ -62,6 +82,8 @@ public final class ArgsFileDirectoryStrategy implements InputPlanStrategy {
     private static final String ARGS_GLOB = "*.args";
 
     private static final String CLASSES_DIR_PREFIX = "classes";
+
+    private static final String CONFIG_DIR_PREFIX = "config";
 
     @Override
     public String name() {
@@ -150,9 +172,28 @@ public final class ArgsFileDirectoryStrategy implements InputPlanStrategy {
                 continue;
             }
 
-            // See the class javadoc: redundant with META-INF/native-image/ on the staged classpath,
-            // and its absolute paths do not exist in the container.
+            // Staged and rewritten, never dropped. See the class javadoc: this is NOT redundant with
+            // META-INF/native-image/ on the classpath, however much it looks like it.
             if (line.startsWith("-H:ConfigurationFileDirectories=")) {
+                String value = line.substring("-H:ConfigurationFileDirectories=".length());
+                List<String> rewrittenDirs = new ArrayList<>();
+                for (String raw : value.split(",", -1)) {
+                    if (raw.isBlank()) {
+                        continue;
+                    }
+                    Path dir = Path.of(raw.trim());
+                    if (!Files.isDirectory(dir)) {
+                        // A stale argfile can outlive a 'mvn clean'. Skipping is right rather than fatal:
+                        // native-image itself tolerates a missing configuration directory.
+                        continue;
+                    }
+                    String name = uniqueName(CONFIG_DIR_PREFIX + "/" + dir.getFileName(), usedNames);
+                    stageTree(dir, name, files);
+                    rewrittenDirs.add(name);
+                }
+                if (!rewrittenDirs.isEmpty()) {
+                    rewritten.add("-H:ConfigurationFileDirectories=" + String.join(",", rewrittenDirs));
+                }
                 continue;
             }
 
