@@ -24,13 +24,15 @@ cross-compile) and for running matrix cells concurrently.
 **The original non-obvious finding — that the SSE Lambda cost about as much as the Fargate compute it
 watched — no longer holds, and it is worth saying why it was wrong.** It rested on a 1024 MB function and
 an estimated 400-second build. Measured, the build is ~100 s per cell and the function is 256 MB native,
-so the relay is **$0.0005 of a $0.0075 build, about 7%**, against 49% for the two Fargate cells. §5 is
+so the relay is **$0.0018 of a $0.0130 real-project build, about 14%**, against 58% for the two Fargate
+cells. §5 is
 retained for its sizing levers but its premise is superseded by §4.
 
-**The live improvable line is Fargate memory, not the Lambda.** The task reserves 16 GiB and peaks at
-1179 MB — 7% — while saturating all four vCPU. That is a ~15% saving available on the largest line item,
-though not one to take on this evidence: see §4 for why the example app is the wrong thing to size
-against.
+**~~The live improvable line is Fargate memory~~ — resolved.** The task reserved 16 GiB and peaked at
+1179 MB on the example app, which looked like obvious waste. Measuring a real 233-jar project showed 5.2 GB
+instead, so the task is now **8 GiB** and there is little left to trim. That reversal is the most useful
+thing in this document: sizing against a trivial workload would have set up a failure on somebody's large
+project. See [`fargate-task-resource-usage.md`](design/control-plane/fargate-task-resource-usage.md).
 
 ## 2. What the code pins down
 
@@ -39,9 +41,9 @@ how the system might be deployed:
 
 | Parameter | Value | Source |
 |---|---|---|
-| Task size | 4 vCPU / 16 GiB | `BuildMojo` `requestedCpu=4096`, `requestedMemory=16384` |
+| Task size | **4 vCPU / 8 GiB** | `BuildMojo` `requestedCpu=4096`, `requestedMemory=8192`; server default `8192` |
 | Capacity provider | `FARGATE_SPOT` preferred, `FARGATE` fallback | `EcsTaskLauncher` |
-| Ephemeral storage | 20 GiB (included, unbilled) | `requestedEphemeralStorageGiB=0` |
+| Ephemeral storage | 20 GiB included, unbilled | `requestedEphemeralStorageGiB=0` — ECS rejects an explicit size below 21, so omitting it is how you get the free allowance |
 | Networking | public subnets, `natGateways(0)`, `assignPublicIp` | `ControlPlaneInfraStack` — one public IPv4 per task, no NAT gateway |
 | SSE Lambda | **384 MB** JVM / **256 MB** native, held open for the whole build | `memorySize(jvmMode ? 384 : 256)` — sized against measured usage, see [`lambda-resource-usage.md`](design/control-plane/lambda-resource-usage.md) |
 | SSE poll cadence | 3 s (`FilterLogEvents` + `refreshFromEcs` per tick) | `LogStreamResource.POLL_INTERVAL` |
@@ -74,7 +76,17 @@ All rates `eu-west-1`, retrieved from the AWS Price List API and from the Saving
 `DescribeSavingsPlansOfferingRates` API (Compute Savings Plan, No Upfront), September 2026.
 Re-verify before reusing — AWS republishes the price list continuously.
 
-### Fargate, 4 vCPU / 16 GiB ARM64
+### Fargate, 4 vCPU ARM64
+
+Per-unit rates are the same at any size; the task rate depends on the memory paired with the vCPU. The
+**8 GiB** row is the current default; 16 GiB is retained because earlier sections were computed with it.
+
+| Task size | arm64 on-demand | x86_64 on-demand |
+|---|---|---|
+| **4 vCPU / 8 GiB** | **$0.15800/h** | **$0.19748/h** |
+| 4 vCPU / 16 GiB | $0.18648/h | $0.23304/h |
+
+### Fargate per-unit, 4 vCPU / 16 GiB ARM64
 
 | Pricing | Per vCPU-h | Per GB-h | Task rate | vs. on-demand |
 |---|---|---|---|---|
@@ -129,20 +141,36 @@ arm64 cell is cheaper than the x86_64 cell despite taking longer.
 
 ### Per build, both cells, `FARGATE_SPOT`
 
-| Line item | Cost | Note |
-|---|---|---|
-| Fargate `arm64` cell, 4 vCPU / 16 GiB, 115 s | $0.0018 | $0.18648/h on-demand, −70% Spot |
-| Fargate `x86_64` cell, 4 vCPU / 16 GiB, 99 s | $0.0019 | $0.23304/h on-demand, −70% Spot |
-| SSE Lambda, native 256 MB **arm64**, ~140 s | $0.0005 | one stream for both cells |
-| Public IPv4, two tasks × ~105 s | $0.0003 | $0.005/h each |
-| CloudWatch Logs, DynamoDB, S3 staging | ~$0.0030 | unchanged from the estimate below; not independently measured |
-| **Total, Spot path** | **≈ $0.0075** | |
-| *Fargate on-demand instead* | *$0.0124* | |
-| **Total, on-demand fallback** | **≈ $0.0162** | |
+Two workloads, because they differ by 2.4× and neither is "typical". Task rate is **4 vCPU / 8 GiB** —
+$0.15800/h arm64, $0.19748/h x86_64 — which is the current default, down from 16 GiB.
 
-So a two-architecture build costs roughly **$0.008 on Spot**, against the $0.012 the estimate below
-predicted for a single cell. Two tasks at a quarter of the assumed duration is cheaper than one task at
-the assumed duration.
+| Line item | Example app (2 jars) | Real Quarkus (233 jars) |
+|---|---|---|
+| Fargate `arm64` cell | $0.0015 (115 s) | $0.0034 (258 s) |
+| Fargate `x86_64` cell | $0.0016 (99 s) | $0.0041 (250 s) |
+| **SSE Lambda** — `jvm` 384 MB arm64, *as deployed* | $0.0007 (140 s) | $0.0018 (360 s) |
+| Public IPv4, two tasks | $0.0003 | $0.0007 |
+| CloudWatch Logs, DynamoDB, S3 staging | ~$0.0030 | ~$0.0030 |
+| **Total, Spot path** | **≈ $0.0071** | **≈ $0.0130** |
+| *Fargate on-demand instead* | *$0.0105* | *$0.0250* |
+| **Total, on-demand** | **≈ $0.0145** | **≈ $0.0305** |
+
+The SSE Lambda line is priced for the **deployed** configuration, `jvm/arm64` at 384 MB, rather than the
+cheapest available. The alternatives, for the real project's 360 s stream:
+
+| Service mode | Lambda line | Note |
+|---|---|---|
+| `jvm` 384 MB arm64 | $0.0018 | deployed today; no GraalVM toolchain needed |
+| `native` 256 MB arm64 | $0.0012 | cheapest, but needs an arm64 runner to build |
+| `native` 256 MB x86_64 | $0.0015 | what a local native build from an x86_64 workstation produces |
+
+So switching to native saves about **$0.0006 per build** on a $0.013 build — roughly 5%. Worth having,
+not worth contorting a deployment for; the real reason to prefer native is the 5× faster cold start
+(441 ms against 2345 ms), which is a latency property rather than a cost one. Figures in
+[`lambda-resource-usage.md`](design/control-plane/lambda-resource-usage.md).
+
+**The Lambda is 14% of a real build and 10% of a trivial one.** The two Fargate cells are 58% and 44%
+respectively. Earlier drafts of this document had that relationship inverted — see §5.
 
 ### Lambda architecture: arm64 is the target
 
@@ -216,11 +244,11 @@ improves both simultaneously. That makes agent image size a cost lever, not just
 ## 5. SSE Lambda sizing levers (premise superseded by §4)
 
 > Written when the relay was 1024 MB and the build was assumed to run 400 s, making it ~34% of the bill.
-> Measured, it is **$0.0005 of $0.0075 — about 7%** — so the levers below are real but no longer the
+> Measured, it is **$0.0018 of $0.0130 — about 14%** — so the levers below are real but no longer the
 > priority. Retained because the second one, the poll interval, has a DynamoDB consequence that is
 > independent of Lambda cost.
 
-$0.0005 of a $0.0075 build — about **7%**, down from 34% before the function was resized and the window
+$0.0018 of a $0.0130 build — about **14%**, down from 34% before the function was resized and the window
 measured — is a Lambda holding a connection open and running a
 3-second `FilterLogEvents` + `refreshFromEcs` loop. Two changes, neither of which touches the wire
 contract in `scaleout-build-control-plane-api`:
@@ -352,16 +380,16 @@ Launch, build, terminate. 400 s of work plus EC2 boot and a Docker pull ≈ 550 
 | Log streaming / orchestration (still needed) | $0.0005 |
 | **Total** | **≈ $0.023** |
 
-**Loses to Fargate Spot at $0.0075**, and you inherit AMI patching plus a launch/terminate
+**Loses to Fargate Spot at $0.0130** (real-project build), and you inherit AMI patching plus a launch/terminate
 orchestrator the current design does not need.
 
 ### Always-on build box
 
-| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.0075/build |
+| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.0130/build |
 |---|---|---|
-| On-demand | $132.79 | ~17,700 builds/month |
-| Compute SP 1 yr | $100.81 | **~13,400 builds/month (~450/day)** |
-| Compute SP 3 yr | $69.79 | ~9,300 builds/month (~310/day) |
+| On-demand | $132.79 | ~10,200 builds/month |
+| Compute SP 1 yr | $100.81 | **~7,750 builds/month (~260/day)** |
+| Compute SP 3 yr | $69.79 | ~5,370 builds/month (~180/day) |
 
 Below those volumes the dedicated box loses on cost, and it additionally serialises the concurrent matrix
 cells that Fargate runs in parallel — which is the point of the offload, not a side benefit. The
@@ -428,8 +456,9 @@ Figures that are **assumed and should be measured**:
   measured; it is the one Lambda in the stack that `scripts/lambda-usage.sh` does not cover.
 - Whether these figures hold for a realistic project. Everything here is the example app, whose classpath
   is two jars. A build with hundreds of dependencies will upload more inputs, hold more memory during
-  `native-image`, and compile for longer — which is precisely why the 16 GiB task memory has not been
-  trimmed on a 7% utilisation reading.
+  `native-image`, and compile for longer. This was the reason not to trim task memory on a 7% reading, and
+  re-measuring against a real project confirmed it: 5.2 GB rather than 1.2 GB, so the task settled at
+  8 GiB rather than the 8 GiB minimum-for-4-vCPU being a lucky guess.
 - CloudWatch Logs / DynamoDB / S3 lumped at ~$0.003. Individually sub-cent; the S3 component is
   near-zero on repeat builds because staging is content-addressed (see
   `docs/design/control-plane/storage-layout-and-isolation.md`).
