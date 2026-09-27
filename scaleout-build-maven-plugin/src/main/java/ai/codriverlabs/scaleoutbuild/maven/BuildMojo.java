@@ -133,6 +133,22 @@ public class BuildMojo extends AbstractMojo {
      * ({@code <id>.lambda-url.<region>.on.aws}), and everything else about the infrastructure is the
      * service's concern. See {@code docs/design/control-plane/migration-from-direct-ecs-access.md}.
      */
+    /**
+     * Directory holding a {@code native-image.args} produced by GraalVM's {@code native-maven-plugin}
+     * ({@code mvn native:write-args-file}). Set this for Spring Boot AOT, Helidon, or any project whose
+     * native build goes through that plugin.
+     *
+     * <p>Leave unset for Quarkus, which is detected automatically from {@code target/native-sources}, and
+     * for plain GraalVM projects, where the arguments are derived from the runtime classpath.
+     *
+     * <p>There is deliberately no default. {@code write-args-file} takes its location from the
+     * {@code graalvm.native-image.args-file} property, and guessing wrong would not fail loudly — it would
+     * fall through to the derived strategy and build a binary that omits the AOT-generated reflection
+     * configuration, which fails at run time rather than at build time.
+     */
+    @Parameter(property = "scaleout-build.argsFileDirectory")
+    private String argsFileDirectory;
+
     @Parameter(property = "scaleout-build.endpoint", required = true)
     private String endpoint;
 
@@ -154,7 +170,7 @@ public class BuildMojo extends AbstractMojo {
 
     @Parameter(property = "scaleout-build.requestedCpu", defaultValue = "4096")
     private String requestedCpu;
-    @Parameter(property = "scaleout-build.requestedMemory", defaultValue = "16384")
+    @Parameter(property = "scaleout-build.requestedMemory", defaultValue = "8192")
     private String requestedMemory;
     @Parameter(property = "scaleout-build.requestedEphemeralStorageGiB", defaultValue = "0")
     private int requestedEphemeralStorageGiB;
@@ -450,7 +466,8 @@ public class BuildMojo extends AbstractMojo {
                 : null;
         List<Path> runtimeClasspath = resolveRuntimeClasspath();
         return new ProjectInputs(targetDirectory, finalName, artifactFile, runtimeClasspath, mainClass,
-                imageName, extraBuildArgs == null ? List.of() : extraBuildArgs);
+                imageName, extraBuildArgs == null ? List.of() : extraBuildArgs,
+                isBlank(argsFileDirectory) ? null : Path.of(argsFileDirectory));
     }
 
     private List<Path> resolveRuntimeClasspath() {

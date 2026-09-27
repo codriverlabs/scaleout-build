@@ -21,7 +21,7 @@ public record ArtifactListResponse(String buildId, List<CellArtifacts> cells) {
      * @param cell      cell identifier, {@code BUILDKIND/ARCHITECTURE}
      * @param downloads presigned {@code GET} targets, one per artifact
      */
-    public record CellArtifacts(String cell, List<UploadTarget> downloads) {
+    public record CellArtifacts(String cell, List<ArtifactDownload> downloads) {
 
         public CellArtifacts {
             downloads = downloads == null ? List.of() : List.copyOf(downloads);

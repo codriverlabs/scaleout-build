@@ -4,6 +4,7 @@
 package ai.codriverlabs.scaleoutbuild.controlplane;
 
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDescriptor;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDownload;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactListResponse;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.BuildSpec;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.BuildState;
@@ -51,6 +52,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  */
 @RegisterForReflection(targets = {
     ArtifactDescriptor.class,
+    ArtifactDownload.class,
     ArtifactListResponse.class,
     ArtifactListResponse.CellArtifacts.class,
     BuildSpec.class,

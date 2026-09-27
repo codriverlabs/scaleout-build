@@ -91,10 +91,40 @@ public final class NativeImageBuildExecutor implements BuildExecutor {
         }
     }
 
+    /**
+     * Default memory budget for the {@code native-image} builder, as a percentage of the container's limit.
+     *
+     * <p>Percentage rather than an absolute {@code -J-Xmx}, because the builder runs in a container whose
+     * size is a deployment decision: an absolute value is wrong at every size except the one it was chosen
+     * for, and too high a value in a smaller container is an OOM kill rather than a slowdown. The JVM reads
+     * the cgroup limit, so this scales automatically — verified, {@code MaxHeapSize} resolved to 6.4 GiB in
+     * an 8 GiB task.
+     *
+     * <p>80% measured better than an absolute cap on a 233-jar Quarkus application in an 8 GiB task, which
+     * is the opposite of what a "slimming" change usually does:
+     *
+     * <pre>
+     *                   -J-Xmx6g        MaxRAMPercentage=80
+     *   peak RSS        5.46/5.37 GB    5.28/5.49 GB
+     *   GC count        2321/2578       1542/1206
+     *   compile         3m47s/4m40s     3m19s/3m27s
+     * </pre>
+     *
+     * <p>{@code native-image} reads the percentage and sets its own build budget from it — it reported
+     * "6.11GB of memory (71.1% of system memory)" — so it gets more headroom than the absolute cap allowed
+     * and does roughly half the garbage collections. Peak RSS stayed well under the container limit because
+     * the builder manages that budget rather than allocating it outright.
+     *
+     * <p>Applied before {@link BuildCellRequest#getExtraNativeImageArgs()}, so a caller that passes its own
+     * {@code -J-Xmx} or {@code -J-XX:MaxRAMPercentage} overrides this: later {@code -J} arguments win.
+     */
+    static final String DEFAULT_MEMORY_BUDGET_ARG = "-J-XX:MaxRAMPercentage=80";
+
     private List<String> buildCommand(BuildCellRequest request) {
         List<String> command = new ArrayList<>(environment.nativeImageCommand());
         command.add("@" + request.getArgFileName());
         command.addAll(request.getBuildKind().nativeImageFlags(request.getProfileRelativePath()));
+        command.add(DEFAULT_MEMORY_BUDGET_ARG);
         command.addAll(request.getExtraNativeImageArgs());
         return List.copyOf(command);
     }

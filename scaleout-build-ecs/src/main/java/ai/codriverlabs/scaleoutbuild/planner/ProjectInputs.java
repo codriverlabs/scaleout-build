@@ -3,6 +3,7 @@
  */
 package ai.codriverlabs.scaleoutbuild.planner;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
@@ -28,11 +29,21 @@ public record ProjectInputs(
         List<Path> runtimeClasspath,
         String mainClass,
         String imageName,
-        List<String> extraBuildArgs) {
+        List<String> extraBuildArgs,
+        Path argsFileDirectory) {
 
+    /** Keeps existing callers working; no explicit argfile directory. */
     public ProjectInputs(Path targetDirectory, String finalName, Path projectArtifact,
                          List<Path> runtimeClasspath, String mainClass, String imageName,
                          List<String> extraBuildArgs) {
+        this(targetDirectory, finalName, projectArtifact, runtimeClasspath, mainClass, imageName,
+                extraBuildArgs, null);
+    }
+
+    public ProjectInputs(Path targetDirectory, String finalName, Path projectArtifact,
+                         List<Path> runtimeClasspath, String mainClass, String imageName,
+                         List<String> extraBuildArgs, Path argsFileDirectory) {
+        this.argsFileDirectory = argsFileDirectory;
         this.targetDirectory = Objects.requireNonNull(targetDirectory, "targetDirectory");
         this.finalName = Objects.requireNonNull(finalName, "finalName");
         this.projectArtifact = projectArtifact;
@@ -42,8 +53,28 @@ public record ProjectInputs(
         this.extraBuildArgs = extraBuildArgs == null ? List.of() : List.copyOf(extraBuildArgs);
     }
 
-    /** Directory Quarkus writes its native-image sources into, whether or not it exists. */
+    /**
+     * Candidate directories Quarkus writes its native-image sources into, newest layout first.
+     *
+     * <p>Two names, because Quarkus changed it. Current versions (verified against 3.39.4) write
+     * {@code target/native-sources/}; older ones wrote
+     * {@code target/<finalName>-native-image-source-jar/}. Probing both means the plugin works across the
+     * range rather than silently falling through to derived mode on a modern project -- which is what it
+     * did before, and which is worse than failing: a derived argfile omits the
+     * {@code --features=io.quarkus.runner.Feature} and reflection configuration that Quarkus augmentation
+     * generates, so the build either fails obscurely or produces a binary that breaks at run time.
+     */
+    public List<Path> quarkusNativeSourcesCandidates() {
+        return List.of(
+                targetDirectory.resolve("native-sources"),
+                targetDirectory.resolve(finalName + "-native-image-source-jar"));
+    }
+
+    /** First candidate directory that exists, or the preferred one if none do. */
     public Path quarkusNativeSourcesDirectory() {
-        return targetDirectory.resolve(finalName + "-native-image-source-jar");
+        return quarkusNativeSourcesCandidates().stream()
+                .filter(Files::isDirectory)
+                .findFirst()
+                .orElseGet(() -> quarkusNativeSourcesCandidates().get(0));
     }
 }

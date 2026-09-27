@@ -4,6 +4,9 @@ Measured 2026-09-25 in `eu-west-1` from four real build tasks — two builds, ea
 an `arm64` cell in parallel. Sources: ECS `DescribeTasks` lifecycle timestamps, CloudWatch Container
 Insights (`ECS/ContainerInsights`), and the agent's own log output.
 
+Whether these requirements fit Lambda MicroVMs or AgentCore Runtime is assessed against documented quotas
+in [`microvm-platform-fit.md`](microvm-platform-fit.md).
+
 Companion to [`lambda-resource-usage.md`](lambda-resource-usage.md), which covers the control-plane
 service. Cost implications are in [`../../COST_ANALYSIS.md`](../../COST_ANALYSIS.md).
 
@@ -31,6 +34,103 @@ large factor.
 The pull and compile phases are comparable, so this is capacity allocation, not the workload. It is worth
 knowing when moving to arm64 everywhere, because it lands directly in the billed window.
 
+## Slimming the task: what was changed and why
+
+Driven by a requirement to fit a Lambda MicroVM or AgentCore footprint rather than a Fargate one. Three
+defaults changed, each measured on the 233-jar Quarkus project.
+
+| | Before | After |
+|---|---|---|
+| Task memory | 16384 MB | **8192 MB** |
+| Ephemeral storage | 40 GiB explicit | **omitted** (Fargate's included 20 GiB) |
+| `native-image` budget | unset | **`-J-XX:MaxRAMPercentage=80`** |
+| vCPU | 4096 | 4096, unchanged |
+
+### Memory: 8 GiB is the floor, and the floor is the workload
+
+Peak RSS is 5.3–5.6 GB whatever is configured. 8 GiB runs at ~68% with about 2.5 GB spare, verified across
+several full builds on both architectures. **4 GiB is not available**: capping the builder's heap does not
+move peak RSS, because RSS is dominated by native memory and the image heap being constructed rather than
+the Java heap. Shrinking further needs a smaller application, not a smaller setting.
+
+### The budget is a percentage, and that measured *faster* than an absolute cap
+
+A percentage is read from the container's cgroup limit — verified, `MaxHeapSize` resolved to 6.4 GiB in an
+8 GiB task — so it stays correct if the task is resized. An absolute `-J-Xmx` is correct only at the size it
+was chosen for, and too large a value in a smaller container is an OOM kill rather than a slowdown.
+
+It was also the better performer, which is not what a slimming change usually does:
+
+| 8 GiB task | `-J-Xmx6g` | `MaxRAMPercentage=80` |
+|---|---|---|
+| Peak RSS | 5.46 / 5.37 GB | 5.28 / 5.49 GB |
+| GC count | 2321 / 2578 | **1542 / 1206** |
+| Compile | 3m47s / 4m40s | **3m19s / 3m27s** |
+
+`native-image` reads the percentage and sets its own build budget from it, reporting
+`6.11GB of memory (71.1% of system memory)`. That is more headroom than the absolute cap allowed, so it
+does roughly half the collections. GraalVM asks for this directly in its build output: *"HEAP: Set max heap
+for improved and more predictable memory usage."*
+
+Callers can override it — the default is placed before caller-supplied arguments and later `-J` flags win.
+
+### Ephemeral storage: omitted, not 20
+
+**ECS rejects an explicit size below 21 GiB**: `EphemeralStorage size should be at least 21`. Fargate's
+included 20 GiB is what you get by *not specifying* the field, which is why the default is 0 and
+`TaskDefinitionRegistrar` omits it.
+
+Found by setting it to 20 and watching every task fail to launch — the "free tier" number and the
+"minimum explicit" number are not the same, and assuming they were cost a deploy cycle. `ResourcePolicy`
+now maps any request of 1–20 onto 0 rather than passing it to ECS, so the mistake produces the free
+allowance instead of an error naming a constant nobody configured.
+
+Measured consumption is 1.87–2 GB on both projects, so 20 GiB is ten times the observed peak.
+
+### CPU left alone
+
+`native-image` saturates all four vCPU regardless of project size, so halving it roughly doubles build
+time. That is a latency trade rather than reclaimed slack, and it was left as a deliberate decision rather
+than taken silently.
+
+## Real project vs example app
+
+Re-measured 2026-09-26 against KubeMicroVM `operator-controller`: a Quarkus 3.39.4 operator with **233
+jars and a 71.9 MB runtime classpath**, against the example app's 2 jars and 0.72 MB. Two runs, both
+architectures, per-task figures separated by the `TaskDefinitionFamily` dimension.
+
+| | Example app (2 jars) | Real Quarkus (233 jars) |
+|---|---|---|
+| Memory peak, per task | 1179 MB | **5203–5312 MB** |
+| Memory, % of 16 GiB reserved | 7% | **32%** |
+| CPU peak | 4096 / 4096 | 4024–4095 / 4096 |
+| Ephemeral storage | 2 GB | 1.9 GB |
+| `native-image` compile | 40–55 s | 3m 6s – 5m 1s |
+| Total billed per task | 96–122 s | **250–258 s** |
+| Image pull | 8–9 s | 8 s |
+
+**This settles the memory question, and the answer is: leave 16 GiB alone.** The 7% reading was an
+artifact of a trivial example, exactly as suspected. A mid-size real application uses **4.5× more memory**
+— 5.2 GB — and `native-image` memory scales with application size, so a larger codebase will use more
+still.
+
+Trimming to the smallest legal pairing for 4 vCPU (8 GiB) would put this project at **65% utilisation with
+2.9 GB headroom**. That is too thin for a provision meant to serve arbitrary projects, and an overrun is a
+task failure rather than a slowdown. The ~15% saving is not worth it.
+
+**CPU saturates regardless of project size**, so 4 vCPU is doing real work in both cases and reducing it
+would extend every build proportionally.
+
+**Image pull is 8 s in both cases**, which follows: the pull is the agent image, not the project. Project
+size affects the S3 input download instead, which sits inside the execution phase.
+
+**arm64 provisioning is consistently slower** — 20 s against 11 s here, 22–24 s against 11–13 s
+previously. Reproduced across four runs now, and it lands in the billed window.
+
+**Compile time varied more than expected between runs** on identical inputs: 3m 37s and 5m 1s on the first
+pass, 3m 7s and 3m 6s on the second. Spot capacity variance is the likely cause. Treat a single compile
+timing as indicative only.
+
 ## CPU, memory and storage
 
 From Container Insights over the task window. Note the sampling caveat below.
@@ -48,16 +148,15 @@ request is doing real work and reducing it would lengthen the build roughly prop
 independently, so the unused 15 GiB is paid for. 4 vCPU permits 8–30 GiB, so the smallest legal pairing is
 4 vCPU / 8 GiB, which would cut the memory component in half — about 15% off the task rate.
 
-**That reduction has not been made, and should not be on this evidence alone.** The example app's
-classpath is two jars. `native-image` memory scales with the size of the application and its reachable
-heap, and a real project with hundreds of dependencies is the case 16 GiB was chosen for. Measure a
-representative build before touching it; the 7% figure says the *example* is small, not that the
-provision is wrong.
+**That reduction was not made, and the section above now explains why it should not be.** A real 233-jar
+project uses 5.2 GB, not 1.2 GB, which would be 65% of an 8 GiB provision. The 7% figure said the
+*example* was small, not that the provision was wrong — and re-measuring confirmed it.
 
 ## Sampling caveats
 
-- **Four tasks.** Enough to see that arm64 provisioning is consistently slower and that the pull is fast;
-  not enough for confident percentiles.
+- **Eight tasks now**, across two projects and four runs. Enough to be confident that arm64 provisioning is
+  slower and the pull is fast; still not enough for percentiles, and compile time in particular varied by
+  60% between runs on identical inputs.
 - **Container Insights samples at one-minute intervals** and these tasks run 96–122 s, so there are only
   two or three samples per task. A brief memory spike during compilation could fall between them, which
   makes 1179 MB a lower bound on the true peak.
