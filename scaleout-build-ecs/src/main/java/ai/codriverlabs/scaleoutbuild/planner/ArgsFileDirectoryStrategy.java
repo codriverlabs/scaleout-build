@@ -36,24 +36,30 @@ import java.util.stream.Stream;
  * reflection and resource configuration that a derived argfile omits. Requiring the path makes the
  * unverified part explicit rather than silently wrong.
  *
- * <p><b>That assumption has now been measured, and it is wrong for {@code write-args-file}.</b> Verified
- * against Spring Boot 4.1.0 with {@code native-maven-plugin} 1.1.1: the goal writes
- * {@code target/native-image-<random long>.args} — a randomized name this strategy will not find — and the
- * arguments are <em>absolute host paths</em>, not relative. Measured in one small application: 107 absolute
- * path references, a {@code -cp} pointing into {@code ~/.m2/repository} (outside the staged directory
- * entirely), and 57 {@code -H:ConfigurationFileDirectories} entries addressing a 37 MB tree under
- * {@code target/}.
+ * <p><b>That assumption has been measured and is wrong for {@code write-args-file} — but the consequence is
+ * narrower than it first appears.</b> Verified against Spring Boot 4.1.0 with {@code native-maven-plugin}
+ * 1.1.1: the goal writes {@code target/native-image-<random long>.args}, a randomized name this strategy
+ * will not find, and its arguments are <em>absolute host paths</em> — 107 references in one small
+ * application, including a {@code -cp} into {@code ~/.m2/repository}.
  *
- * <p>The generalisation was the error, not bad luck. Quarkus's {@code native-sources} output is designed to
- * be relocatable — that is the purpose of {@code -Dquarkus.native.sources-only=true}. {@code write-args-file}
- * is designed for local invocation on the machine that produced it, so absolute paths are correct for its
- * intended use.
+ * <p><b>Nothing about Spring Boot's output is hostile to building elsewhere.</b> {@code write-args-file} is
+ * designed for local invocation on the machine that produced it, where absolute paths are correct;
+ * generalising from Quarkus's deliberately relocatable {@code native-sources} was this strategy's error, not
+ * a defect in Spring or GraalVM. Relocating an argfile is mechanical.
  *
- * <p>Consequence: <b>Spring Boot AOT and Helidon are unsupported, not merely unverified.</b> Staging this
- * directory and relaying the argfile cannot work, because the paths it names do not exist in the container.
- * The fix is to parse the argfile, stage the classpath jars through the existing per-blob content-addressed
- * store, stage the referenced metadata directories, and emit a rewritten argfile with container paths —
- * scoped in {@code docs/design/control-plane/matrix-axes-and-image-strategy.md}.
+ * <p>It is also mostly already solved here. GraalVM auto-discovers configuration from
+ * {@code META-INF/native-image/} anywhere on the classpath, and Spring's AOT processing populates
+ * {@code target/classes/META-INF/native-image/} — measured at 58 {@code reachability-metadata.json} files,
+ * 1.9 MB, covering the same libraries as the 57 {@code -H:ConfigurationFileDirectories} entries in the
+ * argfile. So the AOT-generated configuration travels with the classpath we already stage, and those
+ * absolute directory references look redundant rather than load-bearing.
+ *
+ * <p>What remains is therefore small: glob for {@code native-image-*.args}, stage the {@code -cp} entries
+ * through the existing per-blob content-addressed store (which {@link DerivedClasspathStrategy} already
+ * does), rewrite {@code -cp} and {@code -o} to container paths, and drop or rewrite
+ * {@code -H:ConfigurationFileDirectories}. <b>Not yet implemented, and the redundancy claim needs a
+ * byte-comparison against a locally built binary before it is relied upon</b> — scoped in
+ * {@code docs/design/control-plane/matrix-axes-and-image-strategy.md}.
  */
 public final class ArgsFileDirectoryStrategy implements InputPlanStrategy {
 

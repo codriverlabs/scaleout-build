@@ -2,10 +2,17 @@
 
 Status: design. Records a measured defect that blocks the framework coverage this roadmap assumes.
 
-## 1. The blocker, measured
+## 1. Spring Boot AOT: what is actually missing
 
 Verified 2026-09-27 against [`spring-petclinic`](https://github.com/spring-projects/spring-petclinic)
-(Spring Boot **4.1.0**, `native-maven-plugin` **1.1.1** inherited from the parent, single module).
+(Spring Boot **4.1.0**, `native-maven-plugin` **1.1.1** inherited from the parent).
+
+**State the conclusion first, because the earlier version of this document overstated it.** Spring Boot
+native builds are ordinary GraalVM builds. Nothing in their output prevents building remotely. The gap is a
+path-relocation gap in *this project*, and most of the hard part is already handled by GraalVM's own
+classpath auto-discovery.
+
+### 1.1 What `write-args-file` emits
 
 `native:write-args-file` succeeds and reports:
 
@@ -13,68 +20,52 @@ Verified 2026-09-27 against [`spring-petclinic`](https://github.com/spring-proje
 [INFO] Args file written to: target/native-image-2514289111389238304.args
 ```
 
-Three assumptions in `ArgsFileDirectoryStrategy` fail against that output.
-
-### 1.1 The filename is randomized
-
-The strategy resolves `StagingLayout.DEFAULT_ARGS_FILE_NAME` inside the configured directory.
-`write-args-file` emits `native-image-<random long>.args`. So `appliesTo` passes — the directory exists —
-and `plan` throws, telling the user to rename the file.
-
-That is at least a *loud* failure with actionable advice, which was the deliberate intent of requiring the
-directory rather than guessing it. But renaming is a workaround, and it does not survive the next build,
-because the suffix changes.
-
-### 1.2 The arguments are absolute paths, not relative
-
-This is the substantive defect. The strategy's javadoc states the assumption plainly — *"on the assumption
-the arguments reference it by relative path — which is how Quarkus's equivalent directory works."*
-
-Measured in the petclinic argfile:
-
-| | Count |
+| | Measured |
 |---|---|
-| Absolute `/home/ubuntu/...` path references | **107** |
-| `-H:ConfigurationFileDirectories` entries | **57** |
-| Size of the referenced metadata tree | **37 MB** |
+| Filename | randomized — `native-image-<random long>.args` |
+| Absolute `/home/ubuntu/...` references | 107 |
+| `-cp` entries | into `~/.m2/repository`, outside any staged directory |
+| `-H:ConfigurationFileDirectories` entries | 57, into `target/graalvm-reachability-metadata/<hash>/...` (37 MB tree) |
+| `-o` | absolute host path |
 
-Concretely, the argfile contains a `-cp` whose entries point into `~/.m2/repository` — **outside the staged
-directory entirely** — an `-o` naming an absolute host path, and 57 configuration directories under
-`target/graalvm-reachability-metadata/<hash>/<group>/<artifact>/<version>/`.
+Those paths do not exist in the container. **This is by design on GraalVM's side** — `write-args-file`
+records the command for the machine that produced it, where absolute paths are correct. The error was in
+`ArgsFileDirectoryStrategy`, whose javadoc assumed *"the arguments reference it by relative path — which is
+how Quarkus's equivalent directory works."* Quarkus's `native-sources` is deliberately relocatable; that is
+the whole point of `-Dquarkus.native.sources-only=true`. Generalising from one to the other was our mistake.
 
-None of those paths exist inside the Fargate container. Staging the directory and running the argfile
-verbatim cannot work.
+### 1.2 The part that already works
 
-**Why the assumption was wrong rather than unlucky.** Quarkus's `native-sources` output is *designed* to be
-relocatable — that is the purpose of `-Dquarkus.native.sources-only=true`, which exists so the compile can
-happen elsewhere. `native-maven-plugin`'s `write-args-file` is designed for local invocation on the machine
-that produced it, so absolute paths are correct for its intended use. Generalising from one to the other was
-the error.
+GraalVM
+[auto-discovers configuration](https://www.graalvm.org/latest/reference-manual/native-image/overview/BuildConfiguration/)
+from `META-INF/native-image/` — and any subdirectory — anywhere on the classpath. Spring's AOT step populates
+`target/classes/META-INF/native-image/`:
 
-### 1.3 Walking the directory stages the wrong things
+| | Measured |
+|---|---|
+| `reachability-metadata.json` files | **58** |
+| Size | 1.9 MB |
+| Libraries covered | the same 56 the argfile's `-H:` entries name — attoparser, classmate, tomcat-embed, HikariCP, jackson, logback, caffeine … |
 
-`Files.walk(directory)` over `target/` would stage compiled classes, the repackaged fat jar, and the 37 MB
-metadata tree, while still missing every `~/.m2` jar the classpath actually needs.
+So the AOT-generated configuration **travels with the classpath we already stage**, and the 57 absolute
+directory references look redundant rather than load-bearing — they point at the downloaded repository cache
+from which those 58 files were selected.
 
-## 2. The fix, scoped
+### 1.3 Remaining work, and it is small
 
-Rewrite the argfile rather than relay it. Each piece already exists somewhere in the codebase:
+1. Glob for `native-image-*.args`; fail if more than one matches.
+2. Stage `-cp` entries through the existing per-blob content-addressed store. `DerivedClasspathStrategy`
+   already does exactly this, which is where the measured 234/235 dedup comes from — so Spring Boot inherits
+   the upload avoidance for free.
+3. Rewrite `-cp` and `-o` to container paths. Set `-o` explicitly; a bare `-o` resolving to the working
+   directory was already a bug once (#36).
+4. Drop `-H:ConfigurationFileDirectories`, or rewrite it if §1.2 turns out to be wrong.
 
-1. **Parse the argfile.** Split `-cp` on the path separator; collect `-H:ConfigurationFileDirectories`
-   (comma-separated); find `-o`.
-2. **Stage the classpath jars through the existing per-blob CAS.** This is exactly what
-   `DerivedClasspathStrategy` already does, and it is where the 234/235 dedup comes from — so a Spring Boot
-   build gets the same upload avoidance for free.
-3. **Stage the referenced metadata directories**, preserving their relative shape.
-4. **Emit a rewritten argfile** with container paths, and set `-o` explicitly — bare `-o` resolving to the
-   working directory was already a bug once (#36).
-5. **Glob for `native-image-*.args`** instead of a fixed name, and fail if more than one matches.
-
-Not large, but a feature rather than a tweak, and it needs the same end-to-end verification Quarkus got:
-both architectures, byte sizes compared, binary actually executed.
-
-**Until it lands, Spring Boot AOT and Helidon are unsupported rather than untested.** The user guide should
-say so.
+**Verification gate before believing §1.2:** build petclinic locally with the full argfile, build it remotely
+without the `-H:` entries, and compare the binaries byte for byte — the same check that validated Quarkus
+(13,372,680 B x86-64, 13,241,624 B aarch64, identical to the pre-migration baseline). A binary that builds
+but silently lacks metadata fails at run time, which is the failure mode this project has already been bitten
+by and the reason `argsFileDirectory` has no default.
 
 ## 3. Matrix axes
 
@@ -146,9 +137,9 @@ and the caveats section of the AWS blog above, which was not read in full.
 
 ## 5. Order of work
 
-1. **Fix `ArgsFileDirectoryStrategy`** (§2) and verify against petclinic on both architectures. Without it
-   the two most common Spring frameworks are unsupported, which matters more than any new axis.
-2. Mark Spring Boot AOT and Helidon unsupported in the user guide until then.
+1. **Wire up `ArgsFileDirectoryStrategy`** (§1.3) and verify against petclinic on both architectures. Without it
+   Spring Boot and Helidon users cannot use this plugin at all, which matters more than any new axis.
+2. Until then the user guide says "not yet wired up", with the reason — not "unsupported", which would wrongly imply a defect in Spring or GraalVM.
 3. Add the **version axis**, with one image per version initially — simplest, and it makes the axis real.
 4. Measure whether image pull has become material. If it has, evaluate SOCI against a consolidated
    multi-toolchain image.

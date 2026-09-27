@@ -263,17 +263,23 @@ compute is often bundled into a subscription rather than billed separately.
 |---|---|
 | **Quarkus** | Verified end to end — 3.39.4, 233 dependencies, both architectures |
 | **Plain GraalVM** via derived classpath | Works; no AOT-generated configuration involved |
-| **Spring Boot AOT** | **Unsupported.** See below |
-| **Helidon** | **Unsupported**, same cause |
+| **Spring Boot AOT** | **Not yet wired up.** See below — the remaining work is path relocation |
+| **Helidon** | Same, same cause |
 
-Spring Boot AOT and Helidon drive `native-maven-plugin`'s `write-args-file`, which emits **absolute host
-paths** — measured against Spring Boot 4.1.0: 107 absolute references, a classpath pointing into
-`~/.m2/repository`, and 57 configuration directories under `target/`. Those paths do not exist in the remote
-container, so the argfile cannot be relayed as-is. It also writes a randomized filename
-(`native-image-<random>.args`).
+Spring Boot native builds are perfectly ordinary GraalVM builds; nothing in their output prevents building
+remotely. The gap is on our side: `native-maven-plugin`'s `write-args-file` is designed for local invocation,
+so it emits **absolute host paths** (measured against Spring Boot 4.1.0: 107 references, a classpath pointing
+into `~/.m2/repository`) and a randomized filename, `native-image-<random>.args`. Those need relocating to
+container paths before the argfile can be replayed remotely.
 
-Do not work around this by renaming the file — the build will start and then produce a binary missing its
-AOT-generated reflection configuration, which fails at run time rather than build time. The fix is scoped in
+Encouragingly, most of it already works by accident of good design on GraalVM's part: the builder
+auto-discovers configuration from `META-INF/native-image/` anywhere on the classpath, and Spring's AOT step
+populates `target/classes/META-INF/native-image/` — 58 metadata files covering the same libraries the
+argfile's `-H:ConfigurationFileDirectories` entries name. So the AOT configuration travels with the classpath
+we already stage.
+
+Until the relocation lands, don't work around it by renaming the argfile — the paths inside still point at
+your workstation. Scoped in
 [`design/control-plane/matrix-axes-and-image-strategy.md`](design/control-plane/matrix-axes-and-image-strategy.md).
 
 ## Troubleshooting
