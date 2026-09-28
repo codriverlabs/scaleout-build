@@ -30,14 +30,14 @@ less memory billed across a session that spends most of its time idle. See §8.
 **Against an always-on build box, the scale-out architecture wins by two orders of magnitude at ordinary
 volumes, on plain on-demand rates with no commitment.** A two-architecture setup of always-on machines is
 about $503/month before a single build; 100 builds a month through a small `t4g.large` client plus Fargate
-is **$2.04**. The always-on box only overtakes at roughly 600-800 builds a day, sustained. Full working
+is **$2.01**. The always-on box only overtakes at roughly 600-800 builds a day, sustained. Full working
 in §7 — and note that a single x86_64 box cannot produce the arm64 binary at all, so the comparison is
 also one architecture against two.
 
 **The original non-obvious finding — that the SSE Lambda cost about as much as the Fargate compute it
 watched — no longer holds, and it is worth saying why it was wrong.** It rested on a 1024 MB function and
 an estimated 400-second build. Measured, the build is ~100 s per cell and the function is 256 MB native,
-so the relay is **$0.0018 of a $0.0130 real-project build, about 14%**, against 58% for the two Fargate
+so the relay is **$0.0015 of a $0.0127 real-project build, about 12%**, against 59% for the two Fargate
 cells. §5 is
 retained for its sizing levers but its premise is superseded by §4.
 
@@ -161,28 +161,28 @@ $0.15800/h arm64, $0.19748/h x86_64 — which is the current default, down from 
 |---|---|---|
 | Fargate `arm64` cell | $0.0015 (115 s) | $0.0034 (258 s) |
 | Fargate `x86_64` cell | $0.0016 (99 s) | $0.0041 (250 s) |
-| **SSE Lambda** — `jvm` 384 MB arm64, *as deployed* | $0.0007 (140 s) | $0.0018 (360 s) |
+| **SSE Lambda** — `native` 256 MB x86_64, *as deployed* | $0.0006 (140 s) | $0.0015 (360 s) |
 | Public IPv4, two tasks | $0.0003 | $0.0007 |
 | CloudWatch Logs, DynamoDB, S3 staging | ~$0.0030 | ~$0.0030 |
-| **Total, Spot path** | **≈ $0.0071** | **≈ $0.0130** |
+| **Total, Spot path** | **≈ $0.0070** | **≈ $0.0127** |
 | *Fargate on-demand instead* | *$0.0105* | *$0.0250* |
-| **Total, on-demand** | **≈ $0.0145** | **≈ $0.0305** |
+| **Total, on-demand** | **≈ $0.0144** | **≈ $0.0302** |
 
-The SSE Lambda line is priced for the **deployed** configuration, `jvm/arm64` at 384 MB, rather than the
-cheapest available. The alternatives, for the real project's 360 s stream:
+The SSE Lambda line is priced for the **deployed** configuration, `native/x86_64` at 256 MB. The
+alternatives, for the real project's 360 s stream:
 
 | Service mode | Lambda line | Note |
 |---|---|---|
-| `jvm` 384 MB arm64 | $0.0018 | deployed today; no GraalVM toolchain needed |
-| `native` 256 MB arm64 | $0.0012 | cheapest, but needs an arm64 runner to build |
-| `native` 256 MB x86_64 | $0.0015 | what a local native build from an x86_64 workstation produces |
+| `native` 256 MB x86_64 | **$0.0015** | **deployed today** — what a local native build from an x86_64 workstation produces |
+| `native` 256 MB arm64 | $0.0012 | cheapest, but needs an arm64 runner; `deploy.yml` selects one, and needs an OIDC deploy role that does not yet exist |
+| `jvm` 384 MB arm64 | $0.0018 | the previous resting state; needs no GraalVM toolchain to build |
 
-So switching to native saves about **$0.0006 per build** on a $0.013 build — roughly 5%. Worth having,
-not worth contorting a deployment for; the real reason to prefer native is the 5× faster cold start
-(441 ms against 2345 ms), which is a latency property rather than a cost one. Figures in
+Switching to native saved about **$0.0003 per build** on a $0.013 build — roughly 2%. The real reason to
+prefer it is the **cold start: measured 480–524 ms on the deployed native function against 2345 ms on the
+JVM**, a latency property rather than a cost one. Going further to `native/arm64` would save another $0.0003. Figures in
 [`lambda-resource-usage.md`](design/control-plane/lambda-resource-usage.md).
 
-**The Lambda is 14% of a real build and 10% of a trivial one.** The two Fargate cells are 58% and 44%
+**The Lambda is 12% of a real build and 9% of a trivial one.** The two Fargate cells are 59% and 45%
 respectively. Earlier drafts of this document had that relationship inverted — see §5.
 
 ### Lambda architecture: arm64 is the target
@@ -264,11 +264,11 @@ improves both simultaneously. That makes agent image size a cost lever, not just
 ## 5. SSE Lambda sizing levers (premise superseded by §4)
 
 > Written when the relay was 1024 MB and the build was assumed to run 400 s, making it ~34% of the bill.
-> Measured, it is **$0.0018 of $0.0130 — about 14%** — so the levers below are real but no longer the
+> Measured, it is **$0.0015 of $0.0127 — about 12%** — so the levers below are real but no longer the
 > priority. Retained because the second one, the poll interval, has a DynamoDB consequence that is
 > independent of Lambda cost.
 
-$0.0018 of a $0.0130 build — about **14%**, down from 34% before the function was resized and the window
+$0.0015 of a $0.0127 build — about **12%**, down from 34% before the function was resized and the window
 measured — is a Lambda holding a connection open and running a
 3-second `FilterLogEvents` + `refreshFromEcs` loop. Two changes, neither of which touches the wire
 contract in `scaleout-build-control-plane-api`:
@@ -394,39 +394,49 @@ concluded it saves nothing — the billed duration is the same whether the loop 
 But that is the *server-side tick rate inside one long invocation*. The untouched variable is how long each
 invocation lives.
 
-**The contract for short invocations already exists.** `GET /builds/{buildId}/logs?since=<millis>` already
-takes a watermark, `LogEvent.nextSince` is already a per-cell map, and the client already reconnects with it —
-that machinery exists because Lambda caps at 900 s, so `STREAM_BUDGET` (780 s) forces a handover on long
-builds. Reducing `STREAM_BUDGET` to a single tick converts streaming into polling **using the code path that
-is already written and tested**.
+**The endpoint is ready for it; the client is not.** `GET /builds/{buildId}/logs?since=<millis>` already takes
+a watermark, `LogEvent.nextSince` is already a per-cell map, and the client already reconnects on
+`LAMBDA_TIMEOUT`. An earlier draft of this section concluded from that it was "one constant". Reading
+`ServiceBuildBackend.streamUntilTerminal` disproves it — three blockers, and the third removes the middle
+ground.
 
-| | Invocations | Cost | vs current |
-|---|---|---|---|
-| Current: one invocation, 384 MB, 360 s | 1 | **$0.00180** | — |
-| Poll 3 s, warm, 384 MB | 120 | $0.00020 | **9× cheaper** |
-| Poll 3 s, warm, native 256 MB | 120 | $0.00014 | **12× cheaper** |
-| Poll 10 s, warm, native 256 MB | 36 | $0.00004 | **42× cheaper** |
+**A. The reconnect cap is a count, not a duration.** The client loops
+`for (int reconnects = 0; reconnects < 64; ...)` and then throws *"gave up after 64 log-stream reconnects"*.
 
-**The caveat that decides it.** AWS
-[standardized INIT-phase billing](https://aws.amazon.com/blogs/compute/aws-lambda-standardizes-billing-for-init-phase/)
-on 1 August 2025, so cold starts are billed for on-demand invocations. Polling multiplies the number of
-opportunities to pay one:
+| Budget | 64 reconnects covers |
+|---|---|
+| 780 s (current) | 13.9 hours — irrelevant |
+| ~3 s (one tick) | **192 seconds** |
 
-| Worst case: every poll cold | Cost | vs current |
-|---|---|---|
-| JVM, 384 MB, 2345 ms init | $0.00161 | **no saving** — the benefit is erased |
-| Native, 256 MB, 441 ms init | $0.00032 | still 6× cheaper |
+A 116-second example-app build survives that. The 700-second petclinic build **fails outright**. The cap has
+to become time-based first.
 
-Polls 3 seconds apart should reuse a warm environment, so the warm row is the expected case. But the downside
-is only bounded in native mode. **This is a second, independent reason to deploy native as the resting state** —
-§6 already recommended it for sizing; it also de-risks this change.
+**B. The `since` query parameter is scalar, so frequent reconnects duplicate output.** `nextSince` is a
+`Map<String, Long>` per cell — but the parameter is `@QueryParam("since") Long`, so the client collapses the
+map to its minimum:
 
-**Recommendation.** Not worth doing for the money — $0.0018 of a $0.0130 build. Worth considering because it
-would *delete* the `STREAM_BUDGET` handover as a concept rather than defending it: with no long-lived
-invocation there is no 900 s cap to hand over at. §6 argues that complexity is written, tested, and records a
-real bug (`7782771`), so it should not be replaced casually — but "the reconnect path becomes the only path"
-is a simplification, not a rewrite. Sequence it after native is the resting deployment, and measure warm-start
-hit rate before committing.
+```java
+since = last.nextSince().values().stream().min(Long::compareTo).orElse(since);
+```
+
+The resource then applies that one timestamp to every cell. At one reconnect per build that replays a little.
+At 120 reconnects it replays, every time, every line from every cell ahead of the slowest — and the two
+architectures finish minutes apart (measured: 5m21s against 8m46s on petclinic).
+
+The irony is precise: `nextSince` is a map **because** a scalar caused a real bug (commit `7782771`). The
+query parameter kept the scalar, and the long budget is what hides it. Polling would push that scalar through
+120 times a build. Fixing it is a wire-contract change.
+
+**C. There is no moderate budget that saves anything.** Lambda bills invocation duration. An invocation that
+holds the stream for 60 s is billed 60 s, so six of them for a 360 s build is still 360 s billed — **zero
+saving**. Measured on the native deployment just now: median billed duration 784 ms for ordinary API calls,
+**116,406 ms for the one invocation holding the stream.** The saving exists only if each invocation does one
+poll and returns, which forces the extreme case and therefore forces A and B.
+
+**Revised recommendation: not worth it as scoped.** It costs a wire-contract change plus a client-loop change
+to save ~$0.0016 per build, and it would route a per-cell watermark through a scalar 120 times per build —
+re-exposing the shape of a bug this project already fixed once. Revisit only if per-cell `since` is wanted for
+another reason; then polling becomes nearly free on top of it.
 
 ### ECS Express Mode — always-on economics for the same work
 
@@ -546,23 +556,23 @@ one — untested, so not recommended.
 | | |
 |---|---|
 | `t4g.large` client, for a ~6 minute build | $0.0074 |
-| Fargate Spot, both cells | $0.0130 |
-| **Total, client billed only while building** | **$0.0204** |
-| *with Fargate on-demand instead of Spot* | *$0.0379* |
+| The build itself, Spot — both Fargate cells, the Lambda, IPv4, logs and storage (§4) | $0.0127 |
+| **Total, client billed only while building** | **$0.0201** |
+| *with Fargate on-demand instead of Spot* | *$0.0376* |
 
 ### Monthly totals
 
 | Builds/month | Client on-demand + Fargate | Client always-on + Fargate | `r6a.2xlarge` always-on |
 |---|---|---|---|
 | 10 | **$0.20** | $53.86 | $370.55 |
-| 50 | **$1.02** | $54.38 | $370.55 |
-| 100 | **$2.04** | $55.03 | $370.55 |
-| 500 | **$10.18** | $60.23 | $370.55 |
-| 1,000 | **$20.36** | $66.73 | $370.55 |
-| 5,000 | **$101.80** | $118.73 | $370.55 |
+| 50 | **$1.00** | $54.36 | $370.55 |
+| 100 | **$2.01** | $55.00 | $370.55 |
+| 500 | **$10.03** | $60.08 | $370.55 |
+| 1,000 | **$20.06** | $66.43 | $370.55 |
+| 5,000 | **$100.30** | $117.23 | $370.55 |
 
 The always-on box costs the same whether you build once a month or five thousand times. Scale-out
-overtakes it at about **24,000 builds/month** with an always-on client, or **18,000** if the client is
+overtakes it at about **25,000 builds/month** with an always-on client, or **18,500** if the client is
 billed only while building — roughly 600–800 builds a day, sustained.
 
 ### The argument that is not about cost
@@ -603,16 +613,16 @@ Launch, build, terminate. 400 s of work plus EC2 boot and a Docker pull ≈ 550 
 | Log streaming / orchestration (still needed) | $0.0005 |
 | **Total** | **≈ $0.023** |
 
-**Loses to Fargate Spot at $0.0130** (real-project build), and you inherit AMI patching plus a launch/terminate
+**Loses to Fargate Spot at $0.0127** (real-project build), and you inherit AMI patching plus a launch/terminate
 orchestrator the current design does not need.
 
 ### Always-on build box
 
-| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.0130/build |
+| Pricing | `m7g.xlarge` monthly (730 h) | Break-even vs. $0.0127/build |
 |---|---|---|
-| On-demand | $132.79 | ~10,200 builds/month |
-| Compute SP 1 yr | $100.81 | **~7,750 builds/month (~260/day)** |
-| Compute SP 3 yr | $69.79 | ~5,370 builds/month (~180/day) |
+| On-demand | $132.79 | ~10,450 builds/month |
+| Compute SP 1 yr | $100.81 | **~7,940 builds/month (~265/day)** |
+| Compute SP 3 yr | $69.79 | ~5,500 builds/month (~185/day) |
 
 Below those volumes the dedicated box loses on cost, and it additionally serialises the concurrent matrix
 cells that Fargate runs in parallel — which is the point of the offload, not a side benefit. The
@@ -681,7 +691,7 @@ means paying build-sized memory for the whole session:
 | Offloads | 2 GB | **2.0 GB-hours** |
 
 For a session doing three 6-minute builds — 30% of the hour compiling — that is **4× less memory billed**,
-plus $0.0130 per build on Fargate Spot. The ratio improves as the session gets longer or builds get rarer,
+plus $0.0127 per build on Fargate Spot. The ratio improves as the session gets longer or builds get rarer,
 which is the normal shape for an agent that spends most of its time waiting on a model or a human.
 
 AgentCore Runtime bills CPU and memory consumption per second and reclaims idle memory after 120 seconds
@@ -733,7 +743,7 @@ What that buys in an ephemeral sandbox:
 ### What it does not buy, stated plainly
 
 - **It is not a cost saving on the hosted side.** Kiro's documentation is explicit that cloud sessions carry
-  *no separate charge for cloud compute*. Offloading therefore **adds** about $0.0130 per build to *your*
+  *no separate charge for cloud compute*. Offloading therefore **adds** about $0.0127 per build to *your*
   AWS bill; it does not remove a charge from somewhere else.
 - **It does not relieve a session concurrency cap.** Kiro caps concurrent sessions (10) rather than pooled
   memory, so the 4× multiplier above **does not transfer**. That multiplier applies to a self-hosted fleet

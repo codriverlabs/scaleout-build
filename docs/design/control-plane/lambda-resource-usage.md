@@ -150,3 +150,29 @@ applied to the reaper instead of the service.
   sizing and the median slightly optimistic.
 - These numbers are from the example app, whose classpath is two jars. A real project's build will upload
   more inputs and hold more in memory while presigning.
+
+## Native is now the resting state (2026-09-28)
+
+Deployed `native/x86_64` at 256 MB, replacing `jvm/arm64` at 384 MB. Measured over 10 invocations of an
+example-app build immediately after the switch:
+
+| | Value |
+|---|---|
+| Runtime / architecture | `provided.al2023` / `x86_64` |
+| Memory configured | 256 MB |
+| Peak memory used | 93–146 MB — **57% of 256** |
+| Init (cold start) | **480–524 ms**, median 502 ms — against **2345 ms** on the JVM |
+| Billed duration, ordinary API calls | median 784 ms |
+| Billed duration, the held SSE stream | 116,406 ms for a 116-second build |
+
+The last row is the whole cost story: one invocation is billed for the build's wall clock because it holds
+the stream. See [`../../COST_ANALYSIS.md`](../../COST_ANALYSIS.md) §6 for why shortening that is harder than
+it looks.
+
+**Correctness check, not just cost.** The build through the native control plane produced artifacts
+byte-identical to the documented baseline — 13,372,680 B `x86-64` and 13,241,624 B `aarch64` — so the switch
+changed the runtime without changing the output.
+
+**`native/arm64` remains available and cheaper still** ($0.0012 against $0.0015 per real build). It needs an
+arm64 builder: `deploy.yml` selects `ubuntu-24.04-arm` for exactly this, but its OIDC deploy role has never
+been created, so the workflow fails its own guard at `AWS_DEPLOY_ROLE_ARN is not set`.
