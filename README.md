@@ -70,29 +70,44 @@ compute is often bundled into a subscription, so the honest claim is capability,
 
 ## When this is the wrong tool
 
-Three cases, and the first two are the common ones.
+Four cases. The first is the common one.
 
 **You only need the chip you already have.** Then don't use this. Building locally is faster and free — no
 upload, no image pull, no waiting for a machine to start. The plugin builds host-matching work locally by
 default for exactly that reason; you have to set `forceRemote` to override it.
 
-**You build a lot.** Renting per build stops making sense at volume, because a machine you keep running is
-cheap per build once it is busy. Plain pay-as-you-go rates, no commitments either side, at **2 cents a
-build** — the figure that includes renting a machine to run Maven, since that is what the right-hand column
-gives you:
+**You already own the hardware.** If the machines exist and are paid for, the marginal cost of a local build
+is electricity, and nothing here competes with that.
 
-| Your volume | This plugin | Two always-on machines, one per chip |
+**You can keep machines genuinely busy, and you will commit for three years.** This is the only volume
+argument that survives, and it is narrower than it looks.
+
+An earlier version of this section claimed that past roughly 800 builds a day you should just rent machines,
+7× cheaper at 6,000 a day. **That was wrong**, because it treated an always-on machine as having unlimited
+capacity. It does not: a `native-image` compile saturates 4 vCPU for about 4.3 minutes, so one 4-vCPU machine
+finishes **about 335 builds a day** at a theoretical 100% utilisation. Always-on capacity has to scale with
+volume just as offloading does — 1,000 builds a day needs three machine pairs, 6,000 needs eighteen. Machine
+size does not help: a 4× larger instance costs 4× and completes 4× as many, so the cost per build is flat.
+
+Compared per build, both architectures, at the same capacity type:
+
+| Utilisation of your own machines | Always-on, on-demand | Always-on, 3-yr commitment |
 |---|---|---|
-| 100 builds/day | **$60/month** | $503/month |
-| 600 builds/day | **$361/month** | $503/month |
-| 1,000 builds/day | $602/month | **$503/month** |
-| 6,000 builds/day | $3,611/month | **$503/month** — 7× cheaper |
+| 100% (unreachable in practice) | $0.0247 | **$0.0131** |
+| 70% | $0.0354 | $0.0187 |
+| 50% | $0.0495 | $0.0262 |
 
-The crossover is around **800 builds a day, sustained**. Past that, rent machines. At a few thousand builds a
-day it is not a close call, and a Savings Plan on those machines widens the gap further.
+Against **$0.0127** offloaded on interruptible capacity, or **$0.0302** offloaded on guaranteed capacity.
 
-This is not a discount to negotiate — it is the shape of the cost. Per-build rental wins when machines would
-sit idle, and loses when they would not.
+So the honest reading:
+
+- **Interruptible is fine for you:** offloading wins everywhere except a three-year commitment run at
+  essentially 100% utilisation, where it is a tie ($0.0131 against $0.0127).
+- **You need guaranteed capacity:** own machines win *if* you keep them ~100% busy ($0.0247 against $0.0302).
+  At 70% utilisation they cost $0.0354 and offloading wins again.
+
+Bursty traffic — which is what agent and CI workloads are — is what makes high utilisation hard. A queue of
+builds waiting for a busy machine is the cost of that utilisation, paid in latency rather than dollars.
 
 **You cannot tolerate an occasional lost build.** The default is interruptible capacity, which is about 70%
 cheaper and occasionally reclaimed mid-build. There is no automatic retry today, so a reclaimed build fails

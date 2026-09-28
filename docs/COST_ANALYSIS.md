@@ -571,9 +571,10 @@ one — untested, so not recommended.
 | 1,000 | **$20.06** | $66.43 | $370.55 |
 | 5,000 | **$100.30** | $117.23 | $370.55 |
 
-The always-on box costs the same whether you build once a month or five thousand times. Scale-out
-overtakes it at about **25,000 builds/month** with an always-on client, or **18,500** if the client is
-billed only while building — roughly 600–800 builds a day, sustained.
+The always-on box costs the same whether you build once a month or five thousand times — **but only up to its
+capacity ceiling, which this table ignores.** See the correction below: one compile-capable machine finishes
+about 335 builds a day, so past that the right-hand column has to grow too and the crossover implied here does
+not exist.
 
 ### The argument that is not about cost
 
@@ -594,6 +595,50 @@ ten builds on the scale-out path.
   Fargate time including ~20 s provisioning and ~8 s image pull. For a trivial project the offload is
   slower, which is why the plugin runs host-matching cells locally by default.
 - **No network dependency.** A build that cannot reach the control plane cannot proceed.
+
+### Correction: always-on capacity is not flat, and this section assumed it was
+
+Everything above this point in §7 compares a per-build cost against a **fixed** monthly machine cost. That is
+wrong, and it flattered the always-on column at high volume in one direction and the offload column in the
+other.
+
+**A `native-image` compile saturates 4 vCPU for about 4.3 minutes** (measured: 258 s arm64, 250 s x86_64, at
+4024–4095 of 4096 CPU units). So a 4-vCPU machine runs **one compile at a time**:
+
+```
+86,400 s/day ÷ 258 s = ~335 builds/day per machine, at a theoretical 100% utilisation
+```
+
+Always-on capacity therefore scales with volume exactly as offloading does. 1,000 builds/day needs **three**
+machine pairs; 6,000 needs **eighteen**. Machine size does not change the arithmetic — a `c7g.4xlarge` costs
+about 4× a `c7g.xlarge` and completes about 4× as many compiles, so cost per build is flat across sizes.
+
+The right comparison is therefore **per build at a given utilisation**, not monthly totals. Minimum
+compile-capable pair, `c7g.xlarge` + `c7i.xlarge` (4 vCPU / 8 GiB each), $0.1550/h and $0.19152/h:
+
+| Utilisation | Always-on, on-demand | Always-on, 3-yr SP |
+|---|---|---|
+| 100% (unreachable) | $0.0247 | **$0.0131** |
+| 70% | $0.0354 | $0.0187 |
+| 50% | $0.0495 | $0.0262 |
+
+Against **$0.0127** offloaded on Spot, **$0.0302** offloaded on-demand.
+
+| Scenario | Winner |
+|---|---|
+| Interruptible both sides, any utilisation | **Offload** — except a 3-yr commitment at ~100%, which is a tie |
+| Guaranteed both sides, ~100% utilisation | Always-on, $0.0247 against $0.0302 |
+| Guaranteed both sides, 70% utilisation | **Offload**, $0.0302 against $0.0354 |
+
+The mechanism is unglamorous: **Fargate Spot is roughly 70% off, and always-on EC2 carries no discount unless
+you commit for one or three years.** Parity requires both the commitment and near-perfect utilisation. Bursty
+agent and CI traffic is precisely what does not deliver the second, and the price of chasing it is a queue —
+latency rather than dollars.
+
+**What survives from the tables above:** the comparison against a *developer workstation* (`r6a.2xlarge`,
+64 GiB) is still valid as a statement about that machine, but it is the wrong machine to compare against. 8 GiB
+is enough to compile, so the honest always-on baseline is $252.96/month for a pair, not $503.33 for two
+oversized boxes.
 
 ## 7b. Versus EC2, with Compute Savings Plans
 
