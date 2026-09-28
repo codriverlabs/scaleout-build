@@ -209,7 +209,7 @@ Returns `409 InputsMissing` with the outstanding digests if an upload did not co
 {
   "buildId": "01J8ZQ...",
   "state": "RUNNING",
-  "ownerArn": "arn:aws:iam::864899852480:role/Developers",
+  "ownerArn": "arn:aws:iam::123456789012:role/Developers",
   "createdAt": "...", "startedAt": "...", "updatedAt": "...",
   "cells": [
     { "cell": "NATIVE/X86_64", "state": "RUNNING", "taskArn": "...", "spotInterruptions": 0 },

@@ -40,3 +40,13 @@ target/
 cdk.out/
 cdk.context.json
 dependency-reduced-pom.xml
+
+# Deployment outputs and local endpoints -- contain account ids and live URLs
+scaleout-build-control-plane-infra/cdk-outputs.json
+scaleout-build-control-plane-infra/cdk.context.json
+**/deployment.properties
+*.env
+.env.*
+
+# Editor-local LSP config: contains absolute workstation paths
+.kiro/settings/

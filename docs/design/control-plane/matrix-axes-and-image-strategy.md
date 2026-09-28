@@ -23,7 +23,7 @@ classpath auto-discovery.
 | | Measured |
 |---|---|
 | Filename | randomized — `native-image-<random long>.args` |
-| Absolute `/home/ubuntu/...` references | 107 |
+| Absolute `$HOME/...` references | 107 |
 | `-cp` entries | into `~/.m2/repository`, outside any staged directory |
 | `-H:ConfigurationFileDirectories` entries | 57, into `target/graalvm-reachability-metadata/<hash>/...` (37 MB tree) |
 | `-o` | absolute host path |
@@ -95,8 +95,8 @@ remote build used, so the control was run in that image with the **unmodified** 
 
 ```
 docker run --platform linux/amd64 \
-  -v /home/ubuntu/projects/tests/spring-petclinic:/home/ubuntu/projects/tests/spring-petclinic \
-  -v /home/ubuntu/.m2:/home/ubuntu/.m2:ro \
+  -v /path/to/spring-petclinic:/path/to/spring-petclinic \
+  -v $HOME/.m2:$HOME/.m2:ro \
   --entrypoint native-image "$AGENT_IMAGE" "@target/native-image-<id>.args" -o target/control-petclinic
 ```
 

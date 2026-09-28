@@ -308,7 +308,7 @@ class EcsTaskSupervisorTest {
     @Test
     void composesTheAwslogsStreamNameFromTheTaskIdSegmentOfTheArn() {
         assertThat(EcsTaskSupervisor.logStreamNameFor("scaleout-build",
-                "arn:aws:ecs:eu-west-1:864899852480:task/scaleout-build-test/4ca29c85a3d649a7b805fcf7f912dfd0"))
+                "arn:aws:ecs:eu-west-1:123456789012:task/scaleout-build-test/4ca29c85a3d649a7b805fcf7f912dfd0"))
                 .isEqualTo("scaleout-build/scaleout-build-agent/4ca29c85a3d649a7b805fcf7f912dfd0");
         // Two tasks in the same cluster must never collapse onto the same stream name -- that
         // collision is exactly what the shared-prefix bug amounted to.

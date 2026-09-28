@@ -23,22 +23,22 @@ class CallerIdentityResolverTest {
     @Test
     void anIamUserOwnsBuildsByItsOwnArn() {
         CallerIdentity id = CallerIdentityResolver.of(
-                "arn:aws:iam::864899852480:user/karolpiatek", null, "1.2.3.4");
+                "arn:aws:iam::123456789012:user/build-user", null, "1.2.3.4");
 
-        assertThat(id.ownerKey()).isEqualTo("arn:aws:iam::864899852480:user/karolpiatek");
+        assertThat(id.ownerKey()).isEqualTo("arn:aws:iam::123456789012:user/build-user");
         assertThat(id.perHuman()).isTrue();
         assertThat(id.sessionName()).isNull();
-        assertThat(id.accountId()).isEqualTo("864899852480");
+        assertThat(id.accountId()).isEqualTo("123456789012");
     }
 
     @Test
     void ssoUsersSharingOneRoleAreIsolatedFromEachOther() {
         CallerIdentity alice = CallerIdentityResolver.of(
-                "arn:aws:sts::864899852480:assumed-role/AWSReservedSSO_Dev_abc/alice@codriverlabs.ai",
-                "AROAEXAMPLE:alice@codriverlabs.ai", null);
+                "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_abc/alice@example.com",
+                "AROAEXAMPLE:alice@example.com", null);
         CallerIdentity bob = CallerIdentityResolver.of(
-                "arn:aws:sts::864899852480:assumed-role/AWSReservedSSO_Dev_abc/bob@codriverlabs.ai",
-                "AROAEXAMPLE:bob@codriverlabs.ai", null);
+                "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_abc/bob@example.com",
+                "AROAEXAMPLE:bob@example.com", null);
 
         assertThat(alice.ownerKey()).isNotEqualTo(bob.ownerKey());
         assertThat(alice.perHuman()).isTrue();
@@ -53,14 +53,14 @@ class CallerIdentityResolverTest {
         // Identity Center reuses the session name per user, so a later login must resolve to the
         // same owner -- otherwise a developer loses sight of yesterday's builds.
         CallerIdentity monday = CallerIdentityResolver.of(
-                "arn:aws:sts::864899852480:assumed-role/AWSReservedSSO_Dev_abc/alice@codriverlabs.ai",
+                "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_abc/alice@example.com",
                 null, null);
         CallerIdentity tuesday = CallerIdentityResolver.of(
-                "arn:aws:sts::864899852480:assumed-role/AWSReservedSSO_Dev_2xy/alice@codriverlabs.ai",
+                "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_2xy/alice@example.com",
                 null, null);
 
-        assertThat(monday.ownerKey()).endsWith("/alice@codriverlabs.ai");
-        assertThat(tuesday.ownerKey()).endsWith("/alice@codriverlabs.ai");
+        assertThat(monday.ownerKey()).endsWith("/alice@example.com");
+        assertThat(tuesday.ownerKey()).endsWith("/alice@example.com");
     }
 
     @Test
@@ -164,13 +164,13 @@ class CallerIdentityResolverTest {
     void parsesTheNestedFunctionUrlRequestContextShape() throws Exception {
         String json = """
                 {
-                  "accountId": "864899852480",
+                  "accountId": "123456789012",
                   "authorizer": {
                     "iam": {
                       "accessKey": "AKIAEXAMPLE",
-                      "accountId": "864899852480",
-                      "principalId": "AROAEXAMPLE:alice@codriverlabs.ai",
-                      "userArn": "arn:aws:sts::864899852480:assumed-role/Dev/alice@codriverlabs.ai"
+                      "accountId": "123456789012",
+                      "principalId": "AROAEXAMPLE:alice@example.com",
+                      "userArn": "arn:aws:sts::123456789012:assumed-role/Dev/alice@example.com"
                     }
                   },
                   "http": { "method": "POST", "path": "/builds", "sourceIp": "203.0.113.7" }
@@ -179,7 +179,7 @@ class CallerIdentityResolverTest {
 
         CallerIdentity id = resolver.resolve(json);
 
-        assertThat(id.ownerKey()).isEqualTo("arn:aws:iam::864899852480:role/Dev/alice@codriverlabs.ai");
+        assertThat(id.ownerKey()).isEqualTo("arn:aws:iam::123456789012:role/Dev/alice@example.com");
         assertThat(id.sourceIp()).isEqualTo("203.0.113.7");
         assertThat(id.perHuman()).isTrue();
     }

@@ -11,13 +11,13 @@ Delete this file once the outstanding items are closed; it is a snapshot, not a 
 |---|---|
 | Branch | `main`, clean, in sync with origin |
 | Build | `mvn -B clean verify` green, 8 modules |
-| Deployed | `ScaleoutBuildControlPlane`, `eu-west-1`, account `864899852480`, `UPDATE_COMPLETE` |
+| Deployed | `ScaleoutBuildControlPlane`, `eu-west-1`, account `123456789012`, `UPDATE_COMPLETE` |
 | Runtime mode | **`jvm/arm64`, 384 MB** (last deployed 2026-09-26 20:05 UTC) |
 | Native mode | works and was verified end to end, but is **not currently deployed** — see below |
 | Task defaults | 4 vCPU, **8 GiB**, ephemeral storage omitted (Fargate's included 20 GiB) |
 | Fargate capacity | `spot-preferred` (default); set with `cdk deploy -c fargateCapacityStrategy=…` |
-| Endpoint | `https://26usidrly3gc4uo4b2i6fcp5ui0njbjo.lambda-url.eu-west-1.on.aws/` (also in SSM at `/scaleout-build/control-plane/endpoint`) |
-| Agent image | `864899852480.dkr.ecr.eu-west-1.amazonaws.com/scaleout-build-agent:latest`, multi-arch, verified both arches |
+| Endpoint | `https://REPLACE-WITH-YOUR-ENDPOINT-ID.lambda-url.eu-west-1.on.aws/` (also in SSM at `/scaleout-build/control-plane/endpoint`) |
+| Agent image | `123456789012.dkr.ecr.eu-west-1.amazonaws.com/scaleout-build-agent:latest`, multi-arch, verified both arches |
 
 End-to-end is proven. `mvn package` in `docs/examples/scaleout-build-example-app` produces:
 
@@ -61,11 +61,11 @@ change. arm64 is the intended production target — 25% cheaper per GB-second.
 ## Picking this up
 
 ```bash
-cd /home/ubuntu/projects/ecp/scaleout-build-maven-plugin
+cd /path/to/scaleout-build
 git fetch origin --prune && git status -sb
 mvn -B clean verify
 ./scripts/verify-synth.sh                     # asserts the template for BOTH modes
-./scripts/verify-agent-image.sh 864899852480.dkr.ecr.eu-west-1.amazonaws.com/scaleout-build-agent:latest
+./scripts/verify-agent-image.sh 123456789012.dkr.ecr.eu-west-1.amazonaws.com/scaleout-build-agent:latest
 ```
 
 Re-run the end-to-end build:

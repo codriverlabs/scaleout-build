@@ -13,8 +13,8 @@ import org.junit.jupiter.api.Test;
  */
 class StagingServiceOwnerHashTest {
 
-    private static final String ALICE = "arn:aws:iam::864899852480:role/Dev/alice@codriverlabs.ai";
-    private static final String BOB = "arn:aws:iam::864899852480:role/Dev/bob@codriverlabs.ai";
+    private static final String ALICE = "arn:aws:iam::123456789012:role/Dev/alice@example.com";
+    private static final String BOB = "arn:aws:iam::123456789012:role/Dev/bob@example.com";
 
     @Test
     void isStableForTheSameOwner() {

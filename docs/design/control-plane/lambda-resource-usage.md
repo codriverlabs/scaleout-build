@@ -1,6 +1,6 @@
 # Control plane Lambda: measured resource usage
 
-Measured 2026-09-25 in `eu-west-1`, account `864899852480`, from the `REPORT` lines Lambda writes for
+Measured 2026-09-25 in `eu-west-1`, account `123456789012`, from the `REPORT` lines Lambda writes for
 every invocation. Both figures come from real end-to-end builds of
 `docs/examples/scaleout-build-example-app` (two matrix cells each), not from synthetic load.
 

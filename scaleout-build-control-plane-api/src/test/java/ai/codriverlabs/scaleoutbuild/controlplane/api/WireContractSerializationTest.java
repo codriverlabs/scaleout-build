@@ -57,7 +57,7 @@ class WireContractSerializationTest {
     @Test
     void buildStatusRoundTripsWithArtifacts() throws Exception {
         BuildStatus original = new BuildStatus("01J8ZQ", BuildState.SUCCEEDED,
-                "arn:aws:iam::864899852480:role/Developers",
+                "arn:aws:iam::123456789012:role/Developers",
                 List.of(new CellStatus("NATIVE/X86_64", CellState.SUCCEEDED, "arn:aws:ecs:task/abc",
                         0, null, 1,
                         List.of(new ArtifactDescriptor("hello-native", "6f0de787", 13372680)))),

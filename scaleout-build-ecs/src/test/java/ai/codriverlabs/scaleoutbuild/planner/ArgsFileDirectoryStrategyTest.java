@@ -131,12 +131,12 @@ class ArgsFileDirectoryStrategyTest {
     @Test
     void redirectsOutputDirectoryFlagIntoStagingOutput(@TempDir Path temp) throws Exception {
         Path project = petclinicLike(temp, "native-image-1.args");
-        appendArgs(project, "-H:Path=/home/ubuntu/project/target");
+        appendArgs(project, "-H:Path=$HOME/project/target");
 
         NativeImageInputPlan plan = strategy.plan(inputs(project));
 
         assertThat(lines(plan)).contains("-H:Path=output").doesNotContain(
-                "-H:Path=/home/ubuntu/project/target");
+                "-H:Path=$HOME/project/target");
     }
 
     /** {@code -H:Name} is the other way to name the image, and must be honoured as an expected artifact. */
