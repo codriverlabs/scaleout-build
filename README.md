@@ -31,8 +31,16 @@ the cloud for the few minutes the compile takes, builds there, and hands the fin
 your normal `mvn package`. The remote workers bring their own compiler, so there is nothing extra to install
 locally.
 
-Measured on a real 233-dependency application: **about 1.3 cents** to produce both binaries, roughly five to
-nine minutes each, running in parallel.
+On a real 233-dependency application, both binaries cost **about 1.3 cents** of cloud time — five to nine
+minutes each, running in parallel. Add about **0.7 cents** if you are also paying for the machine that runs
+Maven, as in CI or an agent sandbox; on a laptop you already own, that part is free. So **1.3 to 2 cents a
+build**, and the table [below](#when-this-is-the-wrong-tool) uses the 2-cent figure because it is comparing
+against machines you would otherwise rent.
+
+Two honest caveats on that number. Roughly a quarter of the 1.3 cents — log storage, the build-state table,
+and staged uploads — is **costed rather than metered**; only the compute and network lines were measured
+directly. And it assumes interruptible capacity, which is the default; guaranteed capacity roughly doubles the
+compute portion. Full breakdown in [`docs/COST_ANALYSIS.md`](docs/COST_ANALYSIS.md).
 
 ### The case where there is no alternative
 
@@ -69,7 +77,9 @@ upload, no image pull, no waiting for a machine to start. The plugin builds host
 default for exactly that reason; you have to set `forceRemote` to override it.
 
 **You build a lot.** Renting per build stops making sense at volume, because a machine you keep running is
-cheap per build once it is busy. Plain pay-as-you-go rates, no commitments either side:
+cheap per build once it is busy. Plain pay-as-you-go rates, no commitments either side, at **2 cents a
+build** — the figure that includes renting a machine to run Maven, since that is what the right-hand column
+gives you:
 
 | Your volume | This plugin | Two always-on machines, one per chip |
 |---|---|---|
