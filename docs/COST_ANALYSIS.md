@@ -428,6 +428,68 @@ real bug (`7782771`), so it should not be replaced casually — but "the reconne
 is a simplification, not a rewrite. Sequence it after native is the resting deployment, and measure warm-start
 hit rate before committing.
 
+### ECS Express Mode — always-on economics for the same work
+
+Express Mode provisions an HTTP service fronted by an ALB. Two readings of the idea, both worse.
+
+**As a replacement for the relay Lambda**, it still has to read CloudWatch — so it does the Lambda's job on
+an always-on cost base:
+
+| | eu-west-1 |
+|---|---|
+| ALB | $18.40/month |
+| Fargate 0.25 vCPU / 0.5 GiB ARM, continuous | $7.21/month |
+| **Total** | **$25.60/month** |
+| Break-even against $0.0018/build | **~14,200 builds/month** |
+| Lambda today, at 100 builds/month | **$0.18/month** |
+
+**As the build task serving its own logs** — the more interesting reading, since the task already has a public
+IP and is already paid for — it fails the durability test above, for exactly the reason agent-side S3 shipping
+did. The `awslogs` driver captures stdout at the *driver* level and survives the agent being `SIGKILL`ed; an
+in-process HTTP server does not. Spot reclamation and an OOM during `native-image` are the two failures where
+the tail of the log is the whole value, and Spot is the default. It would also serve logs from CPU that
+`native-image` is saturating, and require the client to reach an ephemeral task.
+
+### Is there an `awslogs` forwarder — EventBridge or otherwise?
+
+**Not to EventBridge.** Subscription filters — the real-time forwarding mechanism for an arbitrary log group —
+support exactly three destinations: a **Kinesis data stream**, a **Firehose delivery stream**, or a **Lambda
+function** (plus cross-account logical destinations, themselves backed by Kinesis or Firehose). EventBridge is
+not among them, in either the API or the CloudFormation resource.
+
+The newer **delivery API** (`PutDeliverySource` / `PutDeliveryDestination` / `CreateDelivery`) does target
+CloudWatch Logs, S3, Firehose and X-Ray — but its sources are AWS services: *"Only some AWS services support
+being configured as a delivery source."* ECS container stdout arriving through `awslogs` is customer log data
+in a log group, not a vended-log source, so that API does not apply here.
+
+#### The one forwarding variant that survives the durability test
+
+**Subscription filter → Firehose → S3.** Unlike agent-side shipping, this *preserves* the property that made
+`awslogs` worth keeping: log events still reach CloudWatch through the driver first, and the filter delivers a
+**copy**. A `SIGKILL`ed agent still has its tail captured. That distinction is not drawn in the rejection
+above, and it makes this the only variant that could take the relay off the live path without losing logs on
+Spot reclamation.
+
+It is still not suitable, for a reason that is not cost: **Firehose buffers before delivering.** Small
+per-build volumes would sit in the buffer rather than reaching S3 promptly, so the client would tail a log
+well behind the build. For a 6-minute build that defeats the purpose of streaming. (The exact minimum buffer
+interval for S3 delivery was not verified here; the conclusion holds at any value in tens of seconds.)
+Firehose ingestion is a few cents per GB — immaterial at these volumes. Latency is the blocker, not price.
+
+**Verdict:** worth adding as an *archive* path if post-mortem log retention in S3 is ever wanted. Not a
+replacement for the live stream.
+
+#### The EventBridge answer that does exist
+
+ECS publishes **task state change** events to EventBridge. That is the other half of what the SSE stream
+carries: `refreshFromEcs` currently issues a `DescribeTasks` on every tick to notice
+`PROVISIONING → RUNNING → STOPPED`. Those transitions could be event-driven rather than polled.
+
+It does nothing for log content and does not shorten the held-open invocation, so it is not a cost lever on
+its own. It becomes one in combination with the polling change above: if invocations are short, a status-change
+event is what lets the client back off its poll interval without losing responsiveness at the moment a cell
+finishes.
+
 The `STREAM_BUDGET` handover at 780 s is worth defending rather than engineering away. It exists
 because Lambda caps at 900 s, and `native-image` builds routinely exceed 13 minutes, so reconnect is
 the normal path, not an edge case. But `LogStreamResource` already implements it correctly —
