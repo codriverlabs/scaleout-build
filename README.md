@@ -14,6 +14,26 @@ short-lived remote workers, using S3 as a content-addressed staging layer for cl
 build outputs, and attaches the resulting binaries back to the reactor with per-architecture
 classifiers.
 
+### In plain terms
+
+Java normally starts slowly. You can compile it down to a native binary that starts in milliseconds, which
+is what you want for a cloud service or a command-line tool.
+
+The catch is that **you have to compile on the same kind of chip you are shipping to.** There is no
+cross-compiling. Cloud now runs on two chip families — the older Intel/AMD kind (`x86_64`) and the newer ARM
+kind (AWS Graviton, same family as Apple Silicon). ARM costs roughly 25% less to run, so plenty of teams want
+to ship both.
+
+That leaves two usual options: own and maintain build machines of both kinds, or quietly ship for only one.
+
+This plugin is a third option. When your build needs a chip your machine does not have, it rents that chip in
+the cloud for the few minutes the compile takes, builds there, and hands the finished binary back. You run
+your normal `mvn package`. The remote workers bring their own compiler, so there is nothing extra to install
+locally.
+
+Measured on a real 233-dependency application: **about 1.3 cents** to produce both binaries, roughly five to
+nine minutes each, running in parallel.
+
 ### The case where there is no alternative
 
 "Own hardware for every target" assumes you control the machine. In a **hosted agent sandbox you do
@@ -39,6 +59,36 @@ toolchain it was never given.
 See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md#running-in-an-ephemeral-agent-sandbox) for the setup, and
 [`docs/COST_ANALYSIS.md`](docs/COST_ANALYSIS.md) §8 for what this does and does not save — hosted sandbox
 compute is often bundled into a subscription, so the honest claim is capability, not cost.
+
+## When this is the wrong tool
+
+Three cases, and the first two are the common ones.
+
+**You only need the chip you already have.** Then don't use this. Building locally is faster and free — no
+upload, no image pull, no waiting for a machine to start. The plugin builds host-matching work locally by
+default for exactly that reason; you have to set `forceRemote` to override it.
+
+**You build a lot.** Renting per build stops making sense at volume, because a machine you keep running is
+cheap per build once it is busy. Plain pay-as-you-go rates, no commitments either side:
+
+| Your volume | This plugin | Two always-on machines, one per chip |
+|---|---|---|
+| 100 builds/day | **$60/month** | $503/month |
+| 600 builds/day | **$361/month** | $503/month |
+| 1,000 builds/day | $602/month | **$503/month** |
+| 6,000 builds/day | $3,611/month | **$503/month** — 7× cheaper |
+
+The crossover is around **800 builds a day, sustained**. Past that, rent machines. At a few thousand builds a
+day it is not a close call, and a Savings Plan on those machines widens the gap further.
+
+This is not a discount to negotiate — it is the shape of the cost. Per-build rental wins when machines would
+sit idle, and loses when they would not.
+
+**You cannot tolerate an occasional lost build.** The default is interruptible capacity, which is about 70%
+cheaper and occasionally reclaimed mid-build. There is no automatic retry today, so a reclaimed build fails
+and you run it again. Deployments where that is expensive should set
+`-c fargateCapacityStrategy=on-demand-preferred` when deploying the control plane. Details in
+[`docs/COST_ANALYSIS.md`](docs/COST_ANALYSIS.md).
 
 ## Using it
 
