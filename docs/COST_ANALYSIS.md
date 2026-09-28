@@ -365,6 +365,69 @@ over the Function URL is a reasonable relay.
 | Agent ships logs to S3 | ~$0.0010 | no | **no** | none |
 | CloudWatch Live Tail | **~$0.067** | depends on holder | yes | 3 h |
 
+### ALB, API Gateway, CloudFront — none of them removes the charge
+
+Asked directly: can the log stream go through an ALB, API Gateway, or a public CloudFront origin instead, and
+avoid Lambda charges?
+
+**No, and the reason is the same one that forces the relay in the first place.** All three are *transports*.
+None can read CloudWatch Logs. Whatever sits behind them still needs credentials and still costs compute, so
+changing the transport moves the charge rather than removing it.
+
+Rates verified against the Price List API for `eu-west-1`:
+
+| Option | Rate | Verdict |
+|---|---|---|
+| **ALB** | $0.0252/h + $0.008/LCU-h | **$18.40/month always-on.** Break-even against $0.0018/build is **10,220 builds/month** — before LCU charges, and before solving the actual problem |
+| **API Gateway HTTP API** | $1.00/million requests | 29-second integration timeout **kills SSE outright**. For polling it works, but a Lambda Function URL already carries requests at no extra charge, so this is pure added cost |
+| **CloudFront** | $0.085/GB + per-request | Needs an HTTP origin. CloudWatch Logs is not one. Over S3 it works but every poll is a unique byte range, so there is nothing to cache — more expensive than direct S3, for no benefit |
+
+Pointing an ALB at the Fargate task instead — so the agent serves its own logs — avoids CloudWatch but is
+worse on three counts: the always-on cost above, target registration churn for tasks that live four minutes,
+and log serving would compete for the CPU `native-image` is already saturating.
+
+### The lever §6 missed: invocation lifetime, not transport
+
+The cost is `memory × duration`, and **duration is currently pinned to the build's wall clock** because one
+invocation holds the stream open for the whole build. §6 considered widening `POLL_INTERVAL` and correctly
+concluded it saves nothing — the billed duration is the same whether the loop ticks every 3 s or every 10 s.
+But that is the *server-side tick rate inside one long invocation*. The untouched variable is how long each
+invocation lives.
+
+**The contract for short invocations already exists.** `GET /builds/{buildId}/logs?since=<millis>` already
+takes a watermark, `LogEvent.nextSince` is already a per-cell map, and the client already reconnects with it —
+that machinery exists because Lambda caps at 900 s, so `STREAM_BUDGET` (780 s) forces a handover on long
+builds. Reducing `STREAM_BUDGET` to a single tick converts streaming into polling **using the code path that
+is already written and tested**.
+
+| | Invocations | Cost | vs current |
+|---|---|---|---|
+| Current: one invocation, 384 MB, 360 s | 1 | **$0.00180** | — |
+| Poll 3 s, warm, 384 MB | 120 | $0.00020 | **9× cheaper** |
+| Poll 3 s, warm, native 256 MB | 120 | $0.00014 | **12× cheaper** |
+| Poll 10 s, warm, native 256 MB | 36 | $0.00004 | **42× cheaper** |
+
+**The caveat that decides it.** AWS
+[standardized INIT-phase billing](https://aws.amazon.com/blogs/compute/aws-lambda-standardizes-billing-for-init-phase/)
+on 1 August 2025, so cold starts are billed for on-demand invocations. Polling multiplies the number of
+opportunities to pay one:
+
+| Worst case: every poll cold | Cost | vs current |
+|---|---|---|
+| JVM, 384 MB, 2345 ms init | $0.00161 | **no saving** — the benefit is erased |
+| Native, 256 MB, 441 ms init | $0.00032 | still 6× cheaper |
+
+Polls 3 seconds apart should reuse a warm environment, so the warm row is the expected case. But the downside
+is only bounded in native mode. **This is a second, independent reason to deploy native as the resting state** —
+§6 already recommended it for sizing; it also de-risks this change.
+
+**Recommendation.** Not worth doing for the money — $0.0018 of a $0.0130 build. Worth considering because it
+would *delete* the `STREAM_BUDGET` handover as a concept rather than defending it: with no long-lived
+invocation there is no 900 s cap to hand over at. §6 argues that complexity is written, tested, and records a
+real bug (`7782771`), so it should not be replaced casually — but "the reconnect path becomes the only path"
+is a simplification, not a rewrite. Sequence it after native is the resting deployment, and measure warm-start
+hit rate before committing.
+
 The `STREAM_BUDGET` handover at 780 s is worth defending rather than engineering away. It exists
 because Lambda caps at 900 s, and `native-image` builds routinely exceed 13 minutes, so reconnect is
 the normal path, not an edge case. But `LogStreamResource` already implements it correctly —
