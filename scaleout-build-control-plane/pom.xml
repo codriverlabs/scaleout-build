@@ -31,7 +31,7 @@
         -->
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
-        <quarkus.platform.version>3.39.4</quarkus.platform.version>
+        <quarkus.platform.version>3.39.5</quarkus.platform.version>
         <quarkus.native.builder-image>quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25</quarkus.native.builder-image>
         <skipITs>true</skipITs>
     </properties>
