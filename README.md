@@ -152,7 +152,17 @@ and you run it again. Deployments where that is expensive should set
 
 ## Using it
 
-See the [**user guide**](docs/USER_GUIDE.md) for setup, framework-specific steps (Quarkus, Spring Boot AOT,
+**To deploy the control plane** (once per team, by whoever owns the AWS account) download the installer
+from a [release](../../releases) — it carries a pre-synthesized CDK app, so it needs only the AWS CLI,
+Node 20+ and Docker, with no Maven or JDK:
+
+```bash
+tar xzf scaleout-build-installer-<version>.tar.gz
+cd scaleout-build-installer-<version>
+./install.sh --region eu-west-1
+```
+
+**To use it as a developer**, see the [**user guide**](docs/USER_GUIDE.md) for setup, framework-specific steps (Quarkus, Spring Boot AOT,
 Helidon, plain GraalVM), the full configuration reference, and troubleshooting.
 
 A developer needs one configuration value — the control plane endpoint — and two IAM permissions

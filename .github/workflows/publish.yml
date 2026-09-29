@@ -138,3 +138,132 @@ jobs:
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
           ./scripts/verify-agent-image.sh "${IMAGE}:${TAG#v}"
+
+  # ── package-installer ──────────────────────────────────────────────────────────────────────────
+  # Produces the release tarball: a pre-synthesized CDK app plus scripts/install.sh, so a consumer
+  # deploys the control plane with only the AWS CLI, Node and Docker -- no Maven, no JDK, no CDK
+  # source build.
+  #
+  # JVM packaging only, deliberately. The JVM zip is architecture-neutral bytecode and always deploys
+  # to arm64, so one artifact works everywhere; a native bundle would need a per-architecture matrix
+  # and two tarballs to save about $0.0003 a build. Switching to native afterwards is a redeploy from
+  # source, documented in docs/USER_GUIDE.md.
+  package-installer:
+    needs: [publish-maven, tag-agent-image]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Set version from tag
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          mvn -B versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+
+      - name: Build the Lambda packages
+        run: ./build-local.sh --function jvm
+
+      # The CDK app reads ../assets/ when development=false. Staging the zips there means the synthesized
+      # cdk.out/ carries them as assets, so the consumer needs nothing from this repository but the tarball.
+      - name: Stage assets and pre-synthesize the CDK app
+        run: |
+          mkdir -p assets
+          cp scaleout-build-control-plane/target/function-jvm.zip assets/control-plane-jvm.zip
+          cp scaleout-build-control-plane-reaper/target/reaper.jar assets/reaper.jar
+          npm install -g aws-cdk
+          cd scaleout-build-control-plane-infra
+          # cdk never prunes cdk.out, so a dirty one accumulates every past synth's assets. A local dry
+          # run of these steps produced a 1.5 GB bundle from 62 stale 35 MB zips; CI is only safe because
+          # the checkout is fresh. Make it explicit rather than incidental.
+          rm -rf cdk.out
+          cdk synth -c development=false -c runtimeMode=jvm --all
+          echo "staged assets: $(ls -d cdk.out/asset.* | wc -l)"
+
+      - name: Assemble the tarball
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          OUT="scaleout-build-installer-${V}"
+          mkdir -p "$OUT"
+          cp -r scaleout-build-control-plane-infra/cdk.out "$OUT/cdk.out"
+          cp scripts/install.sh "$OUT/install.sh"
+          cp LICENSE "$OUT/LICENSE"
+          echo "$V" > "$OUT/VERSION"
+          echo "${IMAGE}:${V}" > "$OUT/AGENT_IMAGE"
+          cat > "$OUT/README.md" <<EOF
+          # scaleout-build control plane ${V}
+
+          Deploys the control plane into your AWS account. Needs the AWS CLI with credentials, Node 20+,
+          and Docker. No Maven or JDK required.
+
+              ./install.sh --region eu-west-1
+
+          See \`./install.sh --help\` for capacity strategy and other options. Full documentation:
+          https://github.com/${{ github.repository }}
+          EOF
+          tar czf "${OUT}.tar.gz" "$OUT"
+          sha256sum "${OUT}.tar.gz" > "${OUT}.tar.gz.sha256"
+
+      # Installing for real needs an AWS account, so this asserts what can be asserted without one: the
+      # bundle is self-contained, the script parses, and the template is a CloudFormation template.
+      - name: Check the bundle is self-contained
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          rm -rf /tmp/check && mkdir /tmp/check && tar xzf "scaleout-build-installer-${V}.tar.gz" -C /tmp/check
+          cd "/tmp/check/scaleout-build-installer-${V}"
+          bash -n install.sh
+          test -f cdk.out/ScaleoutBuildControlPlane.template.json
+          python3 -c "import json;t=json.load(open('cdk.out/ScaleoutBuildControlPlane.template.json'));assert t['Resources'],'no resources'"
+          N="$(ls -d cdk.out/asset.* 2>/dev/null | wc -l)"
+          test "$N" -eq 2 || { echo "::error::expected 2 staged assets (service zip + reaper jar), found $N"; exit 1; }
+          ./install.sh --help >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: scaleout-build-installer-*.tar.gz*
+
+  # ── release ────────────────────────────────────────────────────────────────────────────────────
+  release:
+    needs: [package-installer]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: installer
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            ## Install the control plane
+
+            ```bash
+            TAG=${{ inputs.tag || github.ref_name }}
+            curl -fsSL -O https://github.com/${{ github.repository }}/releases/download/${TAG}/scaleout-build-installer-${TAG#v}.tar.gz
+            tar xzf scaleout-build-installer-${TAG#v}.tar.gz
+            cd scaleout-build-installer-${TAG#v}
+            ./install.sh --region eu-west-1
+            ```
+
+            Needs the AWS CLI, Node 20+, and Docker. No Maven or JDK.
+
+            ## Use the plugin
+
+            Published to GitHub Packages; see the repository README for the `<plugin>` block and the two
+            IAM permissions your developers need.
+
+            ## Agent image
+
+            `${{ env.IMAGE }}:${{ inputs.tag || github.ref_name }}` — multi-architecture (`amd64`,
+            `arm64`), built on native runners rather than under emulation, and verified per architecture.

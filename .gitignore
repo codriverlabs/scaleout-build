@@ -50,3 +50,8 @@ scaleout-build-control-plane-infra/cdk.context.json
 
 # Editor-local LSP config: contains absolute workstation paths
 .kiro/settings/
+
+# Installer staging: CDK assets mode reads ../assets, and cdk synth writes cdk.out at the repo root
+# when run from there. Both are build output.
+/assets/
+/cdk.out/
