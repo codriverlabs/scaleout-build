@@ -170,13 +170,14 @@ A developer needs one configuration value — the control plane endpoint — and
 
 ## What a release publishes
 
-Three destinations, because the components have different delivery constraints.
+Each component ships in **exactly one form** — an image *or* a zip, never both. Three destinations, because
+the components have different delivery constraints.
 
 | Artifact | Published to | How it reaches your account |
 |---|---|---|
 | **Build agent** — Mandrel toolchain, multi-arch | `ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:<version>` | `install.sh` copies it **ghcr.io → your private ECR**, registry to registry, no local pull |
-| **Control-plane Lambda** — native `arm64`, 256 MB | in the installer tarball, and standalone on the release | `cdk deploy` uploads it to the CDK bootstrap S3 bucket |
-| **Reaper Lambda** — JVM jar | same | same |
+| **Control-plane Lambda** — native `arm64` **zip**, 256 MB | in the installer tarball, and standalone on the release | `cdk deploy` uploads it to the CDK bootstrap S3 bucket |
+| **Reaper Lambda** — JVM **jar** | same | same |
 | **Installer** — pre-synthesized CDK app + `install.sh` | GitHub Release asset | `curl`, `tar`, `./install.sh` |
 | **Maven artifacts** — plugin, API, shared, ECS | GitHub Packages | `mvn` from a developer machine or CI |
 
@@ -186,6 +187,11 @@ and a Lambda image must exist at *function-creation* time — whereas the agent 
 launch*, so copying it into ECR fits naturally. Going the image route for the Lambdas too would force the
 install into repos → copy images → deploy stack instead of a single `cdk deploy`, and trade a measured cold
 start (480–524 ms) for an unmeasured one.
+
+**There is no Lambda container image, in any release.** The zips appearing in two places — inside the
+tarball and standalone on the release — are the same bytes reachable two ways: the tarball is what
+`install.sh` uses, and the standalone assets are for anyone deploying through their own CDK, Terraform, or
+the console.
 
 Nothing in your account talks to ghcr.io after installation: the agent image lives in your ECR, and the
 Lambda code in your CDK bootstrap bucket.
