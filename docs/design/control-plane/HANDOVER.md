@@ -288,9 +288,22 @@ repository rather than by the org at top level, which is what links it in the re
 workflow's push rights attached without configuring *Manage Actions access* by hand. Using
 `github.repository` rather than a literal also means a future rename needs no edit here.
 
-**The first push to the new path creates a new package, which starts private again** — the flip has to be
-repeated once for `scaleout-build/scaleout-build-agent`. The flat `codriverlabs/scaleout-build-agent`
-package can then be deleted.
+**Nesting also fixed the visibility problem**, which is worth recording because the expectation was the
+opposite. The flat org-level package `codriverlabs/scaleout-build-agent` started private and needed a manual
+flip. The nested `codriverlabs/scaleout-build/scaleout-build-agent` came out **public on first push, with no
+intervention** — a package owned by a public repository appears to inherit that visibility, whereas one
+owned by the org at top level does not.
+
+So the manual UI step is not a recurring cost, and is avoided entirely by nesting. Verified anonymously:
+
+```
+docker manifest inspect ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:latest
+  -> linux/amd64, linux/arm64, plus 2 attestation manifests
+docker run --platform linux/arm64 ... -c 'uname -m; native-image --version'
+  -> aarch64, native-image 25.0.4.1
+```
+
+The old flat `codriverlabs/scaleout-build-agent` package is now superseded and can be deleted.
 
 Verified anonymously, with no `docker login`:
 
