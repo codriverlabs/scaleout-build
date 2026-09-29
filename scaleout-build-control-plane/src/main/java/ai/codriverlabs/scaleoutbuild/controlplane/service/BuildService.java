@@ -252,7 +252,13 @@ public class BuildService {
                         .expectedArtifacts(record.getBuildSpec().imageName() == null
                                 ? List.of() : List.of(record.getBuildSpec().imageName()))
                         .extraNativeImageArgs(record.getBuildSpec().extraNativeImageArgs())
-                        .timeoutMinutes(record.getBuildSpec().timeoutMinutes())
+                        // 0 from the client means "server default", which BuildSpec has always
+                        // documented and nothing implemented. Substituting here is what makes the agent
+                        // always carry a deadline, so an orphaned task self-terminates even if the
+                        // reaper never runs.
+                        .timeoutMinutes(record.getBuildSpec().timeoutMinutes() > 0
+                                ? record.getBuildSpec().timeoutMinutes()
+                                : config.ecs().defaultCellTimeoutMinutes())
                         .build();
                 String taskArn = launcher.runTask(clusterSettings, taskDefinitionArn, environment,
                         false);

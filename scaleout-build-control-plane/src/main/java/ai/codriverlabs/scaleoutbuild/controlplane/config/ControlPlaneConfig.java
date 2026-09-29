@@ -92,6 +92,30 @@ public interface ControlPlaneConfig {
          * deployment wants the discount. {@code spot-only} makes cost a hard constraint: a build fails to
          * launch rather than quietly running at full price.
          */
+        /**
+         * Per-cell {@code native-image} timeout applied when the client asks for {@code 0}.
+         *
+         * <p>Exists because {@code BuildSpec.timeoutMinutes} documents "0 means server default" and, until
+         * this was added, there was no server default: the 0 travelled through to
+         * {@link ai.codriverlabs.scaleoutbuild.ecs.AgentEnvironment}, which only sets
+         * {@code SCALEOUT_BUILD_TIMEOUT_MINUTES} when the value is positive, so the agent reached
+         * {@code process.waitFor()} with no deadline and a hung compile ran until something else stopped it.
+         * The reaper was therefore the only bound on a crashed client's Fargate bill, not the cost
+         * optimisation its own javadoc claims.
+         *
+         * <p><b>Why 30 and not 15.</b> A GraalVM build is about 15 minutes at the top end for most projects,
+         * and our largest measured compile is 8m46s (petclinic, arm64). A safety net belongs *above* the
+         * legitimate maximum, not at it: the cost of being too generous is $0.0008 per extra minute of a
+         * hung cell — 1.2 cents between a 15- and a 30-minute cap — while the cost of being too tight is a
+         * legitimate large build failing with a timeout error. That asymmetry is not close, so this sits at
+         * roughly 2x the practical maximum and 3.4x our worst measurement.
+         *
+         * <p>Clients wanting a tighter bound set {@code scaleout-build.timeoutMinutes} explicitly; it is
+         * passed through untouched when positive.
+         */
+        @WithDefault("30")
+        int defaultCellTimeoutMinutes();
+
         @WithDefault("spot-preferred")
         String fargateCapacityStrategy();
 
@@ -108,6 +132,7 @@ public interface ControlPlaneConfig {
      * exhaust the account's task limits.
      */
     interface Limits {
+
         @WithDefault("4096")
         String defaultCpu();
 
@@ -139,6 +164,7 @@ public interface ControlPlaneConfig {
          */
         @WithDefault("0")
         int defaultEphemeralStorageGiB();
+
 
         @WithDefault("16384")
         String maxCpu();

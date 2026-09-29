@@ -24,7 +24,10 @@ import java.util.List;
  * @param nativeImageCommand    command to invoke, defaulted server-side when null
  * @param extraNativeImageArgs  appended to every invocation
  * @param extraBuildArgs        appended for derived-argfile builds
- * @param timeoutMinutes        per-cell build timeout; {@code 0} means "server default"
+ * @param timeoutMinutes        per-cell {@code native-image} timeout; {@code 0} means "server default",
+ *                              substituted by the service from {@code scaleout.ecs.default-cell-timeout-minutes}
+ *                              (30). Between this contract being written and that substitution being added,
+ *                              {@code 0} meant "no timeout at all" and a hung compile ran unbounded
  * @param overallTimeoutMinutes wall-clock ceiling per cell, clamped by server policy
  */
 public record BuildSpec(List<String> buildKinds, List<String> architectures, String mainClass,

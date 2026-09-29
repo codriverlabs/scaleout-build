@@ -183,7 +183,10 @@ public final class NativeImageBuildExecutor implements BuildExecutor {
         }
         process.destroyForcibly();
         throw new BuildFailedException(
-                "native-image exceeded the " + timeoutMinutes + " minute timeout: "
+                "native-image exceeded the " + timeoutMinutes + " minute timeout. If this project"
+                        + " legitimately needs longer, raise it with"
+                        + " -Dscaleout-build.timeoutMinutes=<minutes>; the default comes from the control"
+                        + " plane's scaleout.ecs.default-cell-timeout-minutes. Command: "
                         + String.join(" ", command));
     }
 }

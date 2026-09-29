@@ -199,7 +199,7 @@ Every parameter is settable as `-Dscaleout-build.<name>` or as a `<configuration
 | `nativeImageCommand` | `native-image` | Local binary, for host-matching cells only |
 | `profilePath` | — | PGO profile, for `native-pgo-optimize` |
 | `workDirectory` | — | Local staging directory |
-| `timeoutMinutes` | `0` (none) | Per-cell timeout |
+| `timeoutMinutes` | `0` → server default (30) | Per-cell `native-image` timeout. `0` asks the control plane for its `scaleout.ecs.default-cell-timeout-minutes` |
 | `overallTimeoutMinutes` | `120` | Whole-build timeout |
 | `requestedCpu` | `4096` | Worker vCPU units; 4096 = 4 vCPU |
 | `requestedMemory` | `8192` | Worker MiB. 8 GiB is a floor — 4 GiB OOMs on real projects |

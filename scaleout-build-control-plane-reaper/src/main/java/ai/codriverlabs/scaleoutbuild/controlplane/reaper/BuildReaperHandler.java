@@ -35,10 +35,18 @@ import software.amazon.awssdk.services.ecs.EcsClient;
  * In the direct-ECS model the client process <em>was</em> the supervisor, so a dead client and a dead
  * supervisor were the same event. Behind a control plane nothing stops a task unless the server does.
  *
- * <p>Note the exposure this bounds, and the exposure it does not: the agent enforces its own
- * per-build timeout, so an orphaned task self-terminates eventually. This reaper turns "pays until the
- * agent's own timeout" into "pays until the next scheduled run", which is a cost optimisation rather
- * than a fix for unbounded liability. Streaming makes it matter more than it looks: AWS documents that
+ * <p>Note the exposure this bounds, and the exposure it does not: the agent enforces its own per-build
+ * timeout, so an orphaned task self-terminates eventually. This reaper turns "pays until the agent's own
+ * timeout" into "pays until the next scheduled run", which is a cost optimisation rather than a fix for
+ * unbounded liability.
+ *
+ * <p><b>That was not true when it was written.</b> {@code BuildSpec.timeoutMinutes} defaults to 0 from the
+ * client and documented "0 means server default", but no server default existed: the 0 travelled through to
+ * {@code AgentEnvironment}, which only sets the timeout variable when positive, so the agent reached
+ * {@code process.waitFor()} with no deadline. Until {@code scaleout.ecs.default-cell-timeout-minutes} was
+ * added, this reaper was the <em>only</em> bound on a crashed client's Fargate bill. Kept as a note because
+ * the defence-in-depth reading above is what makes it safe to reason about removing or rescheduling this
+ * function, and it was false for as long as the claim existed. Streaming makes it matter more than it looks: AWS documents that
  * a streamed response is not interrupted when the client connection breaks, so a client hanging up
  * cannot be detected and cannot be used as a cancellation signal.
  */
