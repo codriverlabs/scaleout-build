@@ -153,7 +153,7 @@ and you run it again. Deployments where that is expensive should set
 ## Using it
 
 **To deploy the control plane** (once per team, by whoever owns the AWS account) download the installer
-from a [release](../../releases) — it carries a pre-synthesized CDK app, so it needs only the AWS CLI,
+from a [release](https://github.com/codriverlabs/scaleout-build/releases) — it carries a pre-synthesized CDK app, so it needs only the AWS CLI,
 Node 20+ and Docker, with no Maven or JDK:
 
 ```bash
