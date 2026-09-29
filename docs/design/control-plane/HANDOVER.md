@@ -327,3 +327,36 @@ confusing.
 none of this session's changes triggered it. Every image used for testing came from
 `scripts/deploy-local.sh` pushing to ECR from a workstation. Worth knowing: a green run of that workflow in
 the run list does not imply an image was published.
+
+## CI now compiles the native Lambda, on arm64 (2026-09-29)
+
+Found by asking whether CI built the Lambda natively. **It did not** — and nothing had:
+
+| Workflow | Built | Runner |
+|---|---|---|
+| `ci.yml` | JVM zip only | amd64 |
+| `publish.yml` | JVM only, deliberately | amd64 |
+| `deploy.yml` | selects `ubuntu-24.04-arm` for native arm64 | **has never run** — no OIDC deploy role |
+
+So every native binary this project has ever produced came from a workstation, x86_64, which is also why
+the deployed function is `native/x86_64` rather than the cheaper `native/arm64`.
+
+That matters more than it looks, because **native is the resting deployed state**. Four native-only defects
+in this project's history — a `static final SecureRandom` that GraalVM refused to build, and three
+reflection-metadata gaps — were each found by deploying, because a JVM build cannot detect them. A change
+breaking native compilation passed CI and failed at deploy.
+
+New `build-native-function` job on `ubuntu-24.04-arm`. The native profile sets
+`quarkus.native.container-build=true`, so Mandrel runs in a container and the binary takes the runner's
+architecture — no local GraalVM needed.
+
+It asserts the binary is **ARM aarch64** and executable, not merely that a zip exists. An x86_64 binary on
+an arm64 Lambda fails at cold start with `Exec format error`, which names nothing useful. The assertion was
+validated locally against an x86_64 build, where it correctly fails — so it discriminates rather than
+passing anything.
+
+**No path filter**, deliberately: the reflection defects came from adding ordinary classes and DTOs in other
+modules, so narrowing the trigger would miss exactly the changes that break native.
+
+Consequence worth noting: `native/arm64` is now built on every push, so deploying it is no longer blocked on
+anything except the OIDC role that `deploy.yml` still needs.

@@ -108,3 +108,52 @@ jobs:
       # cell of the first real build.
       - name: Assert the template in both deployment modes
         run: ./scripts/verify-synth.sh
+
+  # ── build-native-function ──────────────────────────────────────────────────────────────────────
+  # Compiles the control-plane Lambda as a GraalVM native binary, on arm64.
+  #
+  # Why this job exists: native is the resting deployed state, and until this was added nothing in CI
+  # compiled it. That is not a theoretical gap -- four native-only defects in this project's history
+  # (a `static final SecureRandom` that GraalVM refused to build, and three reflection-metadata gaps)
+  # were all found by deploying, because a JVM build cannot detect them. A change that breaks native
+  # compilation would pass every other check here and fail at deploy time.
+  #
+  # Why arm64 specifically: a native image cannot be cross-compiled, and arm64 is the cheaper target we
+  # want to be able to deploy. Building it here proves the combination that has never been produced
+  # anywhere -- deploy.yml selects an arm64 runner for it, but has never run.
+  #
+  # No path filter: the reflection defects came from adding ordinary classes and DTOs in other modules,
+  # so narrowing the trigger would miss exactly the changes that break it.
+  #
+  # Cost: a few minutes of arm64 runner per push. Cheaper than the deploy-and-discover loop it replaces.
+  build-native-function:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      # The native profile sets quarkus.native.container-build=true, so Mandrel runs in a container and
+      # the binary takes the architecture of this runner. No local GraalVM needed.
+      - name: Build the native function
+        run: ./build-local.sh --function native
+
+      # A zip that exists is not proof. Assert the binary inside is arm64 -- an x86_64 binary on an arm64
+      # Lambda fails at cold start with "Exec format error", which names nothing useful, and is precisely
+      # the mistake this job exists to catch before a deploy does.
+      - name: Assert the binary is arm64 and executable
+        run: |
+          ZIP=scaleout-build-control-plane/target/function-native.zip
+          test -f "$ZIP" || { echo "::error::$ZIP was not produced"; exit 1; }
+          rm -rf /tmp/fn && mkdir /tmp/fn && unzip -q "$ZIP" -d /tmp/fn
+          BIN=$(find /tmp/fn -maxdepth 1 -type f ! -name '*.zip' | head -1)
+          test -n "$BIN" || { echo "::error::no binary inside $ZIP"; exit 1; }
+          file "$BIN"
+          file "$BIN" | grep -q 'ARM aarch64' \
+            || { echo "::error::expected an ARM aarch64 binary, got: $(file -b "$BIN")"; exit 1; }
+          test -x "$BIN" || { echo "::error::$BIN is not executable"; exit 1; }
+          echo "native function: $(stat -c%s "$BIN") bytes, $(file -b "$BIN" | cut -d, -f1-2)"
