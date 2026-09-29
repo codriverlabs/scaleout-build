@@ -278,15 +278,25 @@ OIDC subject claim in a design doc), now updated.
 
 ### GHCR package is public (done 2026-09-29)
 
-`build-agent-image.yml` pushes `ghcr.io/codriverlabs/scaleout-build-agent` and verifies both architectures
-plus the manifest (run `36512665547`). A GHCR package is **private by default and does not inherit the
-repository's visibility**, and `GITHUB_TOKEN` cannot change it — so this needed the UI, and has been done.
+`build-agent-image.yml` pushes `ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent` and verifies both architectures
+plus the manifest. A GHCR package is **private by default and does not inherit the repository's
+visibility**, and `GITHUB_TOKEN` cannot change it — so this needs the UI once per package.
+
+The image path is **nested under the repository**, `ghcr.io/<owner>/<repo>/scaleout-build-agent`, produced
+by `ghcr.io/${{ github.repository }}/scaleout-build-agent`. Nesting makes the package owned by the
+repository rather than by the org at top level, which is what links it in the repo sidebar and keeps the
+workflow's push rights attached without configuring *Manage Actions access* by hand. Using
+`github.repository` rather than a literal also means a future rename needs no edit here.
+
+**The first push to the new path creates a new package, which starts private again** — the flip has to be
+repeated once for `scaleout-build/scaleout-build-agent`. The flat `codriverlabs/scaleout-build-agent`
+package can then be deleted.
 
 Verified anonymously, with no `docker login`:
 
 ```
-docker manifest inspect ghcr.io/codriverlabs/scaleout-build-agent:latest       # manifest list, 4 entries
-docker buildx imagetools inspect ghcr.io/codriverlabs/scaleout-build-agent:latest
+docker manifest inspect ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:latest       # manifest list, 4 entries
+docker buildx imagetools inspect ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:latest
 docker run --platform linux/arm64 ... -c 'uname -m; native-image --version'    # aarch64, Mandrel 25.0.4.1
 ```
 

@@ -1,7 +1,9 @@
 name: Build and push agent image
 
 # Builds scaleout-build-agent's image for both linux/amd64 and linux/arm64 and publishes a single
-# multi-arch manifest to GHCR (ghcr.io/<owner>/scaleout-build-agent). Each architecture builds on a
+# multi-arch manifest to GHCR (ghcr.io/<owner>/<repo>/scaleout-build-agent -- nested under the
+# repository so the package is owned by it, which is what links it in the repo sidebar and keeps
+# Actions push rights attached automatically). Each architecture builds on a
 # *native* runner (ubuntu-latest for amd64, ubuntu-24.04-arm for arm64 — confirmed current via
 # GitHub's own hosted-runners reference, GA and free on both public and private repos) rather than
 # via QEMU emulation on a single runner. See build-local.sh for the equivalent local build,
@@ -23,7 +25,7 @@ on:
   workflow_dispatch: {}
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/scaleout-build-agent
+  IMAGE: ghcr.io/${{ github.repository }}/scaleout-build-agent
 
 permissions:
   contents: read
