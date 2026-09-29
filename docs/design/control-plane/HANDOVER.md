@@ -358,5 +358,41 @@ passing anything.
 **No path filter**, deliberately: the reflection defects came from adding ordinary classes and DTOs in other
 modules, so narrowing the trigger would miss exactly the changes that break native.
 
-Consequence worth noting: `native/arm64` is now built on every push, so deploying it is no longer blocked on
-anything except the OIDC role that `deploy.yml` still needs.
+Consequence worth having: `native/arm64` is now built on every push, which is what made the release bundle
+below possible.
+
+## The release bundle ships native arm64 (2026-09-29)
+
+`package-installer` previously built the **JVM** zip on an amd64 runner. It now builds **native on
+`ubuntu-24.04-arm`**, so the default deployment from a release is a GraalVM native Lambda on arm64 —
+measured cold start 480–524 ms at 256 MB, against 2345 ms at 384 MB for the JVM. A bundle is built once
+and deployed many times, so there is no reason for its default to be the slower, dearer one.
+
+`runs-on: ubuntu-24.04-arm` is load-bearing rather than a preference: a native image cannot be
+cross-compiled, so the runner architecture *is* the deployed architecture. The job asserts `ARM aarch64`
+before bundling, because the failure mode otherwise is `Exec format error` at cold start, which names
+nothing useful.
+
+Verified by synthesizing in assets mode: `provided.al2023`, `Architectures: ['arm64']`, 256 MB, handler
+`bootstrap`.
+
+### Why the Lambda code travels in the bundle rather than being fetched
+
+`cdk.out` addresses its assets by content hash, so a zip downloaded at install time could not be
+substituted without re-synthesizing — which would put Maven and a JDK back into the install path, defeating
+the bundle's purpose. `cdk deploy --app cdk.out` uploads the asset to the CDK bootstrap bucket itself. The
+zips are *also* attached to the release standalone, for anyone deploying by another route.
+
+### Why not Lambda container images
+
+Considered, because ghcr.io already hosts the agent image and it would be symmetrical. Two reasons against:
+
+- **Lambda cannot pull from ghcr.io.** AWS states it plainly: *"Lambda requires container images to reside
+  in Amazon ECR and cannot pull directly from third-party registries."* So an image route needs a copy into
+  the customer's ECR regardless.
+- **A Lambda image must exist at function-creation time**, unlike the agent image which is read at task
+  launch. Since the stack *creates* the ECR repositories, that forces the install into repos → copy images
+  → deploy stack, instead of one `cdk deploy`.
+
+Plus it would trade a measured cold start for an unmeasured one. Revisit only if the Lambda package outgrows
+the 250 MB zip limit, which at 26 MB it is nowhere near.

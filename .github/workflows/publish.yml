@@ -144,13 +144,28 @@ jobs:
   # deploys the control plane with only the AWS CLI, Node and Docker -- no Maven, no JDK, no CDK
   # source build.
   #
-  # JVM packaging only, deliberately. The JVM zip is architecture-neutral bytecode and always deploys
-  # to arm64, so one artifact works everywhere; a native bundle would need a per-architecture matrix
-  # and two tarballs to save about $0.0003 a build. Switching to native afterwards is a redeploy from
-  # source, documented in docs/USER_GUIDE.md.
+  # Native arm64, on an arm64 runner. A GraalVM binary cannot be cross-compiled, so the runner
+  # architecture *is* the deployed architecture; `runs-on: ubuntu-24.04-arm` is load-bearing, not a
+  # preference. Getting it wrong produces an x86_64 binary that fails at cold start on an arm64 Lambda
+  # with "Exec format error", naming nothing useful.
+  #
+  # Why native arm64 rather than the JVM zip that was here before: measured, native cold start is
+  # 480-524 ms against 2345 ms on the JVM, at 256 MB instead of 384 MB, and arm64 is the cheaper of the
+  # two Lambda architectures. Since a release bundle is built once and deployed many times, there is no
+  # reason to ship the slower, dearer default.
+  #
+  # Lambda code travels *in* the bundle rather than being pulled at install time. That is deliberate:
+  # cdk.out addresses its assets by content hash, so a zip downloaded afterwards could not be
+  # substituted without re-synthesizing, which would put Maven and a JDK back into the install path.
+  # `cdk deploy --app cdk.out` uploads the asset to the CDK bootstrap bucket itself.
+  #
+  # Lambda container images were considered and rejected: Lambda can only pull images from ECR, never
+  # from ghcr.io, and unlike the agent image -- read at task launch -- a Lambda image must exist at
+  # function-creation time. That would force the install into repos-then-images-then-stack, and trade a
+  # measured cold start for an unmeasured one.
   package-installer:
     needs: [publish-maven, tag-agent-image]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
 
@@ -167,15 +182,25 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           mvn -B versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
 
-      - name: Build the Lambda packages
-        run: ./build-local.sh --function jvm
+      - name: Build the Lambda packages (native, this runner's architecture)
+        run: ./build-local.sh --function native
+
+      # The runner architecture is the deployed architecture, so assert it rather than trust the label.
+      - name: Assert the native binary is arm64
+        run: |
+          rm -rf /tmp/fn && mkdir /tmp/fn
+          unzip -q scaleout-build-control-plane/target/function-native.zip -d /tmp/fn
+          BIN=$(find /tmp/fn -maxdepth 1 -type f | head -1)
+          file "$BIN"
+          file "$BIN" | grep -q 'ARM aarch64' \
+            || { echo "::error::bundle would ship $(file -b "$BIN" | cut -d, -f2) to an arm64 Lambda"; exit 1; }
 
       # The CDK app reads ../assets/ when development=false. Staging the zips there means the synthesized
       # cdk.out/ carries them as assets, so the consumer needs nothing from this repository but the tarball.
       - name: Stage assets and pre-synthesize the CDK app
         run: |
           mkdir -p assets
-          cp scaleout-build-control-plane/target/function-jvm.zip assets/control-plane-jvm.zip
+          cp scaleout-build-control-plane/target/function-native.zip assets/control-plane-native.zip
           cp scaleout-build-control-plane-reaper/target/reaper.jar assets/reaper.jar
           npm install -g aws-cdk
           cd scaleout-build-control-plane-infra
@@ -183,7 +208,8 @@ jobs:
           # run of these steps produced a 1.5 GB bundle from 62 stale 35 MB zips; CI is only safe because
           # the checkout is fresh. Make it explicit rather than incidental.
           rm -rf cdk.out
-          cdk synth -c development=false -c runtimeMode=jvm --all
+          # runtimeMode=native defaults nativeArch to arm64 in the stack, matching this runner.
+          cdk synth -c development=false -c runtimeMode=native --all
           echo "staged assets: $(ls -d cdk.out/asset.* | wc -l)"
 
       - name: Assemble the tarball
@@ -199,8 +225,9 @@ jobs:
           cat > "$OUT/README.md" <<EOF
           # scaleout-build control plane ${V}
 
-          Deploys the control plane into your AWS account. Needs the AWS CLI with credentials, Node 20+,
-          and Docker. No Maven or JDK required.
+          Deploys the control plane into your AWS account as a **GraalVM native Lambda on arm64** --
+          measured cold start 480-524 ms, 256 MB. Needs the AWS CLI with credentials, Node 20+, and
+          Docker. No Maven or JDK required.
 
               ./install.sh --region eu-west-1
 
@@ -224,10 +251,24 @@ jobs:
           test "$N" -eq 2 || { echo "::error::expected 2 staged assets (service zip + reaper jar), found $N"; exit 1; }
           ./install.sh --help >/dev/null
 
+      # Also published standalone, for anyone deploying by a route other than install.sh -- their own
+      # CDK, Terraform, or console. Named with the architecture because a native zip is not portable
+      # between them, and an unlabelled one invites deploying it to the wrong Lambda.
+      - name: Name the raw Lambda packages for release
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          cp assets/control-plane-native.zip "control-plane-native-arm64-${V}.zip"
+          cp assets/reaper.jar "reaper-${V}.jar"
+          sha256sum control-plane-native-arm64-*.zip reaper-*.jar > lambda-packages.sha256
+
       - uses: actions/upload-artifact@v4
         with:
           name: installer
-          path: scaleout-build-installer-*.tar.gz*
+          path: |
+            scaleout-build-installer-*.tar.gz*
+            control-plane-native-arm64-*.zip
+            reaper-*.jar
+            lambda-packages.sha256
 
   # ── release ────────────────────────────────────────────────────────────────────────────────────
   release:
@@ -256,7 +297,12 @@ jobs:
             ./install.sh --region eu-west-1
             ```
 
+            Deploys a **GraalVM native Lambda on arm64** — measured cold start 480–524 ms at 256 MB.
             Needs the AWS CLI, Node 20+, and Docker. No Maven or JDK.
+
+            The Lambda packages are also attached standalone
+            (`control-plane-native-arm64-*.zip`, `reaper-*.jar`) for anyone deploying by another route.
+            The control-plane zip is an **arm64 native binary** and will not run on an x86_64 Lambda.
 
             ## Use the plugin
 
