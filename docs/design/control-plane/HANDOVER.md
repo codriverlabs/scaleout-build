@@ -276,23 +276,27 @@ CDK infrastructure and a wire-contract library, of which the Maven plugin is one
 consumers such as KubeMicroVM need no edit. Only one tracked file referenced the repository *path* (an
 OIDC subject claim in a design doc), now updated.
 
-### One manual step remains: GHCR package visibility
+### GHCR package is public (done 2026-09-29)
 
-`build-agent-image.yml` pushes `ghcr.io/codriverlabs/scaleout-build-agent` and verifies both
-architectures plus the manifest — confirmed working on run `36512665547`. **But a GHCR package is private
-by default and does not inherit the repository's visibility**, and `GITHUB_TOKEN` cannot change it. So the
-image is invisible anonymously even though the repository is public:
+`build-agent-image.yml` pushes `ghcr.io/codriverlabs/scaleout-build-agent` and verifies both architectures
+plus the manifest (run `36512665547`). A GHCR package is **private by default and does not inherit the
+repository's visibility**, and `GITHUB_TOKEN` cannot change it — so this needed the UI, and has been done.
+
+Verified anonymously, with no `docker login`:
 
 ```
-docker manifest inspect ghcr.io/codriverlabs/scaleout-build-agent:latest   # 401 anonymously, fine authenticated
+docker manifest inspect ghcr.io/codriverlabs/scaleout-build-agent:latest       # manifest list, 4 entries
+docker buildx imagetools inspect ghcr.io/codriverlabs/scaleout-build-agent:latest
+docker run --platform linux/arm64 ... -c 'uname -m; native-image --version'    # aarch64, Mandrel 25.0.4.1
 ```
 
-In the GitHub UI: **codriverlabs → Packages → scaleout-build-agent → Package settings → Change visibility
-→ Public**. While there, under *Manage Actions access*, add the `scaleout-build` repository with Write, so
-the workflow keeps its push rights after the rename.
+So `install.sh` can copy it into a consumer's ECR, and its pre-flight probe passes.
 
-Until that is done, `install.sh` cannot copy the image into a consumer's ECR. It now fails with an
-explanation naming this cause rather than surfacing a bare 401.
+**On the two `unknown/unknown` entries in the manifest list:** they are buildx *attestation* manifests —
+provenance and SBOM — attached by default. They carry no runnable image and Docker ignores them when
+selecting a platform, which the `--platform linux/arm64` run above confirms. Expected, not a defect. They
+appear in the GitHub package UI alongside the two real platforms, which is the only place they are
+confusing.
 
 ### Why the image had never appeared before
 
