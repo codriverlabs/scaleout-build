@@ -173,7 +173,7 @@ uses fewer resources, but is easier to get subtly wrong and harder to audit at a
 
 The CI deploy role's trust policy uses `token.actions.githubusercontent.com` as the OIDC identity
 provider, with a `sub` claim condition restricting which workflow may assume it — e.g.
-`repo:codriverlabs/scaleout-build-maven-plugin:ref:refs/heads/main`, or narrower (restricted to
+`repo:codriverlabs/scaleout-build:ref:refs/heads/main`, or narrower (restricted to
 `workflow_dispatch` specifically) if the workflow trigger allows expressing that in the claim. No
 long-lived AWS access keys are stored as GitHub secrets under this model.
 

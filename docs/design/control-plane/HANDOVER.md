@@ -267,3 +267,36 @@ there is nothing to reap.
 
 If tearing down: `cdk destroy` leaves the bucket and table behind deliberately. Removing them is a
 separate, deliberate act.
+
+## Repository is public as `codriverlabs/scaleout-build` (2026-09-29)
+
+Renamed from `scaleout-build-maven-plugin`, since the repo holds a Lambda control plane, a container agent,
+CDK infrastructure and a wire-contract library, of which the Maven plugin is one module. Maven
+`artifactId`s are unchanged — `scaleout-build-maven-plugin` is still the plugin's coordinate, and
+consumers such as KubeMicroVM need no edit. Only one tracked file referenced the repository *path* (an
+OIDC subject claim in a design doc), now updated.
+
+### One manual step remains: GHCR package visibility
+
+`build-agent-image.yml` pushes `ghcr.io/codriverlabs/scaleout-build-agent` and verifies both
+architectures plus the manifest — confirmed working on run `36512665547`. **But a GHCR package is private
+by default and does not inherit the repository's visibility**, and `GITHUB_TOKEN` cannot change it. So the
+image is invisible anonymously even though the repository is public:
+
+```
+docker manifest inspect ghcr.io/codriverlabs/scaleout-build-agent:latest   # 401 anonymously, fine authenticated
+```
+
+In the GitHub UI: **codriverlabs → Packages → scaleout-build-agent → Package settings → Change visibility
+→ Public**. While there, under *Manage Actions access*, add the `scaleout-build` repository with Write, so
+the workflow keeps its push rights after the rename.
+
+Until that is done, `install.sh` cannot copy the image into a consumer's ECR. It now fails with an
+explanation naming this cause rather than surfacing a bare 401.
+
+### Why the image had never appeared before
+
+`build-agent-image.yml` is path-filtered to `scaleout-build-agent/**` and `scaleout-build-shared/**`, so
+none of this session's changes triggered it. Every image used for testing came from
+`scripts/deploy-local.sh` pushing to ECR from a workstation. Worth knowing: a green run of that workflow in
+the run list does not imply an image was published.

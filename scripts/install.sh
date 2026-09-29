@@ -121,6 +121,15 @@ if [[ "$SKIP_AGENT" == false ]]; then
     echo
     echo "==> Copying the agent image into ${AGENT_REPO}"
     echo "    ${AGENT_SOURCE} -> ${AGENT_REPO}:latest  (multi-arch, registry to registry)"
+
+    # Fail with a useful message rather than a bare 401 from imagetools. A GHCR package is private by
+    # default even when its repository is public, and that is the likeliest cause.
+    if ! docker manifest inspect "$AGENT_SOURCE" >/dev/null 2>&1; then
+        die "cannot read ${AGENT_SOURCE} anonymously.
+  If this is a ghcr.io image, its package visibility is probably still private -- a GHCR package does not
+  inherit the repository's visibility. Either make the package public, or 'docker login ghcr.io' with a
+  token that can read it and re-run."
+    fi
     aws ecr get-login-password --region "$REGION" \
         | docker login --username AWS --password-stdin "${AGENT_REPO%%/*}" >/dev/null
     docker buildx imagetools create -t "${AGENT_REPO}:latest" "$AGENT_SOURCE"
