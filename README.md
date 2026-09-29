@@ -168,6 +168,28 @@ Helidon, plain GraalVM), the full configuration reference, and troubleshooting.
 A developer needs one configuration value — the control plane endpoint — and two IAM permissions
 (`lambda:InvokeFunctionUrl`, `lambda:InvokeFunction`). No ECS, S3, CloudWatch or ECR access.
 
+## What a release publishes
+
+Three destinations, because the components have different delivery constraints.
+
+| Artifact | Published to | How it reaches your account |
+|---|---|---|
+| **Build agent** — Mandrel toolchain, multi-arch | `ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:<version>` | `install.sh` copies it **ghcr.io → your private ECR**, registry to registry, no local pull |
+| **Control-plane Lambda** — native `arm64`, 256 MB | in the installer tarball, and standalone on the release | `cdk deploy` uploads it to the CDK bootstrap S3 bucket |
+| **Reaper Lambda** — JVM jar | same | same |
+| **Installer** — pre-synthesized CDK app + `install.sh` | GitHub Release asset | `curl`, `tar`, `./install.sh` |
+| **Maven artifacts** — plugin, API, shared, ECS | GitHub Packages | `mvn` from a developer machine or CI |
+
+**An image for the agent and zips for the Lambdas** is forced rather than stylistic. Lambda
+[cannot pull container images from anywhere but ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/migrate-from-third-party.html),
+and a Lambda image must exist at *function-creation* time — whereas the agent image is read at ECS *task
+launch*, so copying it into ECR fits naturally. Going the image route for the Lambdas too would force the
+install into repos → copy images → deploy stack instead of a single `cdk deploy`, and trade a measured cold
+start (480–524 ms) for an unmeasured one.
+
+Nothing in your account talks to ghcr.io after installation: the agent image lives in your ECR, and the
+Lambda code in your CDK bootstrap bucket.
+
 ## Modules
 
 - **`scaleout-build-shared`** — build matrix types, staging layout, and the native-image
