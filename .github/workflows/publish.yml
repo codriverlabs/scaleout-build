@@ -286,6 +286,11 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+          # Any tag carrying a qualifier -- rc, beta, alpha -- is a prerelease, so it does not become
+          # "Latest release" on the repository front page and does not get suggested to people who only
+          # want stable. The version validation above already permits qualifiers, so without this an
+          # -rc1 would be presented as the current release.
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
           body: |
             ## Install the control plane
 
