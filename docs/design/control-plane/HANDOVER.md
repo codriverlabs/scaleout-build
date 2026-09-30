@@ -423,9 +423,27 @@ Fixed before tagging by deriving it from the tag — any qualifier after a hyphe
 throwaway tag is for.
 
 **GitHub Packages Maven requires a token even for public packages**, unlike ghcr.io where the agent image is
-anonymously pullable. A `dependency:get` against the repository fails without auth. That is a GitHub
-limitation rather than a choice, but it is friction for a public project and it is now documented in the user
-guide with the `settings.xml` a consumer needs.
+anonymously pullable.
+
+Verified rather than assumed, because two community posts claim the opposite. Against this project's own
+published artifact:
+
+```
+curl  .../scaleout-build-maven-plugin-0.0.1-rc1.pom          -> 401
+curl -u x:$TOKEN  (same URL)                                 -> 302
+curl  .../maven-metadata.xml                                 -> 401
+```
+
+GitHub's documentation states it directly: *"In most registries, to pull a package, you must authenticate
+with a personal access token or GITHUB_TOKEN, regardless of whether the package is public or private.
+However, in the Container registry, public packages allow anonymous access."*
+
+A GitHub limitation rather than a choice, but real friction for a public project: every consumer needs a
+token before they can resolve the plugin. The user guide now carries the `settings.xml` as step 0, with the
+quotation and the measured result.
+
+If that friction ever matters enough, the options are Maven Central (no auth, but needs group-id ownership
+and signing) or a proxy. Neither is worth doing before the plugin has users.
 
 ### Not exercised
 

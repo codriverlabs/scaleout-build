@@ -48,7 +48,18 @@ need one extra command.
 ### 0. Authenticate to GitHub Packages
 
 The Maven artifacts are on GitHub Packages, which **requires a token even for public packages** — unlike
-ghcr.io, where the agent image is anonymously pullable. This is a GitHub limitation, not a choice here.
+ghcr.io, where the agent image is anonymously pullable. This is a GitHub limitation, not a choice here:
+
+> In most registries, to pull a package, you must authenticate with a personal access token or
+> `GITHUB_TOKEN`, regardless of whether the package is public or private. However, in the Container
+> registry, public packages allow anonymous access and can be pulled without authentication.
+>
+> — [About permissions for GitHub Packages](https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages)
+
+Confirmed against this project's own published artifacts: an unauthenticated `GET` of the plugin's `.pom`
+returns **401**, and the same URL with a token returns 302. So a `read:packages` token is required even
+though the repository and the package are both public. You will find forum posts claiming otherwise; they
+are wrong.
 
 In `~/.m2/settings.xml`:
 
