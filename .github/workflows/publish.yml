@@ -270,9 +270,71 @@ jobs:
             reaper-*.jar
             lambda-packages.sha256
 
+
+  # ── publish-central ────────────────────────────────────────────────────────────────────────────
+  # Publishes the same five modules to Maven Central via the Central Portal API.
+  # Runs after publish-maven so the GitHub Packages deployment is confirmed first.
+  # Requires namespace ai.codriverlabs to be verified at central.sonatype.com (done 2026-09-30).
+  #
+  # Secrets consumed:
+  #   CENTRAL_TOKEN_USERNAME  -- portal token name (not your Sonatype login)
+  #   CENTRAL_TOKEN_PASSWORD  -- portal token password
+  #   MAVEN_GPG_PRIVATE_KEY   -- base64-encoded armored private key (4096 RSA, karol.piatek@codriverlabs.ai)
+  #   MAVEN_GPG_PASSPHRASE    -- empty; the key has no passphrase protection
+  #
+  # Central is IMMUTABLE: once published a version cannot be deleted. The first real deploy should
+  # be a patch version to verify the pipeline before shipping the real release.
+  publish-central:
+    needs: [publish-maven]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Set version from tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          mvn -B versions:set -DnewVersion="${VERSION}" -DgenerateBackupPoms=false
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 --decode | gpg --import --batch
+          # Confirm it imported correctly.
+          gpg --list-secret-keys karol.piatek@codriverlabs.ai
+
+      - name: Write Central credentials to settings.xml
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>central</id>
+                <username>${{ secrets.CENTRAL_TOKEN_USERNAME }}</username>
+                <password>${{ secrets.CENTRAL_TOKEN_PASSWORD }}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Sign and publish to Maven Central
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          mvn -B deploy -Prelease -DskipTests \
+            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-ecs,scaleout-build-maven-plugin
+
   # ── release ────────────────────────────────────────────────────────────────────────────────────
   release:
-    needs: [package-installer]
+    needs: [package-installer, publish-central]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
