@@ -131,7 +131,10 @@ if [[ "$SKIP_AGENT" == false ]]; then
   token that can read it and re-run."
     fi
     aws ecr get-login-password --region "$REGION" \
-        | docker login --username AWS --password-stdin "${AGENT_REPO%%/*}" >/dev/null
+        | docker login --username AWS --password-stdin "${AGENT_REPO%%/*}" >/dev/null \
+    || die "ECR login failed for ${AGENT_REPO%%/*} in region ${REGION}.
+  If you recently changed regions, run: docker logout ${AGENT_REPO%%/*}
+  then re-run install.sh."
     docker buildx imagetools create -t "${AGENT_REPO}:latest" "$AGENT_SOURCE"
 fi
 
