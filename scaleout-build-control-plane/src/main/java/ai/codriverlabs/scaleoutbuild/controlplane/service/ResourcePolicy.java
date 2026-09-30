@@ -64,6 +64,23 @@ public class ResourcePolicy {
     }
 
     /** @return the effective per-cell wall-clock ceiling in minutes */
+    /**
+     * Resolves the per-compile budget: the server default when the client asks for 0, clamped to
+     * {@code maxCellTimeoutMinutes} otherwise.
+     *
+     * <p>{@code 0} is the client default and {@code BuildSpec} documents it as "server default", so this is
+     * where that contract is honoured.
+     */
+    public int resolveCellTimeoutMinutes(int requested) {
+        // Ceiling lives in limits alongside the other max* values; the default lives in ecs
+        // alongside the other agent settings it is emitted with.
+        int max = config.limits().maxCellTimeoutMinutes();
+        if (requested <= 0) {
+            return Math.min(config.ecs().defaultCellTimeoutMinutes(), max);
+        }
+        return Math.min(requested, max);
+    }
+
     public int clampOverallTimeoutMinutes(int requested) {
         int max = config.limits().maxOverallTimeoutMinutes();
         if (requested <= 0) {

@@ -258,13 +258,12 @@ public class BuildService {
                         .expectedArtifacts(record.getBuildSpec().imageName() == null
                                 ? List.of() : List.of(record.getBuildSpec().imageName()))
                         .extraNativeImageArgs(record.getBuildSpec().extraNativeImageArgs())
-                        // 0 from the client means "server default", which BuildSpec has always
-                        // documented and nothing implemented. Substituting here is what makes the agent
-                        // always carry a deadline, so an orphaned task self-terminates even if the
-                        // reaper never runs.
-                        .timeoutMinutes(record.getBuildSpec().timeoutMinutes() > 0
-                                ? record.getBuildSpec().timeoutMinutes()
-                                : config.ecs().defaultCellTimeoutMinutes())
+                        // Substitutes the server default for 0 -- which BuildSpec documented and nothing
+                        // implemented -- and clamps what a client may ask for, the way every other
+                        // requested dimension already was. Without the clamp the container backstop
+                        // inherits an arbitrary client value and the only ceiling left is the reaper.
+                        .timeoutMinutes(policy.resolveCellTimeoutMinutes(
+                                record.getBuildSpec().timeoutMinutes()))
                         .build();
                 String taskArn = launcher.runTask(clusterSettings, taskDefinitionArn, environment,
                         false);

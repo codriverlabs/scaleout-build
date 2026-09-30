@@ -179,6 +179,24 @@ public interface ControlPlaneConfig {
         @WithDefault("120")
         int maxOverallTimeoutMinutes();
 
+        /**
+         * Ceiling on the per-compile budget a client may request via
+         * {@code -Dscaleout-build.timeoutMinutes}.
+         *
+         * <p>Added because it was the one requested dimension {@link ResourcePolicy} did not clamp — cpu,
+         * memory, ephemeral storage and the overall timeout all were. A client asking for 9999 got it, the
+         * container backstop became that plus the margin, and the only remaining ceiling was the reaper
+         * firing at the clamped {@code expiresAt}. That made the bound depend on an optional component,
+         * which is the wrong shape for a cost control.
+         *
+         * <p>Matches {@code maxOverallTimeoutMinutes} at 120, since a per-cell compile budget exceeding the
+         * whole build's wall-clock ceiling cannot be honoured anyway. The paired default lives on
+         * {@code Ecs} rather than here, because it is emitted to the agent alongside the other ecs settings
+         * while this is policy.
+         */
+        @WithDefault("120")
+        int maxCellTimeoutMinutes();
+
         /** Concurrent non-terminal builds one owner may hold. */
         @WithDefault("4")
         int maxConcurrentBuildsPerOwner();
