@@ -45,6 +45,12 @@ import software.amazon.awssdk.services.ecs.EcsClient;
 @ApplicationScoped
 public class BuildService {
 
+    /**
+     * Exit code coreutils {@code timeout} uses for "deadline exceeded", produced by the agent image's
+     * entrypoint wrapper. {@code AgentMain} never exits with it, so it is unambiguous.
+     */
+    private static final int CONTAINER_TIMEOUT_EXIT_CODE = 124;
+
     private static final Logger LOG = Logger.getLogger(BuildService.class);
 
     /*
@@ -419,7 +425,20 @@ public class BuildService {
                         }
                     } else {
                         cell.setState(CellState.FAILED);
-                        cell.setFailureReason(task.stoppedReason());
+                        /*
+                         * 124 is coreutils `timeout` reporting that the agent image's entrypoint wrapper hit
+                         * its deadline -- the container-wide backstop, not the inner native-image budget.
+                         * Without translating it the developer sees "exit 124" and an empty stoppedReason,
+                         * which names neither the cause nor the setting that controls it. `timeout` reports
+                         * 124 whether the process took SIGTERM or had to be SIGKILLed after the grace
+                         * period, so this covers both.
+                         */
+                        cell.setFailureReason(exitCode != null && exitCode == CONTAINER_TIMEOUT_EXIT_CODE
+                                ? "the build container exceeded its overall timeout. The compile itself has"
+                                        + " a separate, shorter budget, so this usually means a stall in"
+                                        + " staging download or artifact upload rather than a slow compile."
+                                        + " Raise it with -Dscaleout-build.timeoutMinutes."
+                                : task.stoppedReason());
                     }
                 }
                 default -> cell.setState(CellState.PROVISIONING);

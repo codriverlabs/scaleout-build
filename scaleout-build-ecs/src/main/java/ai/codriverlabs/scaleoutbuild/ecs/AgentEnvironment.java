@@ -28,6 +28,16 @@ public final class AgentEnvironment {
     private AgentEnvironment() {
     }
 
+    /**
+     * Headroom between the compile budget and the container-wide backstop.
+     *
+     * <p>Covers staging download, artifact collection and upload — measured at roughly 8 s of image pull
+     * plus a 54 MB upload for a 233-jar project, so ten minutes is generous rather than tight. Generous is
+     * correct here: this bound exists to stop a stalled task, and firing it early on a healthy one would
+     * discard a completed compile during its upload.
+     */
+    static final int CONTAINER_TIMEOUT_MARGIN_MINUTES = 10;
+
     /** Mutable builder, since which variables apply depends on the staging mode and build kind. */
     public static final class Builder {
         private final List<KeyValuePair> environment = new ArrayList<>();
@@ -71,9 +81,25 @@ public final class AgentEnvironment {
             return this;
         }
 
+        /**
+         * Sets both the per-compile budget and the container-wide backstop derived from it.
+         *
+         * <p>Two bounds rather than one, at different layers, because they fail differently.
+         * {@code SCALEOUT_BUILD_TIMEOUT_MINUTES} is applied by
+         * {@code NativeImageBuildExecutor} to the {@code native-image} subprocess and reports which command
+         * hung. {@code SCALEOUT_BUILD_CONTAINER_TIMEOUT} is consumed by coreutils {@code timeout} in the
+         * image entrypoint and bounds the whole container — staging downloads, artifact collection, and the
+         * S3 upload, none of which the inner timeout covers. It also survives a JVM too wedged to run its
+         * own watchdog.
+         *
+         * <p>The container bound is the compile budget plus {@link #CONTAINER_TIMEOUT_MARGIN_MINUTES}, so a
+         * hung compile trips the inner timeout first and produces the better error. Equal values would race.
+         */
         public Builder timeoutMinutes(int timeoutMinutes) {
             if (timeoutMinutes > 0) {
                 add("SCALEOUT_BUILD_TIMEOUT_MINUTES", String.valueOf(timeoutMinutes));
+                add("SCALEOUT_BUILD_CONTAINER_TIMEOUT",
+                        (timeoutMinutes + CONTAINER_TIMEOUT_MARGIN_MINUTES) + "m");
             }
             return this;
         }

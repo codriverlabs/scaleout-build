@@ -40,13 +40,23 @@ import software.amazon.awssdk.services.ecs.EcsClient;
  * timeout" into "pays until the next scheduled run", which is a cost optimisation rather than a fix for
  * unbounded liability.
  *
- * <p><b>That was not true when it was written.</b> {@code BuildSpec.timeoutMinutes} defaults to 0 from the
- * client and documented "0 means server default", but no server default existed: the 0 travelled through to
- * {@code AgentEnvironment}, which only sets the timeout variable when positive, so the agent reached
- * {@code process.waitFor()} with no deadline. Until {@code scaleout.ecs.default-cell-timeout-minutes} was
- * added, this reaper was the <em>only</em> bound on a crashed client's Fargate bill. Kept as a note because
- * the defence-in-depth reading above is what makes it safe to reason about removing or rescheduling this
- * function, and it was false for as long as the claim existed. Streaming makes it matter more than it looks: AWS documents that
+ * <p><b>That claim was false for as long as it existed, and is now true in two layers.</b> It originally
+ * rested on a per-compile timeout that never reached the agent: {@code BuildSpec.timeoutMinutes} defaults to
+ * 0, documented "0 means server default", and no server default existed, so the 0 travelled through to
+ * {@code AgentEnvironment} — which only emits the variable when positive — and the agent reached
+ * {@code process.waitFor()} with no deadline. Worse, even a positive value bounded only the
+ * {@code native-image} subprocess, leaving staging download, artifact collection and the S3 upload unbounded.
+ *
+ * <p>Both holes are closed. {@code scaleout.ecs.default-cell-timeout-minutes} (30) supplies the compile
+ * budget, and the agent image's entrypoint wraps the whole process in coreutils {@code timeout}, bounding the
+ * container itself. The outer bound is the compile budget plus a margin, so a hung compile still reports
+ * which command hung rather than a bare exit 124, and it fires even when the JVM is too wedged to run a
+ * watchdog of its own.
+ *
+ * <p>So this reaper is now what it always claimed to be: a cost optimisation that shortens the window, not
+ * the only thing standing between a crashed client and an unbounded bill. Worth knowing if you are weighing
+ * removing it, changing its schedule, or replacing it with EventBridge Scheduler — the history is recorded
+ * because the claim read as reassuring while being wrong. Streaming makes it matter more than it looks: AWS documents that
  * a streamed response is not interrupted when the client connection breaks, so a client hanging up
  * cannot be detected and cannot be used as a cancellation signal.
  */

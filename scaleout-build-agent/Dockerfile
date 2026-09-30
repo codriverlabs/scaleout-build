@@ -59,4 +59,26 @@ ENV SCALEOUT_BUILD_MOUNT_ROOT=/mnt/build
 # Entrypoint override: the upstream image's own entrypoint expects to run native-image directly.
 # This container instead runs the agent, which invokes native-image itself once it has claimed a
 # job — see AgentMain and NativeImageBuildExecutor.
-ENTRYPOINT ["java", "-jar", "/home/quarkus/agent.jar"]
+#
+# Wrapped in coreutils `timeout` so the bound covers the WHOLE container, not just the compile.
+# NativeImageBuildExecutor already applies the same budget to the native-image subprocess, but that
+# leaves everything around it unbounded: staging downloads, artifact collection, and the S3 upload.
+# An agent stalled in any of those had nothing stopping it, so the control plane's reaper was the only
+# thing ending the task.
+#
+# Why `timeout` rather than a watchdog thread inside the agent: it is the parent process, so it still
+# fires when the JVM itself is unresponsive — thrashing in full GC, out of heap, or deadlocked. A Java
+# watchdog needs a healthy scheduler to run, which is exactly what it cannot assume.
+#
+# -k 60s escalates to SIGKILL a minute after SIGTERM, so a JVM that ignores the signal still dies.
+# The grace period matters because native-image spawns its own subprocesses; TERM alone can leave them.
+#
+# SCALEOUT_BUILD_CONTAINER_TIMEOUT is set by AgentEnvironment from the cell timeout plus a margin, so
+# the inner native-image timeout fires first for a hung compile and reports which command hung. This
+# outer bound is the backstop for everything else. The 40m default only applies to a direct `docker
+# run` with no environment, since the control plane always sets it.
+#
+# Exit code 124 is `timeout`'s "deadline exceeded". AgentMain never produces it, so the control plane
+# can distinguish a timed-out task from a failed build.
+ENTRYPOINT ["/bin/sh", "-c", \
+  "exec timeout -k 60s \"${SCALEOUT_BUILD_CONTAINER_TIMEOUT:-40m}\" java -jar /home/quarkus/agent.jar"]

@@ -25,10 +25,26 @@ import software.amazon.awssdk.services.ecs.model.KeyValuePair;
 class AgentEnvironmentTimeoutTest {
 
     private static final String VAR = "SCALEOUT_BUILD_TIMEOUT_MINUTES";
+    private static final String CONTAINER_VAR = "SCALEOUT_BUILD_CONTAINER_TIMEOUT";
 
     @Test
     void positiveTimeoutReachesTheAgent() {
         assertThat(environment(30)).containsEntry(VAR, "30");
+    }
+
+    /**
+     * The container bound must exceed the compile bound, or the two race and a hung compile reports
+     * `timeout`'s bare exit 124 instead of naming the command that hung.
+     */
+    @Test
+    void containerBackstopIsTheCompileBudgetPlusMargin() {
+        assertThat(environment(30)).containsEntry(CONTAINER_VAR, "40m");
+        assertThat(environment(5)).containsEntry(CONTAINER_VAR, "15m");
+    }
+
+    @Test
+    void zeroEmitsNeitherBound() {
+        assertThat(environment(0)).doesNotContainKey(VAR).doesNotContainKey(CONTAINER_VAR);
     }
 
     /**
