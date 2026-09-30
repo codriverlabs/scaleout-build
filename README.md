@@ -1,172 +1,129 @@
-# scaleout-build-maven-plugin
+# scaleout-build
 
-A Maven plugin that computes a GraalVM/Mandrel native-image build matrix (build kind ×
-architecture) and scales the cells that don't match your local host's architecture out to remote
-workers — AWS ECS Fargate today — instead of requiring your own machine to cross-compile or run
-every matrix cell in parallel locally.
+Maven plugin and AWS control plane for **cross-architecture GraalVM native builds** — compile for a CPU
+architecture your machine does not have, from your normal `mvn package`.
 
-## Why
+Built with **Quarkus 3**, **GraalVM native image** (Java 25), **AWS CDK**, and **Mandrel**.
 
-Producing native binaries for multiple architectures (e.g. `x86_64` and `arm64`) from a single CI
-runner or developer machine means either slow QEMU emulation or genuinely owning hardware for
-every target architecture. This plugin offloads the cells your host can't build natively to
-short-lived remote workers, using S3 as a content-addressed staging layer for classpath jars and
-build outputs, and attaches the resulting binaries back to the reactor with per-architecture
-classifiers.
+[![Release](https://img.shields.io/github/v/release/codriverlabs/scaleout-build?include_prereleases)](https://github.com/codriverlabs/scaleout-build/releases)
+[![Tests](https://img.shields.io/badge/tests-175%20passing-brightgreen)](.github/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-ELv2-blue)](LICENSE)
 
-### In plain terms
+---
 
-Java normally starts slowly. You can compile it down to a native binary that starts in milliseconds, which
-is what you want for a cloud service or a command-line tool.
+## What is scaleout-build?
 
-The catch is that **you have to compile on the same kind of chip you are shipping to.** There is no
-cross-compiling. Cloud now runs on two chip families — the older Intel/AMD kind (`x86_64`) and the newer ARM
-kind (AWS Graviton, same family as Apple Silicon). ARM costs roughly 25% less to run, so plenty of teams want
-to ship both.
+GraalVM cannot cross-compile: a native image is built by, and for, the machine it runs on. Producing an
+`arm64` binary from an `x86_64` host therefore means QEMU emulation, which is impractical for a compile that
+saturates 4 vCPU for minutes, or owning hardware for every target.
 
-That leaves two usual options: own and maintain build machines of both kinds, or quietly ship for only one.
+scaleout-build rents the missing architecture for the few minutes the compile takes:
 
-This plugin is a third option. When your build needs a chip your machine does not have, it rents that chip in
-the cloud for the few minutes the compile takes, builds there, and hands the finished binary back. You run
-your normal `mvn package`. The remote workers bring their own compiler, so there is nothing extra to install
-locally.
+- Computes a build matrix of **build kind × architecture**
+- Runs whatever matches your host **locally**, and sends the rest to short-lived **AWS ECS Fargate** workers,
+  one per cell, in parallel
+- Streams every cell's logs back into your Maven output
+- Attaches the binaries to your reactor with per-architecture classifiers
 
-On a real 233-dependency application, both binaries cost **about 1.3 cents** of cloud time — five to nine
-minutes each, running in parallel. Add about **0.7 cents** if you are also paying for the machine that runs
-Maven, as in CI or an agent sandbox; on a laptop you already own, that part is free. So **1.3 to 2 cents a
-build**, and the table [below](#when-this-is-the-wrong-tool) uses the 2-cent figure because it is comparing
-against machines you would otherwise rent.
+A developer needs **one configuration value** and **two IAM permissions**. No ECS, S3, CloudWatch or ECR
+access, and **no local GraalVM toolchain** — the workers bring their own compiler.
 
-Two honest caveats on that number. Roughly a quarter of the 1.3 cents — log storage, the build-state table,
-and staged uploads — is **costed rather than metered**; only the compute and network lines were measured
-directly. And it assumes interruptible capacity, which is the default; guaranteed capacity roughly doubles the
-compute portion. Full breakdown in [`docs/COST_ANALYSIS.md`](docs/COST_ANALYSIS.md).
+On a real 233-dependency Quarkus application, both binaries cost about **1.3 cents** of cloud time and
+complete in five to nine minutes each, running concurrently.
 
-### The case where there is no alternative
+> **Read this before adopting**: [Why offload a native build?](docs/WHY_OFFLOAD.md) covers the three
+> situations where this pays — including one that needs no cross-compiling at all — and, just as importantly,
+> [when it is the wrong tool](docs/WHY_OFFLOAD.md#when-this-is-the-wrong-tool).
 
-"Own hardware for every target" assumes you control the machine. In a **hosted agent sandbox you do
-not** — and increasingly that is where builds run.
+---
 
-Kiro cloud sessions, for example, provision an `x86_64` sandbox in `us-east-1` with **no way to select a
-different architecture** (observed, not published — Kiro documents the sandbox lifecycle but not its
-specs). So an `arm64` native binary is not slow to produce there, or expensive. It is **not producible at
-all**. Root access and Podman inside the sandbox do not change that: the only local route to a foreign
-architecture is QEMU, and emulating a compile that saturates 4 vCPU for 3–5 minutes is not a workaround.
+## Components
 
-This plugin turns that from blocked into a configuration value:
-
-```
--Dscaleout-build.forceRemote=true
-```
-
-The client then needs Maven, a JDK, this plugin, and two IAM permissions — **no GraalVM or Mandrel
-toolchain**, because the local `native-image` path is never reached. The build environment is the agent
-container image in ECR, pinned and multi-arch, so an ephemeral sandbox does not have to reproduce a
-toolchain it was never given.
-
-See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md#running-in-an-ephemeral-agent-sandbox) for the setup, and
-[`docs/COST_ANALYSIS.md`](docs/COST_ANALYSIS.md) §8 for what this does and does not save — hosted sandbox
-compute is often bundled into a subscription, so the honest claim is capability, not cost.
-
-### The case where the chip is not the problem
-
-The two cases above are about architecture. This one is about **memory**, and it needs no cross-compiling at
-all — it applies to the chip you already have.
-
-A developer hosting several agent sessions locally — `kiro-cli` sessions against different repositories, each
-with its own MCP servers — is already using real memory before any build starts. Roughly:
-
-```
-5 sessions x ~5 GB                = 25 GB
-OS, MCP servers, headroom         =  4 GB
-                                    29 GB   -> a 32 GB machine
-+ two concurrent native compiles  = 40 GB   -> a 64 GB machine
-```
-
-A `native-image` compile needs about 5.5 GB and saturates 4 vCPU. One is survivable; two at once forces the
-next machine size up, permanently, for a few minutes of work a day.
-
-| | eu-west-1 on-demand |
+| Component | Role |
 |---|---|
-| `r6a.2xlarge` — 8 vCPU / 64 GiB, sized so sessions *and* compiles fit | $370.55/month |
-| `r6a.xlarge` — 4 vCPU / 32 GiB, enough when compiles go elsewhere | **$185.27/month** |
+| `scaleout-build-maven-plugin` | The plugin. Runs on a developer machine or CI, bound to the `package` phase |
+| `scaleout-build-control-plane` | Quarkus service on Lambda behind a Function URL. Holds the ECS/S3/CloudWatch permissions so developers need none |
+| `scaleout-build-agent` | Container that runs one matrix cell and exits. Carries the Mandrel toolchain |
+| `scaleout-build-control-plane-api` | Wire contract: JAX-RS interfaces, DTOs, SigV4 client filter |
+| `scaleout-build-ecs` | ECS orchestration, S3 staging, native-image input planning |
+| `scaleout-build-control-plane-reaper` | Scheduled Lambda that stops the tasks of builds whose client died |
+| `scaleout-build-control-plane-infra` | AWS CDK app provisioning the control plane and its ECS data plane as one stack |
+| `scaleout-build-shared` | Build matrix types, staging layout, native-image executor |
 
-**A 50% cut, $185/month, fixed.** At 1.3 cents a build you would have to run about **486 builds a day** — 97
-each across five developers — before the offload cost ate the machine saving.
+---
 
-One caveat, since it is easy to over-claim: the saving needs the vCPU count to fall too, not just the memory.
-An 8 vCPU / 32 GiB machine (`m7a.2xlarge`, $377/month) costs *more* than the 64 GiB one. Dropping to 4 vCPU is
-only reasonable **because** the compiles left — sessions spend most of their time waiting on a model, not
-computing.
+## Installation
 
-## When this is the wrong tool
+### Control plane (once per team)
 
-Four cases. The first is the common one.
-
-**You only need the chip you already have, and memory is not tight.** Then don't use this. Building locally is
-faster and free — no upload, no image pull, no waiting for a machine to start. The plugin builds host-matching
-work locally by default for exactly that reason; you have to set `forceRemote` to override it.
-
-The memory qualifier matters: if concurrent agent sessions are competing for RAM, a local build is **not**
-free — it sets your machine size permanently. See
-[above](#the-case-where-the-chip-is-not-the-problem).
-
-**You already own the hardware.** If the machines exist and are paid for, the marginal cost of a local build
-is electricity, and nothing here competes with that.
-
-**You can keep machines genuinely busy, and you will commit for three years.** This is the only volume
-argument that survives, and it is narrower than it looks.
-
-An earlier version of this section claimed that past roughly 800 builds a day you should just rent machines,
-7× cheaper at 6,000 a day. **That was wrong**, because it treated an always-on machine as having unlimited
-capacity. It does not: a `native-image` compile saturates 4 vCPU for about 4.3 minutes, so one 4-vCPU machine
-finishes **about 335 builds a day** at a theoretical 100% utilisation. Always-on capacity has to scale with
-volume just as offloading does — 1,000 builds a day needs three machine pairs, 6,000 needs eighteen. Machine
-size does not help: a 4× larger instance costs 4× and completes 4× as many, so the cost per build is flat.
-
-Compared per build, both architectures, at the same capacity type:
-
-| Utilisation of your own machines | Always-on, on-demand | Always-on, 3-yr commitment |
-|---|---|---|
-| 100% (unreachable in practice) | $0.0247 | **$0.0131** |
-| 70% | $0.0354 | $0.0187 |
-| 50% | $0.0495 | $0.0262 |
-
-Against **$0.0127** offloaded on interruptible capacity, or **$0.0302** offloaded on guaranteed capacity.
-
-So the honest reading:
-
-- **Interruptible is fine for you:** offloading wins everywhere except a three-year commitment run at
-  essentially 100% utilisation, where it is a tie ($0.0131 against $0.0127).
-- **You need guaranteed capacity:** own machines win *if* you keep them ~100% busy ($0.0247 against $0.0302).
-  At 70% utilisation they cost $0.0354 and offloading wins again.
-
-Bursty traffic — which is what agent and CI workloads are — is what makes high utilisation hard. A queue of
-builds waiting for a busy machine is the cost of that utilisation, paid in latency rather than dollars.
-
-**You cannot tolerate an occasional lost build.** The default is interruptible capacity, which is about 70%
-cheaper and occasionally reclaimed mid-build. There is no automatic retry today, so a reclaimed build fails
-and you run it again. Deployments where that is expensive should set
-`-c fargateCapacityStrategy=on-demand-preferred` when deploying the control plane. Details in
-[`docs/COST_ANALYSIS.md`](docs/COST_ANALYSIS.md).
-
-## Using it
-
-**To deploy the control plane** (once per team, by whoever owns the AWS account) download the installer
-from a [release](https://github.com/codriverlabs/scaleout-build/releases) — it carries a pre-synthesized CDK app, so it needs only the AWS CLI,
-Node 20+ and Docker, with no Maven or JDK:
+Whoever owns the AWS account installs it. The installer carries a pre-synthesized CDK app, so it needs only
+the AWS CLI, Node 20+ and Docker — **no Maven or JDK**:
 
 ```bash
+# Download from a release
+curl -fsSL -O https://github.com/codriverlabs/scaleout-build/releases/latest/download/scaleout-build-installer-<version>.tar.gz
 tar xzf scaleout-build-installer-<version>.tar.gz
 cd scaleout-build-installer-<version>
+
+# Install
 ./install.sh --region eu-west-1
 ```
 
-**To use it as a developer**, see the [**user guide**](docs/USER_GUIDE.md) for setup, framework-specific steps (Quarkus, Spring Boot AOT,
-Helidon, plain GraalVM), the full configuration reference, and troubleshooting.
+It deploys the stack, copies the agent image from ghcr.io into your private ECR, and prints the endpoint plus
+the two IAM permissions your developers need. See `./install.sh --help` for capacity strategy and other
+options.
 
-A developer needs one configuration value — the control plane endpoint — and two IAM permissions
-(`lambda:InvokeFunctionUrl`, `lambda:InvokeFunction`). No ECS, S3, CloudWatch or ECR access.
+### Developer (per project)
+
+See the [**Quick Start**](docs/user-guides/quick-start.md) — five steps, about five minutes.
+
+### Uninstalling
+
+```bash
+npx aws-cdk@2 destroy ScaleoutBuildControlPlane --app cdk.out
+```
+
+The S3 staging bucket and DynamoDB build table are created with `RemovalPolicy.RETAIN` and survive
+deliberately — delete them by hand once you are sure.
+
+---
+
+## Quick Example
+
+```bash
+# Quarkus: emit sources rather than compiling locally
+mvn package -Dquarkus.native.enabled=true -Dquarkus.native.sources-only=true
+
+# Build both architectures; the host-matching one runs locally
+mvn package -Dscaleout-build.endpoint=https://REPLACE.lambda-url.eu-west-1.on.aws/
+
+# Collect
+file target/scaleout-build/remote-artifacts/NATIVE-ARM64/my-app
+# ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked
+```
+
+Inside a hosted agent sandbox, where you cannot choose the CPU architecture, add
+`-Dscaleout-build.forceRemote=true` and every cell goes remote — see
+[Agent sandboxes](docs/user-guides/agent-sandboxes.md).
+
+---
+
+## IAM Requirements
+
+A developer needs exactly two permissions on the control plane function:
+
+```bash
+# Invoke the control plane, and nothing else
+lambda:InvokeFunctionUrl
+lambda:InvokeFunction
+```
+
+The control plane itself holds the ECS, S3, CloudWatch and ECR permissions, with `iam:PassRole` scoped to
+exactly two role ARNs conditioned on `iam:PassedToService=ecs-tasks.amazonaws.com`. If your developers
+currently hold broader permissions for native builds, those can be revoked — see
+[`storage-layout-and-isolation.md`](docs/design/control-plane/storage-layout-and-isolation.md).
+
+---
 
 ## What a release publishes
 
@@ -196,29 +153,65 @@ the console.
 Nothing in your account talks to ghcr.io after installation: the agent image lives in your ECR, and the
 Lambda code in your CDK bootstrap bucket.
 
-## Modules
+---
 
-- **`scaleout-build-shared`** — build matrix types, staging layout, and the native-image
-  executor shared by the Maven plugin and the remote worker.
-- **`scaleout-build-maven-plugin`** — the plugin itself, bound to the `package` phase's
-  `aws-ecs:build` goal.
-- **`scaleout-build-agent`** — the container image that runs on the remote worker, executing one
-  matrix cell and exiting.
-- **`scaleout-build-control-plane-api`** — the control plane's wire contract: JAX-RS interfaces,
-  request/response records, and a SigV4 client filter. Shared by the service, the plugin, and any
-  other client (a CLI, an MCP server).
-- **`scaleout-build-ecs`** — ECS task orchestration, S3 staging, and native-image input planning,
-  shared by the plugin and the control-plane service.
-- **`scaleout-build-control-plane`** — the Quarkus service that holds the ECS/S3/CloudWatch
-  permissions so developers need none. Runs as a Lambda behind a Function URL.
-- **`scaleout-build-control-plane-reaper`** — scheduled Lambda that stops the tasks of builds whose
-  client died.
-- **`scaleout-build-control-plane-infra`** — an AWS CDK (Java) app provisioning the control plane and
-  the ECS data plane it drives, as one stack. Not part of the plugin's release artifact.
+## Security
+
+- Per-developer isolation: `ownerHash` is derived server-side from the caller's identity and never taken from
+  client input
+- Function URL is `AuthType: AWS_IAM`; every request carries a SigV4 signature
+- The client holds no AWS credentials beyond its own — staging uses presigned URLs
+- Content-addressed staging is keyed by **blob** digest per owner, never by project digest
+
+Report a vulnerability privately: see [`SECURITY.md`](SECURITY.md).
+
+---
+
+## Development
+
+```bash
+mvn -B clean verify              # 175 tests
+./scripts/verify-synth.sh        # CDK synthesises in both deployment modes
+./scripts/verify-agent-image.sh <image-uri>
+```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the conventions that matter here — each one exists because
+breaking it caused a real bug.
+
+---
+
+## Documentation
+
+| Guide | Description |
+|---|---|
+| [Why offload a native build?](docs/WHY_OFFLOAD.md) | The three motivations, and when this is the wrong tool |
+| [Quick Start](docs/user-guides/quick-start.md) | Two-architecture native build in 5 minutes |
+| [Framework Support](docs/user-guides/frameworks.md) | Quarkus, Spring Boot AOT, Helidon, plain GraalVM |
+| [Agent Sandboxes](docs/user-guides/agent-sandboxes.md) | Running where you cannot choose the CPU architecture |
+| [Configuration Reference](docs/user-guides/configuration.md) | All 16 properties, and how a build is bounded |
+| [Troubleshooting](docs/user-guides/troubleshooting.md) | Symptom, cause, fix |
+| [Cost Analysis](docs/COST_ANALYSIS.md) | Measured per-build cost, and comparison against always-on machines |
+| [Control Plane Design](docs/design/control-plane/scaleout-builder-control-plane.md) | Architecture, wire contract, endpoints |
+| [Storage Layout & Isolation](docs/design/control-plane/storage-layout-and-isolation.md) | Per-owner CAS, ownerHash derivation |
+| [SigV4 Client Signing](docs/design/control-plane/sigv4-client-signing.md) | How the client authenticates |
+| [Lambda Resource Usage](docs/design/control-plane/lambda-resource-usage.md) | Measured memory, duration, cold start |
+| [Fargate Task Resource Usage](docs/design/control-plane/fargate-task-resource-usage.md) | Measured peak RSS, CPU, compile times |
+| [GraalVM Version Matrix Axis](docs/design/control-plane/graalvm-version-matrix-axis.md) | Design for a version axis |
+| [MicroVM Build Backend](docs/design/control-plane/microvm-build-backend.md) | Design for a Lambda MicroVM backend |
+| [Publishing to Maven Central](docs/design/ci-cd/publishing-to-maven-central.md) | Readiness state and the publisher-tier question |
+| [Handover](docs/design/control-plane/HANDOVER.md) | Current deployed state and outstanding work |
+
+---
+
+## Example
 
 See [`docs/examples/scaleout-build-example-app`](docs/examples/scaleout-build-example-app) for a
 real, runnable example, verified end to end against AWS: native-image compilation for both
 `x86_64` and `arm64`, offloaded to ECS Fargate tasks.
+
+---
+
+---
 
 ## License
 
