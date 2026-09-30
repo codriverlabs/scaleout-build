@@ -1,44 +1,73 @@
-# scaleout-build-maven-plugin example app
+# Example: scaleout-build example app
 
-> **Setup below is out of date.** It describes the direct-ECS path, which has been removed along with
-> `scaleout-test-infra`. This example is migrated to the control plane in migration step 4: the 22
-> `aws-ecs.*` parameters go away and `deployment.properties` becomes a single
-> `scaleout-build.endpoint` line pointing at the control plane's Function URL. Until then the
-> instructions here will not work — see
-> [`../../design/control-plane/migration-from-direct-ecs-access.md`](../../design/control-plane/migration-from-direct-ecs-access.md).
+A minimal, reflection-free application that exercises `scaleout-build:build` end to end against real AWS —
+`native-image` compilation for both `x86_64` and `arm64`, offloaded to short-lived ECS Fargate tasks.
 
-Minimal, reflection-free example exercising `aws-ecs:build` end to end against real AWS:
-`native-image` compilation for both `x86_64` and `arm64`, offloaded to ECS Fargate tasks, using
-[`scaleout-test-infra`](../../../scaleout-test-infra)'s deployed stack (plain S3 staging, the
-agent's direct-S3-calls I/O mode).
+Two dependencies, so it finishes in about two minutes and the interesting part is the pipeline rather than the
+compile.
 
-Verified against a real deployment in `eu-west-1`: both architectures compiled successfully,
-producing real, distinct ELF binaries (`x86-64` and `aarch64`), downloaded locally and attached to
-the Maven build with classifiers `native-linux-x86_64`/`native-linux-arm64`.
+## What it verifies
+
+Last run against the deployed control plane in `eu-west-1`:
+
+| | |
+|---|---|
+| `x86_64` binary | `ELF 64-bit LSB executable, x86-64` — 13,372,680 bytes |
+| `arm64` binary | `ELF 64-bit LSB executable, ARM aarch64` — 13,241,624 bytes |
+| Attached classifiers | `native-linux-x86_64-…`, `native-linux-arm64-…` |
+
+Both byte-identical to the pre-migration baseline, which is how the control-plane migration was checked: the
+pipeline changed completely, the output did not.
 
 ## Setup
 
-1. Deploy `scaleout-test-infra` (see its own README) — the default (`includeS3Files=false`)
-   deployment mode, matching this example's `agentUsesDirectS3Io=true` configuration.
-2. Build and push the agent image: `./build-local.sh --multi-arch <AgentRepositoryUri>` from the
-   repo root (see `scaleout-test-infra/README.md`).
-3. Copy `deployment.properties.example` to `deployment.properties` and fill in the real values
-   from your `cdk deploy` output — see that file's own header comment for exactly where each value
-   comes from. **`deployment.properties` is gitignored; never commit it** — it holds
-   account-specific resource identifiers (account ID, IAM role ARNs, subnet/security-group IDs,
-   bucket name) that are meaningless to anyone else's AWS account.
-4. `mvn package`.
+One value. That is the point of the example.
 
-## Why a properties file instead of environment variables or hardcoded values
+1. **Get the endpoint** from whoever deployed the control plane, or read it back:
 
-`deployment.properties` is read into Maven properties at the `validate` phase via
-[`properties-maven-plugin`](https://www.mojohaus.org/properties-maven-plugin/)'s
-`read-project-properties` goal, then referenced as `${aws-ecs.*}` placeholders throughout the
-`scaleout-build-maven-plugin` `<configuration>` block in `pom.xml`. This keeps the committed example free
-of any one AWS account's specific resource identifiers, while still being a real, runnable,
-self-contained Maven project — no environment variables to remember to set, no separate wrapper
-script, just a config file checked in as a template (`.example`) and filled in locally.
+   ```bash
+   aws ssm get-parameter --name /scaleout-build/control-plane/endpoint \
+       --query Parameter.Value --output text
+   ```
 
-If `deployment.properties` is missing, the build fails clearly at the `validate` phase (the plugin
-is deliberately not configured with `quiet=true`) rather than proceeding with unresolved `${...}`
-placeholders passed literally into the AWS SDK calls.
+2. **Copy the template and set it:**
+
+   ```bash
+   cp deployment.properties.example deployment.properties
+   # edit scaleout-build.endpoint=
+   ```
+
+   `deployment.properties` is gitignored. It holds nothing account-specific beyond the endpoint — no bucket,
+   cluster, role, subnet, security group, log group or image, because a client able to set those could choose
+   what code runs with the task role's permissions. See
+   [`storage-layout-and-isolation.md`](../../design/control-plane/storage-layout-and-isolation.md).
+
+3. **Build:**
+
+   ```bash
+   mvn package
+   ```
+
+4. **Collect:**
+
+   ```bash
+   file target/scaleout-build/remote-artifacts/NATIVE-ARM64/scaleout-build-example-app
+   ```
+
+## How the endpoint reaches the plugin
+
+The POM binds `properties-maven-plugin` to the `validate` phase so `${scaleout-build.endpoint}` resolves
+before `package` runs the build goal. That is the pattern to copy for a shared POM — it keeps a
+deployment-specific URL out of version control without every developer passing `-D` on the command line.
+
+Worth knowing if you adapt it: an earlier version of this POM was broken by an index-based edit that clobbered
+the `properties-maven-plugin` configuration, and the failure looked like an unresolved property rather than a
+bad edit.
+
+## Prerequisites
+
+Only what [the quick start](../../user-guides/quick-start.md) lists: Java 17+, Maven, a deployed control
+plane, and AWS credentials carrying `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`.
+
+No GraalVM or Mandrel locally — the remote workers carry the toolchain. The `x86_64` cell will build locally
+if that matches your host; add `-Dscaleout-build.forceRemote=true` to send every cell remotely.

@@ -104,7 +104,7 @@ rather than an opaque credentials error.
 
 ## Reference
 
-- [`../../USER_GUIDE.md`](../../USER_GUIDE.md) — for people *using* the plugin: setup, the
+- [`../../user-guides/quick-start.md`](../../user-guides/quick-start.md) — for people *using* the plugin: setup, the
   framework-specific steps, the full parameter reference, troubleshooting.
 - [`lambda-resource-usage.md`](lambda-resource-usage.md) — measured memory, duration and cold start for both
   service modes. Regenerate with `./scripts/lambda-usage.sh [minutes]`.
