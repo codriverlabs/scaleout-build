@@ -136,7 +136,7 @@ the components have different delivery constraints.
 | **Control-plane Lambda** — native `arm64` **zip**, 256 MB | in the installer tarball, and standalone on the release | `cdk deploy` uploads it to the CDK bootstrap S3 bucket |
 | **Reaper Lambda** — JVM **jar** | same | same |
 | **Installer** — pre-synthesized CDK app + `install.sh` | GitHub Release asset | `curl`, `tar`, `./install.sh` |
-| **Maven artifacts** — plugin, API, shared, ECS | GitHub Packages | `mvn` from a developer machine or CI |
+| **Maven artifacts** — plugin, API, shared, ECS | **Maven Central** (primary) and GitHub Packages | `mvn` from a developer machine or CI — no token required for Central |
 
 **An image for the agent and zips for the Lambdas** is forced rather than stylistic. Lambda
 [cannot pull container images from anywhere but ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/migrate-from-third-party.html),

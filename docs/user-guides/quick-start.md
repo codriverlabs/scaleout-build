@@ -25,37 +25,9 @@ Get a two-architecture native build running in about 5 minutes.
 - **Java 17+** and Maven. You do **not** need GraalVM or Mandrel — the remote workers bring their own
   compiler.
 
-## Step 1: Authenticate to GitHub Packages
-
-The plugin is published to GitHub Packages, which **requires a token even for public packages** — unlike the
-build agent image on ghcr.io, which is anonymously pullable. That asymmetry is
-[GitHub's, not ours](https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages):
-an unauthenticated fetch of the plugin POM returns `401`.
-
-Create a token with the `read:packages` scope, then in `~/.m2/settings.xml`:
+## Step 1: Add the plugin
 
 ```xml
-<settings>
-  <servers>
-    <server>
-      <id>github</id>
-      <username>YOUR_GITHUB_USERNAME</username>
-      <password>YOUR_TOKEN</password>
-    </server>
-  </servers>
-</settings>
-```
-
-## Step 2: Add the plugin
-
-```xml
-<pluginRepositories>
-  <pluginRepository>
-    <id>github</id>
-    <url>https://maven.pkg.github.com/codriverlabs/scaleout-build</url>
-  </pluginRepository>
-</pluginRepositories>
-
 <build>
   <plugins>
     <plugin>
@@ -88,7 +60,7 @@ Create a token with the `read:packages` scope, then in `~/.m2/settings.xml`:
 [the example app](../examples/scaleout-build-example-app) for the pattern, which binds
 `properties-maven-plugin` to the `validate` phase.
 
-## Step 3: Make your framework emit its arguments
+## Step 2: Make your framework emit its arguments
 
 Skip this step for a plain GraalVM project. Otherwise one extra command, because the framework normally runs
 the compile itself and here it must hand over the arguments instead:
@@ -105,7 +77,7 @@ mvn native:write-args-file
 Full detail, including what is verified against which versions, in
 [Framework support](frameworks.md).
 
-## Step 4: Build
+## Step 3: Build
 
 ```bash
 mvn package
@@ -120,7 +92,7 @@ mvn scaleout-build:build -Dscaleout-build.argsFileDirectory=target
 The matrix cell matching your host builds locally; the rest go to remote workers, one per cell, in parallel.
 Logs from every cell stream back into your Maven output.
 
-## Step 5: Collect
+## Step 4: Collect
 
 ```bash
 ls target/scaleout-build/remote-artifacts/
