@@ -53,10 +53,27 @@ import software.amazon.awssdk.services.ecs.EcsClient;
  * which command hung rather than a bare exit 124, and it fires even when the JVM is too wedged to run a
  * watchdog of its own.
  *
- * <p>So this reaper is now what it always claimed to be: a cost optimisation that shortens the window, not
- * the only thing standing between a crashed client and an unbounded bill. Worth knowing if you are weighing
- * removing it, changing its schedule, or replacing it with EventBridge Scheduler — the history is recorded
- * because the claim read as reassuring while being wrong. Streaming makes it matter more than it looks: AWS documents that
+ * <p>So on cost this reaper is now what it always claimed to be: an optimisation that shortens the window,
+ * not the only thing standing between a crashed client and an unbounded bill.
+ *
+ * <h2>Do not conclude from that it is removable</h2>
+ *
+ * <p><b>It is the only garbage collector for the per-owner concurrency quota, and that is a functional
+ * dependency, not a cost one.</b> {@code BuildService} admits a new build only while
+ * {@code countActiveByOwner} — which filters on {@code !state.isTerminal()} — is under
+ * {@code maxConcurrentBuildsPerOwner} (4). The transitions to a terminal state in {@code BuildService} all
+ * require a client that is still driving its build: polling the task it is watching, or cancelling
+ * explicitly. A client killed without its shutdown hook leaves nobody polling, so <em>marking the record
+ * {@code EXPIRED} here is the only path to terminal</em>. Otherwise it sits non-terminal until the DynamoDB
+ * TTL, set to <b>14 days</b>.
+ *
+ * <p>Four {@code SIGKILL}ed builds therefore lock a developer out with "concurrency limit reached: 4 of 4"
+ * for a fortnight. That outweighs the ~$0.35/month this function costs by any measure.
+ *
+ * <p>Recorded because the cost framing above invites exactly the wrong conclusion: break-even measured in
+ * Fargate seconds makes this look marginal, and that reasoning misses what else reads build state. Before
+ * removing or rescheduling this function, account for the quota, not just the bill. A longer poll interval
+ * is safe on cost and directly lengthens a lockout. Streaming makes it matter more than it looks: AWS documents that
  * a streamed response is not interrupted when the client connection breaks, so a client hanging up
  * cannot be detected and cannot be used as a cancellation signal.
  */
