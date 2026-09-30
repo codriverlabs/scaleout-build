@@ -93,7 +93,7 @@
         <jackson.version>2.22.2</jackson.version>
         <!-- Jakarta REST 4.0 is the latest published (4.0.1/4.1.0 do not exist on Central). -->
         <jakarta-ws-rs.version>4.0.0</jakarta-ws-rs.version>
-        <slf4j.version>2.0.19</slf4j.version>
+        <slf4j.version>2.0.20</slf4j.version>
 
         <!-- Maven API (provided scope: supplied by the running Maven instance) -->
         <maven.version>3.9.16</maven.version>
