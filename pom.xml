@@ -19,6 +19,59 @@
         architecture, one worker per matrix cell.
     </description>
 
+    <url>https://github.com/codriverlabs/scaleout-build</url>
+
+    <!--
+        Required by Maven Central, which rejects a deployment missing any of url, licenses, developers
+        or scm. Declared on the parent so every published module inherits them rather than repeating
+        them four times: only the parent plus shared, control-plane-api, ecs and the plugin are
+        deployed, and the rest are deployables that publish.yml excludes.
+
+        Useful before Central too: a consumer resolving from GitHub Packages sees the licence and the
+        source location in the POM their IDE already downloaded.
+    -->
+    <licenses>
+        <license>
+            <name>Elastic License 2.0 (ELv2)</name>
+            <url>https://github.com/codriverlabs/scaleout-build/blob/main/LICENSE</url>
+            <distribution>repo</distribution>
+            <!--
+                Not OSI-approved, which Central permits: it requires a declared licence, not an
+                approved one. Elasticsearch publishes ELv2 artifacts to Central on the same basis.
+            -->
+            <comments>
+                Free to use, modify and redistribute. The restriction is on offering this software to
+                third parties as a hosted or managed service exposing its functionality.
+            </comments>
+        </license>
+    </licenses>
+
+    <organization>
+        <name>CoDriver Labs</name>
+        <url>https://codriverlabs.ai</url>
+    </organization>
+
+    <developers>
+        <developer>
+            <name>CoDriver Labs</name>
+            <email>support@codriverlabs.ai</email>
+            <organization>CoDriver Labs</organization>
+            <organizationUrl>https://codriverlabs.ai</organizationUrl>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/codriverlabs/scaleout-build.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/codriverlabs/scaleout-build.git</developerConnection>
+        <url>https://github.com/codriverlabs/scaleout-build</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub Issues</system>
+        <url>https://github.com/codriverlabs/scaleout-build/issues</url>
+    </issueManagement>
+
     <modules>
         <module>scaleout-build-shared</module>
         <module>scaleout-build-control-plane-api</module>
@@ -55,6 +108,14 @@
 
         <!-- Build plugins -->
         <maven-compiler-plugin.version>3.16.0</maven-compiler-plugin.version>
+        <!--
+            Latest stable, each resolved against Central rather than taken from memory, per
+            .kiro/steering/tech.md. Note maven-source-plugin's newest published version is
+            4.0.0-beta-1, which is deliberately not used: the steering rejects pre-release
+            identifiers, so this pins the newest plain x.y.z.
+        -->
+        <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
+        <maven-javadoc-plugin.version>3.12.0</maven-javadoc-plugin.version>
         <maven-surefire-plugin.version>3.6.0</maven-surefire-plugin.version>
         <maven-plugin-plugin.version>3.16.0</maven-plugin-plugin.version>
         <maven-shade-plugin.version>3.6.2</maven-shade-plugin.version>
@@ -160,6 +221,52 @@
     </dependencies>
 
     <build>
+        <!--
+            Sources and javadoc for every published module. Maven Central requires both for any
+            packaging other than pom, and they are worth having before Central too: a consumer
+            resolving from GitHub Packages gets IDE navigation into the plugin's own code.
+
+            Bound in the parent's build rather than pluginManagement so they apply to every module
+            without each one opting in. The deployables that publish.yml excludes (control plane,
+            reaper, agent, infra) pay a few seconds building jars nobody consumes, which is cheaper
+            than four copies of this block drifting apart.
+        -->
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>${maven-source-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals><goal>jar-no-fork</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>${maven-javadoc-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals><goal>jar</goal></goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <!--
+                        This codebase documents reasoning at length, including measured figures and
+                        references to commits. Failing a release on a malformed @link in a comment
+                        that explains why a timeout is 30 minutes would be the wrong trade, so
+                        doclint is off and the build does not fail on javadoc errors.
+                    -->
+                    <doclint>none</doclint>
+                    <failOnError>false</failOnError>
+                    <quiet>true</quiet>
+                </configuration>
+            </plugin>
+        </plugins>
+
         <pluginManagement>
             <plugins>
                 <plugin>
