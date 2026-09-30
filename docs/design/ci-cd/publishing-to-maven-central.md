@@ -87,5 +87,5 @@ consumer resolving from Central should not be redirected to GitHub Packages for 
 ## Version pinning note
 
 `maven-source-plugin`'s newest published version is `4.0.0-beta-1`. This pins **3.4.0**, the newest plain
-`x.y.z`, because [`.kiro/steering/tech.md`](../../.kiro/steering/tech.md) rejects pre-release identifiers.
+`x.y.z`, because [`.kiro/steering/tech.md`](../../../.kiro/steering/tech.md) rejects pre-release identifiers.
 All three plugin versions were resolved against Central rather than taken from memory, per the same steering.
