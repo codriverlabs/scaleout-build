@@ -45,6 +45,34 @@ plugin runs host-matching cells locally for exactly that reason.
 Three steps. Pick your framework's row in [Framework support](#framework-support) first, because two of them
 need one extra command.
 
+### 0. Authenticate to GitHub Packages
+
+The Maven artifacts are on GitHub Packages, which **requires a token even for public packages** — unlike
+ghcr.io, where the agent image is anonymously pullable. This is a GitHub limitation, not a choice here.
+
+In `~/.m2/settings.xml`:
+
+```xml
+<servers>
+  <server>
+    <id>github</id>
+    <username>YOUR_GITHUB_USERNAME</username>
+    <password>YOUR_TOKEN_WITH_read:packages</password>
+  </server>
+</servers>
+```
+
+And the repository, in your POM or `settings.xml`:
+
+```xml
+<pluginRepositories>
+  <pluginRepository>
+    <id>github</id>
+    <url>https://maven.pkg.github.com/codriverlabs/scaleout-build</url>
+  </pluginRepository>
+</pluginRepositories>
+```
+
 ### 1. Add the plugin
 
 ```xml

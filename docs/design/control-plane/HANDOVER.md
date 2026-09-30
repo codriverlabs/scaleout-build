@@ -396,3 +396,38 @@ Considered, because ghcr.io already hosts the agent image and it would be symmet
 
 Plus it would trade a measured cold start for an unmeasured one. Revisit only if the Lambda package outgrows
 the 250 MB zip limit, which at 26 MB it is nowhere near.
+
+## First release cut: v0.0.1-rc1 (2026-09-30)
+
+`publish.yml` had four jobs and none had ever run. A release candidate exercised all four, and **every one
+passed first time** — worth recording, because the expectation was that the first tag would find something.
+
+Verified by downloading the release as a consumer, not by trusting green ticks:
+
+| | |
+|---|---|
+| GitHub Release | prerelease flag **true**, 5 assets, both checksums verify |
+| Installer bundle | 41.8 MB, `cdk.out` + `install.sh` + VERSION + AGENT_IMAGE, exactly **2** staged assets |
+| Synthesized stack | `provided.al2023` / `['arm64']` / 256 MB, reaper `java25` / `['arm64']` / 512 MB, 34 resources |
+| Control-plane zip | `ELF 64-bit LSB executable, ARM aarch64` — the architecture assertion held end to end |
+| Agent image | `0.0.1-rc1`, `linux/amd64` + `linux/arm64`, anonymously readable |
+| Image provenance | manifest **byte-identical to `:latest`** — re-tagged, not rebuilt, as intended |
+| Maven | all 5 modules on GitHub Packages |
+| `install.sh` | refuses without credentials, with an actionable message |
+
+### Two things the cut surfaced
+
+**An `-rc` tag would have published as a full release.** The version validation permits qualifiers but the
+release step set no `prerelease` flag, so a candidate would have become "Latest release" on the front page.
+Fixed before tagging by deriving it from the tag — any qualifier after a hyphen. This is exactly what a
+throwaway tag is for.
+
+**GitHub Packages Maven requires a token even for public packages**, unlike ghcr.io where the agent image is
+anonymously pullable. A `dependency:get` against the repository fails without auth. That is a GitHub
+limitation rather than a choice, but it is friction for a public project and it is now documented in the user
+guide with the `settings.xml` a consumer needs.
+
+### Not exercised
+
+`install.sh` against a real AWS account. The bundle's self-containment is asserted in CI and re-verified from
+the downloaded artifact, but no stack has been deployed from a release bundle.
