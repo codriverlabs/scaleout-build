@@ -10,10 +10,17 @@ import software.amazon.awscdk.StackProps;
 /**
  * CDK entry point.
  *
- * <p>Account and region come from {@code CDK_DEFAULT_ACCOUNT}/{@code CDK_DEFAULT_REGION}, which the
- * CDK CLI computes from the active credentials and injects into this process. Per
- * {@code scaleout-test-infra/README.md}, export {@code AWS_REGION} to target a region — setting
- * {@code CDK_DEFAULT_REGION} directly has no effect, because the CLI overwrites it.
+ * <p>Account and region are resolved from the caller's AWS credentials at deploy time, not at synth
+ * time. Passing explicit account/region values at synth would bake them into the cdk.out asset
+ * destinations (e.g. {@code region: us-east-1}), making a pre-synthesized bundle only deployable
+ * to that region. By omitting the explicit env — or passing the context values that are null when
+ * absent — CDK keeps account and region as CloudFormation pseudo-parameters
+ * ({@code ${AWS::AccountId}}, {@code ${AWS::Region}}) in the asset manifest, so the same cdk.out
+ * deploys to any region.
+ *
+ * <p>Pattern from {@code express-compute-control-plane/infra/InfraApp.java}: pass context values
+ * from the CDK CLI {@code --context account=X --context region=Y}, and only set the explicit env
+ * when both are provided.
  */
 public final class ControlPlaneInfraApp {
 
@@ -22,13 +29,21 @@ public final class ControlPlaneInfraApp {
 
     public static void main(String[] args) {
         App app = new App();
-        new ControlPlaneInfraStack(app, "ScaleoutBuildControlPlane", StackProps.builder()
-                .env(Environment.builder()
-                        .account(System.getenv("CDK_DEFAULT_ACCOUNT"))
-                        .region(System.getenv("CDK_DEFAULT_REGION"))
-                        .build())
-                .description("scaleout-build control plane and the ECS data plane it drives")
-                .build());
+
+        String account = (String) app.getNode().tryGetContext("account");
+        String region  = (String) app.getNode().tryGetContext("region");
+
+        StackProps.Builder propsBuilder = StackProps.builder()
+                .description("scaleout-build control plane and the ECS data plane it drives");
+
+        if (account != null && region != null) {
+            propsBuilder.env(Environment.builder()
+                    .account(account).region(region).build());
+        }
+        // When account/region are absent, CDK uses ${AWS::AccountId}/${AWS::Region} in asset
+        // destinations, keeping the cdk.out portable across regions and accounts.
+
+        new ControlPlaneInfraStack(app, "ScaleoutBuildControlPlane", propsBuilder.build());
         app.synth();
     }
 }
