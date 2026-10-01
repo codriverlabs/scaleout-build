@@ -56,18 +56,31 @@ complete in five to nine minutes each, running concurrently.
 
 ### Control plane (once per team)
 
-Whoever owns the AWS account installs it. The installer carries a pre-synthesized CDK app, so it needs only
-the AWS CLI, Node 20+ and Docker — **no Maven or JDK**:
+Whoever owns the AWS account installs it. Two options:
+
+**Option A — Docker (no dependencies):**
 
 ```bash
-# Download from a release
+docker run --rm -it \
+  -v ~/.aws:/root/.aws:ro \
+  -e AWS_PROFILE=${AWS_PROFILE:-default} \
+  -e AWS_REGION=eu-west-1 \
+  ghcr.io/codriverlabs/scaleout-build/installer:latest \
+  --region eu-west-1 --yes
+```
+
+No Node, no CDK, no AWS CLI on your machine — everything is inside the image.
+
+**Option B — tarball (lighter download, ~40 MB):**
+
+```bash
 curl -fsSL -O https://github.com/codriverlabs/scaleout-build/releases/latest/download/scaleout-build-installer-<version>.tar.gz
 tar xzf scaleout-build-installer-<version>.tar.gz
 cd scaleout-build-installer-<version>
-
-# Install
 ./install.sh --region eu-west-1
 ```
+
+Needs the AWS CLI, Node 20+ and Docker locally.
 
 It deploys the stack, copies the agent image from ghcr.io into your private ECR, and prints the endpoint plus
 the two IAM permissions your developers need. See `./install.sh --help` for capacity strategy and other
