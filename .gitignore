@@ -55,5 +55,3 @@ scaleout-build-control-plane-infra/cdk.context.json
 # when run from there. Both are build output.
 /assets/
 /cdk.out/
-installer/crane
-installer/docker-credential-ecr-login
