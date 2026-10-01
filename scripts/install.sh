@@ -130,11 +130,14 @@ if [[ "$SKIP_AGENT" == false ]]; then
   inherit the repository's visibility. Either make the package public, or 'docker login ghcr.io' with a
   token that can read it and re-run."
     fi
+    # Logout first: a stale credential from a previous install (different region, rotated token,
+    # or re-used machine) causes docker to respond 400 rather than 401, which looks like a
+    # network error rather than an auth error. Clearing first is always safe -- the login that
+    # follows immediately replaces it.
+    docker logout "${AGENT_REPO%%/*}" >/dev/null 2>&1 || true
     aws ecr get-login-password --region "$REGION" \
         | docker login --username AWS --password-stdin "${AGENT_REPO%%/*}" >/dev/null \
-    || die "ECR login failed for ${AGENT_REPO%%/*} in region ${REGION}.
-  If you recently changed regions, run: docker logout ${AGENT_REPO%%/*}
-  then re-run install.sh."
+    || die "ECR login failed for ${AGENT_REPO%%/*} in region ${REGION}. Check that your AWS credentials have ecr:GetAuthorizationToken."
     docker buildx imagetools create -t "${AGENT_REPO}:latest" "$AGENT_SOURCE"
 fi
 
