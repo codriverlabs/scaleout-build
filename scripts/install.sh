@@ -64,7 +64,9 @@ command -v npx >/dev/null || die "npx not found (needed for the CDK CLI). Instal
 [[ -d cdk.out ]] || die "cdk.out/ not found. Run this from an unpacked release tarball, not from a source checkout."
 
 if [[ "$SKIP_AGENT" == false ]]; then
-    command -v docker >/dev/null || die "docker not found, and it is needed to copy the agent image. Re-run with --skip-agent to defer."
+    if ! declare -f _copy_agent_image >/dev/null 2>&1; then
+        command -v docker >/dev/null || die "docker not found, and it is needed to copy the agent image. Re-run with --skip-agent to defer."
+    fi
 fi
 
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
