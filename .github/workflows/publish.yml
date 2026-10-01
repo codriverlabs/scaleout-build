@@ -334,17 +334,19 @@ jobs:
 
 
   # ── build-installer-image ──────────────────────────────────────────────────────────────────────
-  # Builds a container image containing the pre-synthesized CDK app, crane, the ECR credential
-  # helper, and install.sh. Users run it with just `docker run` and their AWS credentials mounted
-  # -- no Node, no CDK CLI, no Docker daemon on their machine.
-  #
-  # crane is pre-downloaded here (outside the Docker build) because the build container may not
-  # have outbound internet access to github.com. The binary is arch-matched to the runner; the
-  # CI build uses amd64 only since the installer itself runs as amd64 (it just deploys CDK stacks
-  # and copies an OCI image -- no architecture-specific compute).
+  # Builds the installer image on native runners for both amd64 and arm64.
+  # Pushes arch-specific tags (installer:V-amd64, installer:V-arm64).
+  # The installer-image-manifest job joins them into a multi-arch manifest.
   build-installer-image:
     needs: [package-installer]
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -356,9 +358,8 @@ jobs:
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Download the cdk.out from the installer artifact (already built by package-installer)
+      - name: Download the cdk.out from the installer artifact
         uses: actions/download-artifact@v5
         with:
           name: installer
@@ -367,15 +368,9 @@ jobs:
       - name: Unpack cdk.out into the CDK infra directory
         run: |
           mkdir -p scaleout-build-control-plane-infra
-          tar xzf /tmp/installer-artifacts/scaleout-build-installer-${{ steps.version.outputs.version }}.tar.gz             --strip-components=1 -C scaleout-build-control-plane-infra/             "scaleout-build-installer-${{ steps.version.outputs.version }}/cdk.out"
-          ls scaleout-build-control-plane-infra/cdk.out/
-
-      - name: Download crane binary (pre-download avoids network calls inside docker build)
-        run: |
-          CRANE_VERSION=v0.22.1
-          curl -fsSL             "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"             | tar xzf - -C installer --no-anchored crane
-          chmod +x installer/crane
-          installer/crane version
+          tar xzf /tmp/installer-artifacts/scaleout-build-installer-${{ steps.version.outputs.version }}.tar.gz \
+            --strip-components=1 -C scaleout-build-control-plane-infra/ \
+            "scaleout-build-installer-${{ steps.version.outputs.version }}/cdk.out"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -384,24 +379,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push installer image
+      - name: Build and push arch-specific installer image
         run: |
           V="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
           IMAGE="ghcr.io/${{ github.repository }}/installer"
-          docker build -f installer/Dockerfile -t "${IMAGE}:${V}" -t "${IMAGE}:latest" .
-          docker push "${IMAGE}:${V}"
-          docker push "${IMAGE}:latest"
-          echo "### Installer image" >> "$GITHUB_STEP_SUMMARY"
-          echo "```" >> "$GITHUB_STEP_SUMMARY"
-          echo "docker run --rm -it \\" >> "$GITHUB_STEP_SUMMARY"
-          echo "  -v ~/.aws:/root/.aws:ro \\" >> "$GITHUB_STEP_SUMMARY"
-          echo "  -e AWS_PROFILE=\${AWS_PROFILE:-default} \\" >> "$GITHUB_STEP_SUMMARY"
-          echo "  -e AWS_REGION=eu-west-1 \\" >> "$GITHUB_STEP_SUMMARY"
-          echo "  ${IMAGE}:${V} \\" >> "$GITHUB_STEP_SUMMARY"
-          echo "  --region eu-west-1 --yes" >> "$GITHUB_STEP_SUMMARY"
-          echo "```" >> "$GITHUB_STEP_SUMMARY"
-
+          docker build -f installer/Dockerfile -t "${IMAGE}:${V}-${{ matrix.arch }}" .
+          docker push "${IMAGE}:${V}-${{ matrix.arch }}"
 
   # ── installer-image-manifest ───────────────────────────────────────────────────────────────────
   # Joins the two arch-specific installer images into a single multi-arch manifest.
