@@ -124,13 +124,15 @@ if [[ "$SKIP_AGENT" == false ]]; then
     echo "==> Copying the agent image into ${AGENT_REPO}"
     echo "    ${AGENT_SOURCE} -> ${AGENT_REPO}:latest  (multi-arch, registry to registry)"
 
-    # Fail with a useful message rather than a bare 401 from imagetools. A GHCR package is private by
-    # default even when its repository is public, and that is the likeliest cause.
-    if ! docker manifest inspect "$AGENT_SOURCE" >/dev/null 2>&1; then
-        die "cannot read ${AGENT_SOURCE} anonymously.
+    # Skip the docker-based readability check inside the installer container,
+    # where _copy_agent_image is already a skopeo override and docker is absent.
+    if ! declare -f _copy_agent_image >/dev/null 2>&1; then
+        if ! docker manifest inspect "$AGENT_SOURCE" >/dev/null 2>&1; then
+            die "cannot read ${AGENT_SOURCE} anonymously.
   If this is a ghcr.io image, its package visibility is probably still private -- a GHCR package does not
   inherit the repository's visibility. Either make the package public, or 'docker login ghcr.io' with a
   token that can read it and re-run."
+        fi
     fi
     # Logout first: a stale credential from a previous install (different region, rotated token,
     # or re-used machine) causes docker to respond 400 rather than 401, which looks like a
