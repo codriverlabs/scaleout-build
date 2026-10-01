@@ -7,6 +7,7 @@ Built with **Quarkus 3**, **GraalVM native image** (Java 25), **AWS CDK**, and *
 
 [![Release](https://img.shields.io/github/v/release/codriverlabs/scaleout-build?include_prereleases)](https://github.com/codriverlabs/scaleout-build/releases)
 [![Tests](https://img.shields.io/badge/tests-175%20passing-brightgreen)](.github/workflows/ci.yml)
+[![Maven Central](https://img.shields.io/maven-central/v/ai.codriverlabs/scaleout-build-maven-plugin)](https://central.sonatype.com/artifact/ai.codriverlabs/scaleout-build-maven-plugin)
 [![License](https://img.shields.io/badge/license-ELv2-blue)](LICENSE)
 
 ---
@@ -65,7 +66,7 @@ docker run --rm -it \
   -v ~/.aws:/root/.aws:ro \
   -e AWS_PROFILE=${AWS_PROFILE:-default} \
   -e AWS_REGION=eu-west-1 \
-  ghcr.io/codriverlabs/scaleout-build/installer:latest \
+  ghcr.io/codriverlabs/scaleout-build/installer:latest \   # or :1.0.0
   --region eu-west-1 --yes
 ```
 

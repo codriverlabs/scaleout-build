@@ -33,7 +33,7 @@ Get a two-architecture native build running in about 5 minutes.
     <plugin>
       <groupId>ai.codriverlabs</groupId>
       <artifactId>scaleout-build-maven-plugin</artifactId>
-      <version><!-- latest at github.com/codriverlabs/scaleout-build/releases --></version>
+      <version><!-- 1.0.0  (or see releases for latest) --></version>
       <executions>
         <execution>
           <phase>package</phase>

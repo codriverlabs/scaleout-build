@@ -268,6 +268,23 @@ there is nothing to reap.
 If tearing down: `cdk destroy` leaves the bucket and table behind deliberately. Removing them is a
 separate, deliberate act.
 
+## GA: v1.0.0 (2026-10-01)
+
+First general availability release. The pipeline and installer are end-to-end verified:
+
+- Maven Central (no auth): `ai.codriverlabs:scaleout-build-maven-plugin:1.0.0`
+- Installer image (multi-arch, any region): `ghcr.io/codriverlabs/scaleout-build/installer:1.0.0`
+- Agent image: `ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:1.0.0`
+- Verified frameworks: Quarkus 3.39.4, Spring Boot 4.1.0 — both arches, both against the deployed control plane
+- Active deployments: eu-central-1 (Frankfurt), previously us-east-1
+
+### What is known but not blocking GA
+
+- Helidon: same code path as Spring Boot, not tested
+- No server-side retry on Spot interruption — use `-c fargateCapacityStrategy=on-demand-preferred` for release pipelines
+- GraalVM version matrix axis, `--gc` flag: designed, not built
+- KubeMicroVM #116: opt-in `scaleout` profile — open PR, different repo
+
 ## Repository is public as `codriverlabs/scaleout-build` (2026-09-29)
 
 Renamed from `scaleout-build-maven-plugin`, since the repo holds a Lambda control plane, a container agent,
