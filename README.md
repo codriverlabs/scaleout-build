@@ -1,7 +1,7 @@
 # scaleout-build
 
-Maven plugin and AWS control plane for **cross-architecture GraalVM native builds** — compile for a CPU
-architecture your machine does not have, from your normal `mvn package`.
+**Compute gateway for GraalVM native builds.** Compile for a CPU architecture your machine does not have,
+from your normal `mvn package` — no local toolchain, no build machines to maintain.
 
 Built with **Quarkus 3**, **GraalVM native image** (Java 25), **AWS CDK**, and **Mandrel**.
 
@@ -13,6 +13,9 @@ Built with **Quarkus 3**, **GraalVM native image** (Java 25), **AWS CDK**, and *
 ---
 
 ## What is scaleout-build?
+
+A compute gateway sits between your build and the infrastructure it needs. Developers hit one endpoint;
+the gateway holds the ECS, S3, CloudWatch and ECR permissions so they do not have to.
 
 GraalVM cannot cross-compile: a native image is built by, and for, the machine it runs on. Producing an
 `arm64` binary from an `x86_64` host therefore means QEMU emulation, which is impractical for a compile that
