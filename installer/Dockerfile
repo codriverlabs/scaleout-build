@@ -31,9 +31,6 @@ RUN apt-get update -qq \
     && skopeo --version \
     && cdk --version
 
-# Region this installer bundle was synthesized for. Used to warn on mismatch.
-ENV BUNDLE_REGION=us-east-1
-
 WORKDIR /installer
 
 # Pre-synthesized CDK app. Assets are embedded in cdk.out/ so cdk deploy --app cdk.out
@@ -73,31 +70,6 @@ _copy_agent_image() {
 }
 export -f _copy_agent_image
 
-
-# Check that the target region matches the bundled one.
-TARGET_REGION="${AWS_REGION:-}"
-# Extract --region flag from arguments
-prev=""
-for i in "$@"; do
-    [[ "$prev" == "--region" ]] && TARGET_REGION="$i"
-    prev="$i"
-done
-if [[ -n "${BUNDLE_REGION:-}" && -n "$TARGET_REGION" && "$TARGET_REGION" != "$BUNDLE_REGION" && "$TARGET_REGION" != "--"* ]]; then
-    echo ""
-    echo "WARNING: This installer bundle was synthesized for ${BUNDLE_REGION}."
-    echo "  You specified --region ${TARGET_REGION}."
-    echo "  Deploying a pre-synthesized CDK app to a different region may fail because"
-    echo "  Lambda code assets are published to the ${BUNDLE_REGION} bootstrap bucket."
-    echo ""
-    echo "  For a different region, use the tarball and re-synthesize from source:"
-    echo "    tar xzf scaleout-build-installer-<version>.tar.gz"
-    echo "    cd scaleout-build-installer-<version>"
-    echo "    ./install.sh --region ${TARGET_REGION} --yes"
-    echo ""
-    echo "  To proceed anyway, re-run with --force-region."
-    echo ""
-    [[ " $* " != *" --force-region "* ]] && exit 1
-fi
 
 exec /installer/install.sh "$@"
 WRAPPER
