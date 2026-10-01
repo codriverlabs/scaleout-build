@@ -124,25 +124,26 @@ if [[ "$SKIP_AGENT" == false ]]; then
     echo "==> Copying the agent image into ${AGENT_REPO}"
     echo "    ${AGENT_SOURCE} -> ${AGENT_REPO}:latest  (multi-arch, registry to registry)"
 
-    # Skip the docker-based readability check inside the installer container,
-    # where _copy_agent_image is already a skopeo override and docker is absent.
+    # _copy_agent_image may be overridden by the installer container (which uses skopeo).
+    # When not overridden, the default Docker-based implementation is used.
     if ! declare -f _copy_agent_image >/dev/null 2>&1; then
-        if ! docker manifest inspect "$AGENT_SOURCE" >/dev/null 2>&1; then
-            die "cannot read ${AGENT_SOURCE} anonymously.
+        _copy_agent_image() {
+            local src="$1" dst="$2" region="$3"
+            if ! docker manifest inspect "$src" >/dev/null 2>&1; then
+                die "cannot read ${src} anonymously.
   If this is a ghcr.io image, its package visibility is probably still private -- a GHCR package does not
   inherit the repository's visibility. Either make the package public, or 'docker login ghcr.io' with a
   token that can read it and re-run."
-        fi
+            fi
+            # Logout first to avoid 400s from stale cached credentials.
+            docker logout "${dst%%/*}" >/dev/null 2>&1 || true
+            aws ecr get-login-password --region "${region}" \
+                | docker login --username AWS --password-stdin "${dst%%/*}" >/dev/null \
+            || die "ECR login failed for ${dst%%/*} in ${region}. Check that your AWS credentials have ecr:GetAuthorizationToken."
+            docker buildx imagetools create -t "${dst}:latest" "${src}"
+        }
     fi
-    # Logout first: a stale credential from a previous install (different region, rotated token,
-    # or re-used machine) causes docker to respond 400 rather than 401, which looks like a
-    # network error rather than an auth error. Clearing first is always safe -- the login that
-    # follows immediately replaces it.
-    docker logout "${AGENT_REPO%%/*}" >/dev/null 2>&1 || true
-    aws ecr get-login-password --region "$REGION" \
-        | docker login --username AWS --password-stdin "${AGENT_REPO%%/*}" >/dev/null \
-    || die "ECR login failed for ${AGENT_REPO%%/*} in region ${REGION}. Check that your AWS credentials have ecr:GetAuthorizationToken."
-    docker buildx imagetools create -t "${AGENT_REPO}:latest" "$AGENT_SOURCE"
+    _copy_agent_image "$AGENT_SOURCE" "$AGENT_REPO" "$REGION"
 fi
 
 # --- report ---------------------------------------------------------------------------------------
