@@ -205,3 +205,49 @@ and the caveats section of the AWS blog above, which was not read in full.
 4. Measure whether image pull has become material. If it has, evaluate SOCI against a consolidated
    multi-toolchain image.
 5. Cheap flag axes (`--gc`, `-Ob`) at any point; they need no image work.
+
+## Appendix: Micronaut native build strategy
+
+Investigated 2026-10-02 against Micronaut 5.2.0 (micronaut-platform 4.8.3,
+native-maven-plugin 1.1.12).
+
+### Key difference from Spring Boot
+
+Micronaut's argfile when generated inside a container at `/project` looks like:
+
+```
+-cp /project/target/classes:/root/.m2/repository/...
+-o /project/target/mn-test
+-H:ConfigurationFileDirectories=...
+```
+
+**No host absolute paths.** The classpath uses the container working directory, not
+`/home/ubuntu/...`. This happens because `write-args-file` in native-maven-plugin 1.1.12
+requires `native-image` to be present (unlike 1.1.1 used by Spring Boot 4.1.0), so it can
+only be run inside an environment that has GraalVM — i.e. inside our agent container.
+
+### Possible strategy: agent-side write-args-file
+
+For Micronaut, the plugin could:
+1. Stage compiled `target/classes`, the POM and resolved jars
+2. Agent runs `mvn native:write-args-file` inside the container at a known path (e.g. `/build`)
+3. The generated argfile already has correct container-relative paths
+4. Agent runs `native-image @argfile`
+
+This avoids path rewriting entirely and is cleaner than the Spring Boot approach.
+The catch: the agent image currently has no `mvn`. Adding a Maven wrapper or Maven
+binary to the agent image is the enabler.
+
+### Alternative: derive from the staged classpath
+
+The `DerivedClasspathStrategy` already works for plain GraalVM projects. For Micronaut,
+which does compile-time DI and generates reflection metadata into `target/classes/META-INF`,
+derived mode may produce a working binary without `write-args-file` — worth testing first
+before adding Maven to the agent.
+
+### Recommended first step
+
+Test `DerivedClasspathStrategy` (i.e. no `argsFileDirectory`, no native-image locally)
+against a Micronaut project. Micronaut's compile-time DI means the reflection config
+is already in `target/classes` — exactly the path that derived mode stages. This may
+work without any new infrastructure.
