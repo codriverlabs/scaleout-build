@@ -11,6 +11,7 @@ to make them emit their `native-image` arguments instead of running the compile 
 | **Plain GraalVM** | none | nothing else matched | Example app, both arches |
 | **Quarkus** | build with `sources-only` (below) | `target/native-sources/` exists | 3.39.4, 233 deps, both arches |
 | **Spring Boot AOT** | `mvn native:write-args-file` (below) | `argsFileDirectory` is set | Spring Boot 4.1.0, both arches |
+| **Micronaut** | same as Spring Boot (`mvn native:write-args-file`) | `argsFileDirectory` is set | Staging works; compile fails on Logback/Mandrel — not our bug |
 | **Helidon** | same as Spring Boot | `argsFileDirectory` is set | **Not tested** — same code path |
 
 ### Quarkus
