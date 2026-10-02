@@ -251,3 +251,29 @@ Test `DerivedClasspathStrategy` (i.e. no `argsFileDirectory`, no native-image lo
 against a Micronaut project. Micronaut's compile-time DI means the reflection config
 is already in `target/classes` — exactly the path that derived mode stages. This may
 work without any new infrastructure.
+
+### Derived mode won't work for Micronaut
+
+Tested 2026-10-02. `mvn package -Pnative` produces:
+
+- `target/graalvm-reachability-metadata/` — third-party metadata (hundreds of files)
+- `target/native/generated/` — Micronaut-generated config
+
+**Neither location is `target/classes/META-INF/native-image/`**. There is no classpath-discoverable metadata.
+Derived mode stages `target/classes` plus the jars, and GraalVM auto-discovers config from
+`META-INF/native-image/` on the classpath. Since Micronaut places its config elsewhere, derived mode would
+compile but produce a binary that fails at runtime — the exact failure mode `DerivedClasspathStrategy`'s
+javadoc warns about. **Derived mode is ruled out for Micronaut.**
+
+The only viable paths are:
+
+1. **`write-args-file` path** (same as Spring Boot) but Micronaut's plugin version 1.1.12 requires
+   `native-image` to be locally present, so the user must have GraalVM or run the step inside a container.
+   If GraalVM is available, the user can run `mvn native:write-args-file` and then use
+   `argsFileDirectory=target`. The path relocation logic in `ArgsFileDirectoryStrategy` should handle it since
+   the argfile structure is the same as Spring Boot. **Not yet tested.**
+
+2. **Agent-side `write-args-file`**: add Maven to the agent image, run `mvn native:write-args-file` at a
+   known path inside the container, get clean container-relative paths. **Not yet implemented.**
+
+Both paths need someone with a real Micronaut application to validate.
