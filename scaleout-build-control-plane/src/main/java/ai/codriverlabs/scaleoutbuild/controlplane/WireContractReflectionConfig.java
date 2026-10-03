@@ -3,6 +3,7 @@
  */
 package ai.codriverlabs.scaleoutbuild.controlplane;
 
+import ai.codriverlabs.scaleoutbuild.controlplane.api.AdminApi;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDescriptor;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDownload;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactListResponse;
@@ -51,6 +52,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * missing entry is otherwise a runtime 500 in native mode only.
  */
 @RegisterForReflection(targets = {
+    AdminApi.class,
+    AdminApi.TriggerImageBuildRequest.class,
+    AdminApi.ImageBuildResponse.class,
     ArtifactDescriptor.class,
     ArtifactDownload.class,
     ArtifactListResponse.class,

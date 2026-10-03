@@ -79,6 +79,7 @@
         <module>scaleout-build-control-plane</module>
         <module>scaleout-build-control-plane-reaper</module>
         <module>scaleout-build-control-plane-infra</module>
+        <module>scaleout-build-cli</module>
         <module>scaleout-build-maven-plugin</module>
         <module>scaleout-build-agent</module>
     </modules>

@@ -3,12 +3,14 @@
  */
 package ai.codriverlabs.scaleoutbuild.controlplane.resource;
 
+import ai.codriverlabs.scaleoutbuild.controlplane.api.AdminApi;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.AdminApi.ImageBuildResponse;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.AdminApi.TriggerImageBuildRequest;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ErrorResponse;
 import ai.codriverlabs.scaleoutbuild.controlplane.auth.CallerIdentity;
 import ai.codriverlabs.scaleoutbuild.controlplane.config.ControlPlaneConfig;
 import ai.codriverlabs.scaleoutbuild.microvm.MicroVmImageManager;
 import ai.codriverlabs.scaleoutbuild.microvm.MicroVmImageManager.ImageStatus;
-import com.fasterxml.jackson.annotation.JsonInclude;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -65,25 +67,6 @@ public class AdminResource {
     jakarta.ws.rs.container.ContainerRequestContext requestContext;
 
     // ── POST /admin/microvm-images ────────────────────────────────────────────────────────────
-
-    /** Request body for triggering an image build. */
-    public record TriggerImageBuildRequest(
-            /**
-             * S3 URI of the code artifact ZIP, e.g. {@code "s3://bucket/agent-1.0.1.zip"}.
-             * The ZIP must contain a {@code Dockerfile} at its root.
-             */
-            String artifactS3Uri) {}
-
-    /** Response body for a triggered or queried image build. */
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record ImageBuildResponse(
-            String imageName,
-            /** Auto-assigned image version (e.g. {@code "1.0"}), available once build starts. */
-            String imageVersion,
-            /** MicroVM image state: {@code BUILDING}, {@code READY}, {@code FAILED}, etc. */
-            String state,
-            /** Full image ARN, available once the image reaches {@code READY}. */
-            String imageArn) {}
 
     @POST
     @Path("/microvm-images")

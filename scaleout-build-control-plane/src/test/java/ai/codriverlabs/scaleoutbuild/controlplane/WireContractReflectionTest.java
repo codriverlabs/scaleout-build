@@ -47,7 +47,9 @@ class WireContractReflectionTest {
      * <p>{@code BuildApi} is the JAX-RS interface itself. Keep this set as small as the truth allows: every
      * entry is an assertion that something cannot appear in a payload.
      */
-    private static final Set<String> NOT_SERIALIZED_AS_ENTITIES = Set.of("BuildApi");
+    private static final Set<String> NOT_SERIALIZED_AS_ENTITIES = Set.of(
+            "BuildApi",   // JAX-RS interface, never serialized
+            "AdminApi");  // container class for request/response records, never serialized directly
 
     @Test
     void everyApiTypeIsRegisteredForReflection() {
