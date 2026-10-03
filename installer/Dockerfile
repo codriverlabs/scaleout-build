@@ -1,14 +1,11 @@
-FROM public.ecr.aws/ubuntu/ubuntu:24.04
+FROM public.ecr.aws/ubuntu/ubuntu:26.04
 
 # Non-interactive apt
 ENV DEBIAN_FRONTEND=noninteractive
 
-# skopeo: daemonless OCI copy tool (Ubuntu 24.04 repos).
-# awscli: the deployment tool.
-# nodejs: needed for the CDK CLI (Node 18 from Ubuntu repos works with CDK 2).
-# npm is bundled with nodejs.
-# awscli is not in the Ubuntu 24.04 minimal repo; install from the official binary.
-# skopeo, nodejs, npm and unzip are in the default repos.
+# Ubuntu 26.04 ships Node 22 LTS in the default repos — no nodesource PPA needed.
+# awscli is not in the Ubuntu repos; install from the official binary.
+# skopeo, nodejs, npm, and unzip are all in the default repos.
 RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends \
        skopeo \
