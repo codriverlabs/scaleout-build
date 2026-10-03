@@ -413,6 +413,89 @@ public class ControlPlaneInfraStack extends Stack {
                 .targets(List.of(LambdaFunction.Builder.create(reaperFunction).build()))
                 .build();
 
+        // --- Lambda MicroVM backend -----------------------------------------------------------
+        //
+        // Optional: only provisioned when the CDK context key `microvmAdminRoleArn` is set.
+        // Absence is not an error -- deployments that only use Fargate do not need these resources.
+        //
+        // The admin role ARN identifies the IAM role (typically an Identity Center permission set
+        // role) whose bearers may trigger MicroVM image builds via POST /admin/microvm-images.
+        // Exact ARN matching is used server-side -- see AdminResource for the security rationale.
+
+        String microvmAdminRoleArn = String.valueOf(
+                this.getNode().tryGetContext("microvmAdminRoleArn") == null ? ""
+                        : this.getNode().tryGetContext("microvmAdminRoleArn"));
+
+        if (!microvmAdminRoleArn.isBlank()) {
+            // Bucket for the code artifact ZIPs submitted to CreateMicrovmImage.
+            Bucket microvmArtifactsBucket = Bucket.Builder.create(this, "MicrovmArtifactsBucket")
+                    .bucketName(String.format("scaleout-build-microvm-artifacts-%s-%s",
+                            this.getAccount(), this.getRegion()))
+                    .blockPublicAccess(BlockPublicAccess.BLOCK_ALL)
+                    .enforceSsl(true)
+                    .removalPolicy(RemovalPolicy.RETAIN)
+                    .build();
+
+            // Role the MicroVM platform assumes during image builds.
+            // Trusts lambda-microvms.amazonaws.com.
+            Role microvmBuildRole = Role.Builder.create(this, "MicrovmBuildRole")
+                    .assumedBy(new ServicePrincipal("lambda-microvms.amazonaws.com"))
+                    .description("Role for Lambda MicroVM image builds — scaleout-build agent")
+                    .build();
+            microvmArtifactsBucket.grantRead(microvmBuildRole);
+            agentLogGroup.grantWrite(microvmBuildRole);
+
+            // Role the running MicroVM assumes at runtime.
+            // Needs staging bucket and log group access (same as the Fargate task role).
+            Role microvmExecutionRole = Role.Builder.create(this, "MicrovmExecutionRole")
+                    .assumedBy(new ServicePrincipal("lambda-microvms.amazonaws.com"))
+                    .description("Execution role for scaleout-build agent MicroVMs at runtime")
+                    .build();
+            stagingBucket.grantReadWrite(microvmExecutionRole);
+            agentLogGroup.grantWrite(microvmExecutionRole);
+
+            // Grant the control plane Lambda the MicroVM operations it needs.
+            serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .actions(List.of(
+                            "lambda-microvms:CreateMicrovmImage",
+                            "lambda-microvms:GetMicrovmImage",
+                            "lambda-microvms:GetMicrovmImageBuild",
+                            "lambda-microvms:TerminateMicrovm"))
+                    // Scoped to the image name to prevent the service from creating arbitrary images.
+                    .resources(List.of(
+                            String.format("arn:aws:lambda:%s:%s:microvm-image:scaleout-build-agent",
+                                    this.getRegion(), this.getAccount())))
+                    .build());
+
+            // PassRole for the MicroVM execution role — scoped to the MicroVM service principal.
+            serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .actions(List.of("iam:PassRole"))
+                    .resources(List.of(microvmExecutionRole.getRoleArn()))
+                    .conditions(Map.of("StringEquals",
+                            Map.of("iam:PassedToService", "lambda-microvms.amazonaws.com")))
+                    .build());
+
+            // Wire MicroVM config into the Lambda environment.
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_ADMIN_ROLE_ARNS", microvmAdminRoleArn);
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_BUILD_ROLE_ARN", microvmBuildRole.getRoleArn());
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_ARTIFACTS_BUCKET", microvmArtifactsBucket.getBucketName());
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_EXECUTION_ROLE_ARN", microvmExecutionRole.getRoleArn());
+
+            microvmArtifactsBucket.grantRead(serviceFunction);
+
+            CfnOutput.Builder.create(this, "MicrovmBuildRoleArn")
+                    .value(microvmBuildRole.getRoleArn())
+                    .description("Role ARN for Lambda MicroVM image builds").build();
+            CfnOutput.Builder.create(this, "MicrovmExecutionRoleArn")
+                    .value(microvmExecutionRole.getRoleArn())
+                    .description("Execution role ARN for running MicroVMs").build();
+            CfnOutput.Builder.create(this, "MicrovmArtifactsBucket")
+                    .value(microvmArtifactsBucket.getBucketName())
+                    .description("S3 bucket for MicroVM code artifact ZIPs").build();
+        }
+
         // --- Outputs --------------------------------------------------------------------------
 
         StringParameter.Builder.create(this, "ServiceUrlParameter")

@@ -126,6 +126,61 @@ public interface ControlPlaneConfig {
         boolean agentUsesDirectS3Io();
     }
 
+    MicroVm microVm();
+
+    /**
+     * Lambda MicroVM backend configuration.
+     *
+     * <p>All values are optional: if {@code buildRoleArn} or {@code artifactsBucketName} are absent,
+     * the {@code /admin/microvm-images} endpoint returns {@code 503 Service Unavailable} rather than
+     * attempting a build with a missing dependency.
+     *
+     * <p>{@code adminRoleArns} is the authorization gate on the admin endpoint. It contains the exact
+     * IAM role ARNs (normalized, without session suffix) whose bearers may trigger image builds.
+     * Populated from an IAM Identity Center permission set role, e.g.
+     * {@code arn:aws:iam::123456789012:role/AWSReservedSSO_ScaleoutBuildAdmins_abc123}. If empty or
+     * absent, the admin endpoint returns {@code 503} on every call — no role can trigger builds in
+     * an unconfigured deployment.
+     *
+     * <p>Authorization uses exact ARN matching rather than a pattern, because partial matching
+     * against a user-controlled field is a bypass surface: a role named
+     * {@code AWSReservedSSO_ScaleoutBuildAdmins_abc123/anything} would match a prefix check for
+     * {@code ScaleoutBuildAdmins}. Callers from Identity Center always arrive with a normalized role
+     * ARN (the {@code CallerIdentityResolver} strips the session name).
+     */
+    interface MicroVm {
+
+        /**
+         * Exact IAM role ARNs (normalized, without session suffix) that may call the admin image-build
+         * endpoint. Typically the ARN of an IAM Identity Center permission set role, e.g.
+         * {@code arn:aws:iam::123456789012:role/AWSReservedSSO_ScaleoutBuildAdmins_abc123}.
+         *
+         * <p>Empty by default: the endpoint is disabled until explicitly configured.
+         */
+        @WithDefault("")
+        List<String> adminRoleArns();
+
+        /**
+         * ARN of the role the MicroVM platform assumes during image builds. Must trust
+         * {@code lambda-microvms.amazonaws.com} and have S3 read on the artifacts bucket and
+         * CloudWatch Logs write.
+         */
+        Optional<String> buildRoleArn();
+
+        /**
+         * S3 bucket name where code artifact ZIPs are uploaded before triggering a build.
+         * The control plane Lambda must have {@code s3:GetObject} on this bucket.
+         */
+        Optional<String> artifactsBucketName();
+
+        /**
+         * ARN of the role the running MicroVM assumes at runtime. Must trust
+         * {@code lambda-microvms.amazonaws.com} and have S3 read/write on the staging bucket and
+         * CloudWatch Logs write on the agent log group.
+         */
+        Optional<String> executionRoleArn();
+    }
+
     /**
      * Server-side policy. These exist because the client no longer pays for its own IAM: without a
      * ceiling, a caller could request arbitrarily large Fargate tasks, or enough concurrent builds to

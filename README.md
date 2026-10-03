@@ -6,7 +6,7 @@ from your normal `mvn package` — no local toolchain, no build machines to main
 Built with **Quarkus 3**, **GraalVM native image** (Java 25), **AWS CDK**, and **Mandrel**.
 
 [![Release](https://img.shields.io/github/v/release/codriverlabs/scaleout-build?include_prereleases)](https://github.com/codriverlabs/scaleout-build/releases)
-[![Tests](https://img.shields.io/badge/tests-175%20passing-brightgreen)](.github/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-188%20passing-brightgreen)](.github/workflows/ci.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.codriverlabs/scaleout-build-maven-plugin)](https://central.sonatype.com/artifact/ai.codriverlabs/scaleout-build-maven-plugin)
 [![License](https://img.shields.io/badge/license-ELv2-blue)](LICENSE)
 

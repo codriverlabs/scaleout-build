@@ -3,24 +3,26 @@
  */
 package ai.codriverlabs.scaleoutbuild.controlplane.aws;
 
+import ai.codriverlabs.scaleoutbuild.ecs.CloudWatchLogTailer;
+import ai.codriverlabs.scaleoutbuild.microvm.MicroVmImageManager;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Produces;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.regions.providers.DefaultAwsRegionProviderChain;
-import ai.codriverlabs.scaleoutbuild.ecs.CloudWatchLogTailer;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.lambdamicrovms.LambdaMicrovmsClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
 /**
  * Produces the AWS clients that have no Quarkus extension in the platform BOM.
  *
- * <p>Only DynamoDB has one ({@code quarkus-amazon-dynamodb}), so S3, the S3 presigner, and ECS are
- * built here — the same split {@code ecp-tenant-service} uses, where EC2 and Secrets Manager are raw
- * SDK while IAM and STS come from extensions.
+ * <p>Only DynamoDB has one ({@code quarkus-amazon-dynamodb}), so S3, the S3 presigner, ECS, and
+ * Lambda MicroVMs are built here — the same split {@code ecp-tenant-service} uses, where EC2 and
+ * Secrets Manager are raw SDK while IAM and STS come from extensions.
  *
  * <p>All use {@link UrlConnectionHttpClient} rather than the default Apache or Netty client. In a
  * Lambda this is the right trade in both directions: no connection pool to keep warm across a frozen
@@ -73,6 +75,21 @@ public class AwsClientProducer {
                 .build();
     }
 
+    @Produces
+    @ApplicationScoped
+    public LambdaMicrovmsClient lambdaMicrovmsClient() {
+        return LambdaMicrovmsClient.builder()
+                .region(region())
+                .httpClientBuilder(UrlConnectionHttpClient.builder())
+                .build();
+    }
+
+    @Produces
+    @ApplicationScoped
+    public MicroVmImageManager microVmImageManager(LambdaMicrovmsClient microvmsClient) {
+        return new MicroVmImageManager(microvmsClient);
+    }
+
     /** The tailer is stateless; one instance is reused across streaming invocations. */
     @Produces
     @ApplicationScoped
@@ -93,6 +110,10 @@ public class AwsClientProducer {
     }
 
     void closeEcs(@Disposes EcsClient client) {
+        client.close();
+    }
+
+    void closeMicrovms(@Disposes LambdaMicrovmsClient client) {
         client.close();
     }
 }
