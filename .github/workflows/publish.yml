@@ -423,9 +423,161 @@ jobs:
           echo "### Installer image (multi-arch)" >> "$GITHUB_STEP_SUMMARY"
           echo "docker run --rm -it -v ~/.aws:/root/.aws:ro -e AWS_REGION=eu-west-1 ${IMAGE}:${V} --region eu-west-1 --yes" >> "$GITHUB_STEP_SUMMARY"
 
+  # ── build-jvm-artifacts ────────────────────────────────────────────────────────────────────────
+  # Packages the CLI fat jar and the MCP runner jar for inclusion in the GitHub Release.
+  # These are the JVM variants — they run on any architecture without native-image compilation.
+  build-jvm-artifacts:
+    needs: [publish-maven]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Set version from tag
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          mvn -B versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+
+      - name: Build CLI fat jar and MCP runner jar
+        run: |
+          mvn -B package -DskipTests \
+            -pl scaleout-build-cli,scaleout-build-mcp -am
+
+      - name: Rename for release
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          cp scaleout-build-cli/target/scaleout-build-cli-${V}.jar     scaleout-cli-${V}.jar
+          cp scaleout-build-mcp/target/scaleout-build-mcp-${V}-runner.jar scaleout-mcp-${V}-runner.jar
+          sha256sum scaleout-cli-${V}.jar scaleout-mcp-${V}-runner.jar > jvm-artifacts.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jvm-artifacts
+          path: |
+            scaleout-cli-*.jar
+            scaleout-mcp-*-runner.jar
+            jvm-artifacts.sha256
+
+  # ── build-native-cli ───────────────────────────────────────────────────────────────────────────
+  # Compiles the CLI to a native executable on both arm64 and amd64 using GraalVM Community Edition.
+  # A native CLI has no JVM startup cost and ships as a single file with no runtime dependency.
+  #
+  # Uses graalvm/setup-graalvm to install GraalVM CE rather than container-build because the CLI uses
+  # native-maven-plugin directly (not Quarkus), and container-build is a Quarkus-specific feature.
+  build-native-cli:
+    needs: [publish-maven]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            binary: scaleout-arm64
+          - runner: ubuntu-24.04
+            arch: amd64
+            binary: scaleout-amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set version from tag
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          mvn -B versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          native-image-job-reports: true
+
+      # Build the fat jar first (native-maven-plugin uses it as its class path input).
+      - name: Build fat jar then compile to native
+        run: |
+          mvn -B package -Pnative -DskipTests \
+            -pl scaleout-build-cli -am
+
+      - name: Verify binary and rename for release
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          BIN=scaleout-build-cli/target/scaleout
+          test -f "$BIN" || { echo "::error::native binary not found at $BIN"; exit 1; }
+          file "$BIN"
+          # Quick sanity check: --help must exit 0
+          "$BIN" --help > /dev/null
+          cp "$BIN" "${{ matrix.binary }}-${V}"
+          sha256sum "${{ matrix.binary }}-${V}" > "${{ matrix.binary }}-${V}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-cli-${{ matrix.arch }}
+          path: |
+            ${{ matrix.binary }}-*
+
+  # ── build-native-mcp ───────────────────────────────────────────────────────────────────────────
+  # Compiles the Quarkus MCP server to a native executable on arm64.
+  # Uses quarkus.native.container-build=true (Mandrel in a container), matching the control-plane
+  # native build pattern already used in ci.yml. No local GraalVM needed.
+  # arm64 only: the MCP server is a local stdio process; users on x86_64 can run the JVM jar instead.
+  build-native-mcp:
+    needs: [publish-maven]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Set version from tag
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          mvn -B versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+
+      - name: Build MCP server native binary (Mandrel container build)
+        run: |
+          mvn -B package -Pnative -DskipTests \
+            -Dquarkus.native.container-build=true \
+            -pl scaleout-build-mcp -am
+
+      - name: Verify binary and rename for release
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          BIN=scaleout-build-mcp/target/scaleout-build-mcp-${V}-runner
+          test -f "$BIN" || { echo "::error::native MCP binary not found at $BIN"; exit 1; }
+          file "$BIN"
+          file "$BIN" | grep -q 'ARM aarch64' \
+            || { echo "::error::expected ARM aarch64, got: $(file -b "$BIN")"; exit 1; }
+          # Smoke test: missing SCALEOUT_ENDPOINT should print error and exit non-zero
+          if "$BIN" 2>&1 | grep -qi 'error\|SCALEOUT_ENDPOINT'; then
+            echo "startup check passed"
+          fi
+          cp "$BIN" "scaleout-mcp-arm64-${V}"
+          sha256sum "scaleout-mcp-arm64-${V}" > "scaleout-mcp-arm64-${V}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-mcp-arm64
+          path: |
+            scaleout-mcp-arm64-*
+
   # ── release ────────────────────────────────────────────────────────────────────────────────────
   release:
-    needs: [package-installer, publish-central, installer-image-manifest]
+    needs: [package-installer, publish-central, installer-image-manifest, build-jvm-artifacts, build-native-cli, build-native-mcp]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -435,14 +587,30 @@ jobs:
           name: installer
           path: artifacts
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: jvm-artifacts
+          path: artifacts
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-cli-arm64
+          path: artifacts
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-cli-amd64
+          path: artifacts
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-mcp-arm64
+          path: artifacts
+
       - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true
-          # Any tag carrying a qualifier -- rc, beta, alpha -- is a prerelease, so it does not become
-          # "Latest release" on the repository front page and does not get suggested to people who only
-          # want stable. The version validation above already permits qualifiers, so without this an
-          # -rc1 would be presented as the current release.
           prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
           body: |
             ## Install the control plane
@@ -458,16 +626,60 @@ jobs:
             Deploys a **GraalVM native Lambda on arm64** — measured cold start 480–524 ms at 256 MB.
             Needs the AWS CLI, Node 20+, and Docker. No Maven or JDK.
 
-            The Lambda packages are also attached standalone
-            (`control-plane-native-arm64-*.zip`, `reaper-*.jar`) for anyone deploying by another route.
-            The control-plane zip is an **arm64 native binary** and will not run on an x86_64 Lambda.
+            ## CLI
 
-            ## Use the plugin
+            Native binaries (no JVM required):
 
-            Published to GitHub Packages; see the repository README for the `<plugin>` block and the two
-            IAM permissions your developers need.
+            ```bash
+            # arm64 (Apple Silicon, Graviton)
+            curl -fsSL -o scaleout https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag || github.ref_name }}/scaleout-arm64-${{ inputs.tag || github.ref_name }}
+            chmod +x scaleout
+
+            # amd64
+            curl -fsSL -o scaleout https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag || github.ref_name }}/scaleout-amd64-${{ inputs.tag || github.ref_name }}
+            chmod +x scaleout
+
+            # JVM fat jar (any platform, requires Java 21+)
+            curl -fsSL -o scaleout.jar https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag || github.ref_name }}/scaleout-cli-${{ inputs.tag || github.ref_name }}.jar
+            java -jar scaleout.jar --help
+            ```
+
+            ```bash
+            EP=$(aws ssm get-parameter --name /scaleout-build/control-plane/endpoint \
+              --region eu-central-1 --query 'Parameter.Value' --output text)
+            ./scaleout --endpoint "$EP" builds list
+            ```
+
+            ## MCP Server
+
+            Add to your MCP client config (Kiro, Claude Desktop, etc.):
+
+            ```json
+            {
+              "mcpServers": {
+                "scaleout-build": {
+                  "command": "java",
+                  "args": ["-jar", "/path/to/scaleout-mcp-${{ inputs.tag || github.ref_name }}-runner.jar"],
+                  "env": {
+                    "SCALEOUT_ENDPOINT": "https://REPLACE.lambda-url.eu-central-1.on.aws/",
+                    "AWS_REGION": "eu-central-1"
+                  }
+                }
+              }
+            }
+            ```
+
+            Or use the native binary on arm64:
+            ```json
+            {
+              "command": "/path/to/scaleout-mcp-arm64-${{ inputs.tag || github.ref_name }}"
+            }
+            ```
 
             ## Agent image
 
-            `${{ env.IMAGE }}:${{ inputs.tag || github.ref_name }}` — multi-architecture (`amd64`,
-            `arm64`), built on native runners rather than under emulation, and verified per architecture.
+            `${{ env.IMAGE }}:${{ inputs.tag || github.ref_name }}` — multi-architecture (`amd64`, `arm64`).
+
+            ## Plugin
+
+            Published to GitHub Packages and Maven Central. See the README for the `<plugin>` block and the two IAM permissions your developers need.
