@@ -96,22 +96,7 @@
             </plugin>
         </plugins>
     </build>
-
     <profiles>
-        <!--
-          Native profile: compiles the MCP server to a native executable using GraalVM/Mandrel.
-          Activated by -Pnative or -Dnative.
-
-          Usage (requires GraalVM or Mandrel with native-image):
-            mvn -B package -Pnative -pl scaleout-build-mcp -am
-
-          Quarkus handles all reflection config automatically for CDI beans, JAX-RS types,
-          and the MCP server extension. The AWS SDK credential chain needs
-          - initialize-at-run-time because it reads env vars and ~/.aws/config at runtime.
-
-          The native executable is produced at target/scaleout-build-mcp-1.0.1-runner
-          (no .jar extension). In CI, this runs on the arm64 native runner.
-        -->
         <profile>
             <id>native</id>
             <activation>
@@ -121,16 +106,61 @@
             </activation>
             <properties>
                 <quarkus.native.enabled>true</quarkus.native.enabled>
-                <!--
-                  Let Quarkus build native directly on this host using the local GraalVM/Mandrel.
-                  Set quarkus.native.container-build=true to build inside a Mandrel container
-                  instead, which avoids needing GraalVM installed locally.
-                -->
                 <quarkus.native.container-build>false</quarkus.native.container-build>
                 <quarkus.native.additional-build-args>
                     --initialize-at-run-time=software.amazon.awssdk.auth,software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient
                 </quarkus.native.additional-build-args>
             </properties>
+        </profile>
+
+        <profile>
+            <!-- Emit Quarkus native-image sources without compiling. Run before remote-native. -->
+            <id>native-sources</id>
+            <properties>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+                <quarkus.native.sources-only>true</quarkus.native.sources-only>
+            </properties>
+        </profile>
+
+        <profile>
+            <!--
+              remote-native: compile the MCP server using the scaleout-build compute gateway.
+              Two steps: first emit native sources locally, then compile remotely.
+
+              Step 1: mvn package -Pnative-sources -pl scaleout-build-mcp -am
+              Step 2: mvn package -Premote-native -Dscaleout-build.endpoint="$EP" -pl scaleout-build-mcp -am
+
+              Outputs: target/scaleout-build/remote-artifacts/NATIVE-ARM64/scaleout-build-mcp-runner
+            -->
+            <id>remote-native</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>ai.codriverlabs</groupId>
+                        <artifactId>scaleout-build-maven-plugin</artifactId>
+                        <version>${project.version}</version>
+                        <executions>
+                            <execution>
+                                <id>remote-native-build</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>build</goal>
+                                </goals>
+                                <configuration>
+                                    <buildKinds>
+                                        <buildKind>native</buildKind>
+                                    </buildKinds>
+                                    <architectures>
+                                        <architecture>arm64</architecture>
+                                        <architecture>x86_64</architecture>
+                                    </architectures>
+                                    <forceRemote>true</forceRemote>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
     </profiles>
 </project>
