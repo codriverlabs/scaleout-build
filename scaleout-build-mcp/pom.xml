@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ai.codriverlabs</groupId>
+        <artifactId>scaleout-build-parent</artifactId>
+        <version>1.0.1</version>
+    </parent>
+
+    <artifactId>scaleout-build-mcp</artifactId>
+    <name>scaleout-build-mcp</name>
+    <description>
+        MCP (Model Context Protocol) server for the scaleout-build control plane.
+        Exposes build lifecycle and MicroVM image management as MCP tools so AI assistants
+        can trigger, monitor, and cancel native-image builds directly.
+        Built on Quarkus MCP Server (stdio transport); configure as a local MCP server.
+    </description>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.quarkus.platform</groupId>
+                <artifactId>quarkus-bom</artifactId>
+                <version>3.39.5</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Quarkus MCP Server — stdio transport for use as a local MCP server -->
+        <dependency>
+            <groupId>io.quarkiverse.mcp</groupId>
+            <artifactId>quarkus-mcp-server-stdio</artifactId>
+            <version>2.0.2</version>
+        </dependency>
+
+        <!-- Wire contract, SigV4 signer, DTOs, and the ControlPlaneHttpClient -->
+        <dependency>
+            <groupId>ai.codriverlabs</groupId>
+            <artifactId>scaleout-build-cli</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- AWS SDK deps for SigV4 signing (transitive from API module) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>auth</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>http-auth-aws</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>regions</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.quarkus.platform</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <version>3.39.5</version>
+                <extensions>true</extensions>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build</goal>
+                            <goal>generate-code</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

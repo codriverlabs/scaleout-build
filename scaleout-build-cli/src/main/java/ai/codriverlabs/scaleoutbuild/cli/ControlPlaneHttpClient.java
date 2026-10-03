@@ -65,6 +65,11 @@ public final class ControlPlaneHttpClient {
         return sendRequest("DELETE", "/builds/" + buildId, null);
     }
 
+    /** {@code GET /builds/{id}/artifacts} */
+    public String listArtifacts(String buildId) throws CliException {
+        return get("/builds/" + buildId + "/artifacts");
+    }
+
     // ── Admin / MicroVM operations ────────────────────────────────────────────────────────────
 
     /** {@code POST /admin/microvm-images} */
