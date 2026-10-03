@@ -1,27 +1,15 @@
-FROM public.ecr.aws/ubuntu/ubuntu:26.04
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023
 
-# Non-interactive apt
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Ubuntu 26.04 ships Node 22 LTS in the default repos — no nodesource PPA needed.
-# awscli is not in the Ubuntu repos; install from the official binary.
-# skopeo, nodejs, npm, and unzip are all in the default repos.
-RUN apt-get update -qq \
-    && apt-get install -y --no-install-recommends \
+# AL2023 ships nodejs22, skopeo, and awscli-2 in the default repos — no external
+# downloads or PPAs needed. nodejs22 is the explicit package name; the default
+# 'nodejs' package on AL2023 is Node 18.
+RUN dnf install -y --quiet \
+       nodejs22 \
        skopeo \
-       nodejs \
-       npm \
-       curl \
-       ca-certificates \
-       python3 \
+       awscli-2 \
        unzip \
-       groff \
-    && rm -rf /var/lib/apt/lists/* \
-    && ARCH=$(uname -m | sed "s/x86_64/x86_64/;s/aarch64/aarch64/") \
-    && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o /tmp/awscli.zip \
-    && unzip -q /tmp/awscli.zip -d /tmp \
-    && /tmp/aws/install \
-    && rm -rf /tmp/awscli.zip /tmp/aws \
+       python3 \
+    && dnf clean all \
     && npm install -g aws-cdk@2 --silent \
     && node --version \
     && aws --version \
