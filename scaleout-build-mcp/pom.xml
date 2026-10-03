@@ -66,6 +66,12 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5-mockito</artifactId>
+            <version>3.39.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
             <scope>test</scope>
@@ -90,4 +96,41 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+          Native profile: compiles the MCP server to a native executable using GraalVM/Mandrel.
+          Activated by -Pnative or -Dnative.
+
+          Usage (requires GraalVM or Mandrel with native-image):
+            mvn -B package -Pnative -pl scaleout-build-mcp -am
+
+          Quarkus handles all reflection config automatically for CDI beans, JAX-RS types,
+          and the MCP server extension. The AWS SDK credential chain needs
+          - initialize-at-run-time because it reads env vars and ~/.aws/config at runtime.
+
+          The native executable is produced at target/scaleout-build-mcp-1.0.1-runner
+          (no .jar extension). In CI, this runs on the arm64 native runner.
+        -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+                <!--
+                  Let Quarkus build native directly on this host using the local GraalVM/Mandrel.
+                  Set quarkus.native.container-build=true to build inside a Mandrel container
+                  instead, which avoids needing GraalVM installed locally.
+                -->
+                <quarkus.native.container-build>false</quarkus.native.container-build>
+                <quarkus.native.additional-build-args>
+                    --initialize-at-run-time=software.amazon.awssdk.auth,software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient
+                </quarkus.native.additional-build-args>
+            </properties>
+        </profile>
+    </profiles>
 </project>

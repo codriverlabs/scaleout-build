@@ -37,7 +37,7 @@ import picocli.CommandLine.Option;
         version = "scaleout-build-cli 1.0.1",
         subcommands = {BuildsCommand.class, ImagesCommand.class},
         mixinStandardHelpOptions = true)
-public final class ScaleoutCli implements Callable<Integer> {
+public class ScaleoutCli implements Callable<Integer> {
 
     @Option(
             names = {"--endpoint", "-e"},
