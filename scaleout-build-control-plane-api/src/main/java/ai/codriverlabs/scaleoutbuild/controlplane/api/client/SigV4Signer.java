@@ -23,18 +23,25 @@ import software.amazon.awssdk.regions.Region;
  * <h2>Why {@link Aws4Signer} rather than {@link software.amazon.awssdk.http.auth.aws.signer.AwsV4HttpSigner}</h2>
  *
  * <p>{@code AwsV4HttpSigner} (the newer signer from {@code http-auth-aws}) always includes
- * {@code x-amz-content-sha256} in {@code SignedHeaders}, even for bodyless requests. Lambda
- * Function URLs with {@code AuthType: AWS_IAM} compute their expected signature with
- * {@code SignedHeaders=host;x-amz-date} only for GET/DELETE requests, and reject any request
- * whose signature was computed with additional headers in {@code SignedHeaders}. This produces
- * an opaque 403 "The request signature we calculated does not match".
+ * {@code x-amz-content-sha256} in {@code SignedHeaders}, even for bodyless GET/DELETE requests —
+ * both with payload signing enabled (hash {@code e3b0c4...}) and disabled ({@code UNSIGNED-PAYLOAD}).
+ *
+ * <p>Lambda Function URLs with {@code AuthType: AWS_IAM} validate incoming SigV4 signatures
+ * expecting {@code SignedHeaders=host;x-amz-date} for bodyless requests. They reject signatures
+ * computed with additional headers in {@code SignedHeaders}, returning HTTP 403 "The request
+ * signature we calculated does not match". This is a Lambda Function URL service behavior — it is
+ * not configurable from the client side.
  *
  * <p>{@code Aws4Signer} (the v2 SDK signer from {@code auth}) does not include
  * {@code x-amz-content-sha256} for bodyless requests, producing {@code SignedHeaders=host;x-amz-date}
  * — exactly what Lambda Function URLs accept. This is the same signer used by
  * {@code express-compute-control-plane}'s CLI for the same reason.
  *
- * <p>For requests with a body (POST), both signers produce equivalent results.
+ * <p>{@code Aws4Signer} is marked {@code @Deprecated} in the SDK. The deprecation is a signal
+ * that AWS prefers callers to use {@code AwsV4HttpSigner}, but there is no migration path for
+ * Lambda Function URL callers until the service is updated to accept {@code x-amz-content-sha256}
+ * in {@code SignedHeaders} for bodyless requests. This usage will be revisited if the Lambda
+ * service behavior changes or the SDK removes {@code Aws4Signer}.
  *
  * @see <a href="https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html">Lambda Function URL auth</a>
  */
