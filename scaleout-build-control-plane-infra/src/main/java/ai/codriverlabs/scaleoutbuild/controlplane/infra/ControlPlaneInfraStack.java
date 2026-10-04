@@ -79,7 +79,7 @@ public class ControlPlaneInfraStack extends Stack {
      * HTTP server Quarkus runs, and is what makes {@code RESPONSE_STREAM} work for a JVM/native app.
      */
     private static final String LWA_LAYER_ACCOUNT = "753240598075";
-    private static final String LWA_LAYER_VERSION = "25";
+    private static final String LWA_LAYER_VERSION = "30"; // v1.1.0
 
     public ControlPlaneInfraStack(Construct scope, String id, StackProps props) {
         super(scope, id, props);
