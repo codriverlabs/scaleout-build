@@ -52,6 +52,15 @@ import jakarta.ws.rs.core.Response;
 public interface BuildApi {
 
     /**
+     * Lists the caller's most recent builds, newest first.
+     *
+     * @param limit maximum number of results (default 20, server-side cap applied)
+     * @return {@code 200} with a JSON array of {@link BuildStatus}
+     */
+    @GET
+    Response listBuilds(@QueryParam("limit") Integer limit);
+
+    /**
      * Registers a build and negotiates which inputs still need uploading.
      *
      * <p>Does not launch anything: the returned build is {@link BuildState#PENDING} until

@@ -88,8 +88,15 @@ public final class SigV4Signer {
     public void sign(HttpRequest.Builder builder, String method, URI uri, byte[] body, Region region) {
         SdkHttpRequest.Builder unsigned = SdkHttpRequest.builder()
                 .method(SdkHttpMethod.fromValue(method))
-                .uri(uri)
-                .putHeader("Content-Type", "application/json");
+                .uri(uri);
+
+        // Only add Content-Type to the signed headers if there is a body.
+        // JDK HttpClient does not send Content-Type on bodyless requests (GET, DELETE),
+        // so including it in the signed canonical string causes a signature mismatch.
+        boolean hasBody = body != null && body.length > 0;
+        if (hasBody) {
+            unsigned.putHeader("Content-Type", "application/json");
+        }
 
         // The raw, already-encoded query string is what goes on the wire, so it is what must be
         // hashed. Our own log endpoint carries cell=NATIVE%2FARM64, so getting this wrong would break

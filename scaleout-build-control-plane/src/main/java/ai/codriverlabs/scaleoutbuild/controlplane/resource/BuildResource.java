@@ -105,6 +105,12 @@ public class BuildResource implements BuildApi {
     }
 
     @Override
+    public Response listBuilds(Integer limit) {
+        int n = limit != null && limit > 0 ? Math.min(limit, 100) : 20;
+        return Response.ok(buildService.listMine(caller(), n)).build();
+    }
+
+    @Override
     public Response heartbeat(String buildId) {
         return buildService.heartbeat(caller(), buildId)
                 .<Response>map(s -> Response.ok(s).build())
