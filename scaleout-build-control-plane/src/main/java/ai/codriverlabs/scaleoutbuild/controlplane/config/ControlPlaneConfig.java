@@ -157,7 +157,7 @@ public interface ControlPlaneConfig {
          *
          * <p>Empty by default: the endpoint is disabled until explicitly configured.
          */
-        @WithDefault("")
+        @WithDefault("__none__")
         List<String> adminRoleArns();
 
         /**

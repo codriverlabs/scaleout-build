@@ -153,7 +153,9 @@ public class AdminResource {
      */
     private Response guardAdmin(CallerIdentity caller) {
         List<String> adminRoles = config.microVm().adminRoleArns();
-        if (adminRoles == null || adminRoles.isEmpty() || (adminRoles.size() == 1 && adminRoles.get(0).isBlank())) {
+        boolean unconfigured = adminRoles == null || adminRoles.isEmpty()
+                || (adminRoles.size() == 1 && (adminRoles.get(0).isBlank() || "__none__".equals(adminRoles.get(0))));
+        if (unconfigured) {
             LOG.warn("Admin endpoint called but no admin role ARNs are configured");
             return Response.status(Response.Status.SERVICE_UNAVAILABLE)
                     .entity(ErrorResponse.of("NotConfigured",
