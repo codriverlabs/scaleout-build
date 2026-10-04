@@ -3,56 +3,47 @@
  */
 package ai.codriverlabs.scaleoutbuild.controlplane.api.client;
 
+import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
-import java.security.InvalidKeyException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.util.HexFormat;
-import java.util.Locale;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import java.util.Objects;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
-import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.signer.Aws4Signer;
+import software.amazon.awssdk.auth.signer.params.Aws4SignerParams;
+import software.amazon.awssdk.http.SdkHttpFullRequest;
+import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.regions.Region;
 
 /**
- * SigV4 signer for Lambda Function URL requests using JDK crypto directly.
+ * Signs {@link java.net.http.HttpRequest}s with AWS SigV4, for callers of the control-plane
+ * Function URL.
  *
- * <p>The AWS SDK's {@code AwsV4HttpSigner} always includes {@code x-amz-content-sha256} in
- * {@code SignedHeaders}, even for bodyless requests. Lambda Function URLs with
- * {@code AuthType: AWS_IAM} reject signatures that include that header for GET/DELETE requests —
- * they only accept {@code SignedHeaders=host;x-amz-date}. This implementation produces exactly
- * that, matching what {@code curl --aws-sigv4} produces.
+ * <h2>Why {@link Aws4Signer} rather than {@link software.amazon.awssdk.http.auth.aws.signer.AwsV4HttpSigner}</h2>
  *
- * <p>For requests with a body (POST, PUT), the body hash is included in the canonical request
- * and {@code x-amz-content-sha256} is also included in signed headers, matching AWS's requirements
- * for Lambda Function URL with IAM auth.
+ * <p>{@code AwsV4HttpSigner} (the newer signer from {@code http-auth-aws}) always includes
+ * {@code x-amz-content-sha256} in {@code SignedHeaders}, even for bodyless requests. Lambda
+ * Function URLs with {@code AuthType: AWS_IAM} compute their expected signature with
+ * {@code SignedHeaders=host;x-amz-date} only for GET/DELETE requests, and reject any request
+ * whose signature was computed with additional headers in {@code SignedHeaders}. This produces
+ * an opaque 403 "The request signature we calculated does not match".
  *
- * <h2>References</h2>
- * <ul>
- *   <li>AWS SigV4 spec: https://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
- *   <li>Lambda Function URL auth: https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html
- * </ul>
+ * <p>{@code Aws4Signer} (the v2 SDK signer from {@code auth}) does not include
+ * {@code x-amz-content-sha256} for bodyless requests, producing {@code SignedHeaders=host;x-amz-date}
+ * — exactly what Lambda Function URLs accept. This is the same signer used by
+ * {@code express-compute-control-plane}'s CLI for the same reason.
+ *
+ * <p>For requests with a body (POST), both signers produce equivalent results.
+ *
+ * @see <a href="https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html">Lambda Function URL auth</a>
  */
 public final class SigV4Signer {
 
-    private static final String ALGORITHM = "AWS4-HMAC-SHA256";
-    private static final String SERVICE_LAMBDA = "lambda";
-    private static final String EMPTY_HASH =
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    /** Signing service name for Lambda Function URLs. */
+    public static final String SERVICE_LAMBDA = "lambda";
 
-    private static final DateTimeFormatter DATE_TIME_FMT =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
-    private static final DateTimeFormatter DATE_FMT =
-            DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
-
+    private final Aws4Signer signer = Aws4Signer.create();
     private final AwsCredentialsProvider credentialsProvider;
     private final String service;
 
@@ -62,148 +53,75 @@ public final class SigV4Signer {
     }
 
     public SigV4Signer(AwsCredentialsProvider credentialsProvider, String service) {
-        this.credentialsProvider = credentialsProvider;
-        this.service = service;
+        this.credentialsProvider = Objects.requireNonNull(credentialsProvider, "credentialsProvider");
+        this.service = Objects.requireNonNull(service, "service");
     }
 
     /**
      * Extracts the signing region from a Lambda Function URL.
-     * Host format: {@code <id>.lambda-url.<region>.on.aws}
+     *
+     * @throws IllegalArgumentException if the host is not a Function URL, rather than guessing a
+     *         default region and failing later with a signature error that names nothing useful
      */
     public static Region regionOf(URI endpoint) {
         String host = endpoint.getHost();
         if (host == null) {
             throw new IllegalArgumentException("endpoint has no host: " + endpoint);
         }
+        // <id>.lambda-url.<region>.on.aws
         String[] parts = host.split("\\.");
         for (int i = 0; i < parts.length - 1; i++) {
             if ("lambda-url".equals(parts[i])) {
                 return Region.of(parts[i + 1]);
             }
         }
-        throw new IllegalArgumentException("not a Lambda Function URL, cannot infer the signing "
-                + "region from '" + host + "'; expected <id>.lambda-url.<region>.on.aws");
+        throw new IllegalArgumentException("not a Lambda Function URL, cannot infer the signing region "
+                + "from '" + host + "'; expected <id>.lambda-url.<region>.on.aws");
     }
 
     /**
-     * Signs the request, adding {@code Authorization}, {@code X-Amz-Date}, and (if a session
-     * credential) {@code X-Amz-Security-Token} headers to {@code builder}.
+     * Adds SigV4 headers to {@code builder} for a request over {@code body}.
      *
-     * <p>For bodyless requests (body == null or empty): {@code SignedHeaders=host;x-amz-date}.
-     * For requests with a body: {@code SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date}.
+     * <p>{@code body} must be the exact bytes that will be transmitted. Passing anything else —
+     * a pretty-printed variant, a different mapper's output — produces a valid-looking signature
+     * the service will reject.
      */
     public void sign(HttpRequest.Builder builder, String method, URI uri, byte[] body,
                      Region region) {
-        AwsCredentials creds = credentialsProvider.resolveCredentials();
-        Instant now = Instant.now();
-        String dateTime = DATE_TIME_FMT.format(now);
-        String date = DATE_FMT.format(now);
+        byte[] payload = body == null ? new byte[0] : body;
 
-        boolean hasBody = body != null && body.length > 0;
-        String bodyHash = hasBody ? sha256hex(body) : EMPTY_HASH;
+        var sdkBuilder = SdkHttpFullRequest.builder()
+                .method(SdkHttpMethod.fromValue(method))
+                .uri(uri);
 
-        // ── Canonical request ─────────────────────────────────────────────────────────────────
-        // Signed headers: always host + x-amz-date; add content-type + x-amz-content-sha256
-        // only when there is a body.
-        String host = uri.getHost() + (uri.getPort() > 0 ? ":" + uri.getPort() : "");
-        String canonicalHeaders;
-        String signedHeaders;
-        if (hasBody) {
-            canonicalHeaders = "content-type:application/json\n"
-                    + "host:" + host + "\n"
-                    + "x-amz-content-sha256:" + bodyHash + "\n"
-                    + "x-amz-date:" + dateTime + "\n";
-            signedHeaders = "content-type;host;x-amz-content-sha256;x-amz-date";
-        } else {
-            canonicalHeaders = "host:" + host + "\n"
-                    + "x-amz-date:" + dateTime + "\n";
-            signedHeaders = "host;x-amz-date";
+        if (payload.length > 0) {
+            sdkBuilder.putHeader("Content-Type", "application/json");
+            sdkBuilder.contentStreamProvider(() -> new ByteArrayInputStream(payload));
         }
 
-        String canonicalQueryString = canonicalQueryString(uri.getRawQuery());
-        String canonicalRequest = method.toUpperCase(Locale.ROOT) + "\n"
-                + canonicalPath(uri) + "\n"
-                + canonicalQueryString + "\n"
-                + canonicalHeaders + "\n"
-                + signedHeaders + "\n"
-                + bodyHash;
-
-        // ── String to sign ────────────────────────────────────────────────────────────────────
-        String credentialScope = date + "/" + region.id() + "/" + service + "/aws4_request";
-        String stringToSign = ALGORITHM + "\n"
-                + dateTime + "\n"
-                + credentialScope + "\n"
-                + sha256hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
-
-        // ── Signing key ───────────────────────────────────────────────────────────────────────
-        byte[] signingKey = hmacSha256(
-                hmacSha256(
-                        hmacSha256(
-                                hmacSha256(
-                                        ("AWS4" + creds.secretAccessKey()).getBytes(StandardCharsets.UTF_8),
-                                        date),
-                                region.id()),
-                        service),
-                "aws4_request");
-        String signature = HexFormat.of().formatHex(hmacSha256(signingKey,
-                stringToSign.getBytes(StandardCharsets.UTF_8)));
-
-        // ── Authorization header ──────────────────────────────────────────────────────────────
-        String authorization = ALGORITHM
-                + " Credential=" + creds.accessKeyId() + "/" + credentialScope
-                + ", SignedHeaders=" + signedHeaders
-                + ", Signature=" + signature;
-
-        builder.header("X-Amz-Date", dateTime);
-        builder.header("Authorization", authorization);
-        if (hasBody) {
-            builder.header("Content-Type", "application/json");
-            builder.header("x-amz-content-sha256", bodyHash);
+        // The raw, already-encoded query string is what goes on the wire, so it is what must be
+        // hashed. Our own log endpoint carries cell=NATIVE%2FARM64, so getting this wrong would
+        // break resuming a stream while leaving a fresh stream working.
+        String rawQuery = uri.getRawQuery();
+        if (rawQuery != null && !rawQuery.isEmpty()) {
+            for (String pair : rawQuery.split("&")) {
+                String[] kv = pair.split("=", 2);
+                sdkBuilder.putRawQueryParameter(kv[0], kv.length > 1 ? kv[1] : "");
+            }
         }
-        // Session token (STS temporary credentials or IAM Identity Center)
-        if (creds instanceof AwsSessionCredentials session) {
-            builder.header("X-Amz-Security-Token", session.sessionToken());
-        }
-    }
 
-    // ── Crypto helpers ────────────────────────────────────────────────────────────────────────
+        var signed = signer.sign(sdkBuilder.build(),
+                Aws4SignerParams.builder()
+                        .awsCredentials(credentialsProvider.resolveCredentials())
+                        .signingRegion(region)
+                        .signingName(service)
+                        .build());
 
-    private static String sha256hex(byte[] data) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(md.digest(data));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 not available", e);
-        }
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) {
-        return hmacSha256(key, data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static byte[] hmacSha256(byte[] key, byte[] data) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key, "HmacSHA256"));
-            return mac.doFinal(data);
-        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
-            throw new IllegalStateException("HmacSHA256 not available", e);
-        }
-    }
-
-    private static String canonicalPath(URI uri) {
-        String path = uri.getRawPath();
-        return (path == null || path.isEmpty()) ? "/" : path;
-    }
-
-    private static String canonicalQueryString(String rawQuery) {
-        if (rawQuery == null || rawQuery.isEmpty()) {
-            return "";
-        }
-        // Sort by parameter name, then by value.
-        // Our queries are simple (limit=N) with no special characters that need re-encoding.
-        return java.util.Arrays.stream(rawQuery.split("&"))
-                .sorted()
-                .reduce("", (a, b) -> a.isEmpty() ? b : a + "&" + b);
+        signed.headers().forEach((name, values) -> {
+            // Host is set by the HTTP client from the URI; java.net.http also forbids setting it.
+            if (!"Host".equalsIgnoreCase(name)) {
+                values.forEach(value -> builder.header(name, value));
+            }
+        });
     }
 }
