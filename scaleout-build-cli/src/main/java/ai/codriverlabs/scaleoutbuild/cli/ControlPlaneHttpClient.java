@@ -30,8 +30,8 @@ import software.amazon.awssdk.regions.Region;
 public final class ControlPlaneHttpClient {
 
     private final String endpoint;
-    private final SigV4Signer signer;
     private final Region region;
+    private SigV4Signer lazySignerInstance;
     private final HttpClient http;
 
     public static final ObjectMapper MAPPER = new ObjectMapper()
@@ -42,10 +42,18 @@ public final class ControlPlaneHttpClient {
     public ControlPlaneHttpClient(String endpoint, String region) {
         this.endpoint = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
         this.region = Region.of(region);
-        this.signer = new SigV4Signer();
+        // Signer is created lazily on first request to avoid class initialization
+        // issues in GraalVM native image (AWS SDK auth classes need runtime init).
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(15))
                 .build();
+    }
+
+    private SigV4Signer signer() {
+        if (lazySignerInstance == null) {
+            lazySignerInstance = new SigV4Signer();
+        }
+        return lazySignerInstance;
     }
 
     // ── Build operations ─────────────────────────────────────────────────────────────────────
@@ -107,7 +115,7 @@ public final class ControlPlaneHttpClient {
         }
 
         // Sign first (SigV4Signer mutates the builder by adding auth headers)
-        signer.sign(builder, method, uri, bodyBytes, region);
+        signer().sign(builder, method, uri, bodyBytes, region);
 
         // Set the method and body after signing (builder state already set for signing)
         switch (method) {

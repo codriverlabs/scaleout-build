@@ -31,6 +31,15 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>regions</artifactId>
         </dependency>
+        <!-- AWS SDK auth — declared optional in the API module, so must be explicit here -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>auth</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>http-auth-aws</artifactId>
+        </dependency>
 
         <!-- Argument parsing: zero transitive deps, GraalVM-native-compatible. -->
         <dependency>
