@@ -6,51 +6,41 @@ package ai.codriverlabs.scaleoutbuild.controlplane.api.client;
 import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpRequest;
-import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
-import software.amazon.awssdk.auth.signer.Aws4Signer;
-import software.amazon.awssdk.auth.signer.params.Aws4SignerParams;
-import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.http.SdkHttpMethod;
+import software.amazon.awssdk.http.SdkHttpRequest;
+import software.amazon.awssdk.http.auth.aws.signer.AwsV4FamilyHttpSigner;
+import software.amazon.awssdk.http.auth.aws.signer.AwsV4HttpSigner;
+import software.amazon.awssdk.http.auth.spi.signer.SignedRequest;
 import software.amazon.awssdk.regions.Region;
 
 /**
- * Signs {@link java.net.http.HttpRequest}s with AWS SigV4, for callers of the control-plane
- * Function URL.
+ * Signs {@link java.net.http.HttpRequest}s with AWS SigV4.
  *
- * <h2>Why {@link Aws4Signer} rather than {@link software.amazon.awssdk.http.auth.aws.signer.AwsV4HttpSigner}</h2>
+ * <p>Defaults to signing name {@code lambda}, because the control plane is exposed through a Lambda
+ * Function URL with {@code AuthType: AWS_IAM} rather than API Gateway. Use {@code execute-api} only
+ * if the service is ever moved behind API Gateway.
  *
- * <p>{@code AwsV4HttpSigner} (the newer signer from {@code http-auth-aws}) always includes
- * {@code x-amz-content-sha256} in {@code SignedHeaders}, even for bodyless GET/DELETE requests —
- * both with payload signing enabled (hash {@code e3b0c4...}) and disabled ({@code UNSIGNED-PAYLOAD}).
+ * <p>Credentials come from the standard AWS SDK default chain (environment, shared config, SSO,
+ * container and instance metadata), so an MCP server, a CLI, and a Maven plugin all authenticate
+ * the same way.
  *
- * <p>Lambda Function URLs with {@code AuthType: AWS_IAM} validate incoming SigV4 signatures
- * expecting {@code SignedHeaders=host;x-amz-date} for bodyless requests. They reject signatures
- * computed with additional headers in {@code SignedHeaders}, returning HTTP 403 "The request
- * signature we calculated does not match". This is a Lambda Function URL service behavior — it is
- * not configurable from the client side.
- *
- * <p>{@code Aws4Signer} (the v2 SDK signer from {@code auth}) does not include
- * {@code x-amz-content-sha256} for bodyless requests, producing {@code SignedHeaders=host;x-amz-date}
- * — exactly what Lambda Function URLs accept. This is the same signer used by
- * {@code express-compute-control-plane}'s CLI for the same reason.
- *
- * <p>{@code Aws4Signer} is marked {@code @Deprecated} in the SDK. The deprecation is a signal
- * that AWS prefers callers to use {@code AwsV4HttpSigner}, but there is no migration path for
- * Lambda Function URL callers until the service is updated to accept {@code x-amz-content-sha256}
- * in {@code SignedHeaders} for bodyless requests. This usage will be revisited if the Lambda
- * service behavior changes or the SDK removes {@code Aws4Signer}.
- *
- * @see <a href="https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html">Lambda Function URL auth</a>
+ * <p>Uses {@link AwsV4HttpSigner} from {@code software.amazon.awssdk:http-auth-aws} — the current
+ * AWS SDK v2 signer. Lambda Function URLs with {@code AuthType: AWS_IAM} accept the
+ * {@code x-amz-content-sha256} header that this signer includes in {@code SignedHeaders} for all
+ * requests, including bodyless GET/DELETE. This is correct per the SigV4 spec: any {@code x-amz-*}
+ * header included in the request must be signed.
  */
 public final class SigV4Signer {
 
     /** Signing service name for Lambda Function URLs. */
     public static final String SERVICE_LAMBDA = "lambda";
 
-    private final Aws4Signer signer = Aws4Signer.create();
+    private final AwsV4HttpSigner signer = AwsV4HttpSigner.create();
     private final AwsCredentialsProvider credentialsProvider;
     private final String service;
 
@@ -87,48 +77,50 @@ public final class SigV4Signer {
     }
 
     /**
-     * Adds SigV4 headers to {@code builder} for a request over {@code body}.
+     * Adds the SigV4 headers for a request over {@code body} to {@code builder}.
      *
-     * <p>{@code body} must be the exact bytes that will be transmitted. Passing anything else —
-     * a pretty-printed variant, a different mapper's output — produces a valid-looking signature
-     * the service will reject.
+     * <p>{@code body} must be the exact bytes that will be transmitted. Passing anything else — a
+     * pretty-printed variant, a different mapper's output — produces a valid-looking signature the
+     * service will reject.
      */
     public void sign(HttpRequest.Builder builder, String method, URI uri, byte[] body,
                      Region region) {
         byte[] payload = body == null ? new byte[0] : body;
+        boolean hasBody = payload.length > 0;
 
-        var sdkBuilder = SdkHttpFullRequest.builder()
+        SdkHttpRequest.Builder unsigned = SdkHttpRequest.builder()
                 .method(SdkHttpMethod.fromValue(method))
                 .uri(uri);
 
-        if (payload.length > 0) {
-            sdkBuilder.putHeader("Content-Type", "application/json");
-            sdkBuilder.contentStreamProvider(() -> new ByteArrayInputStream(payload));
+        // Only include Content-Type in signed headers when there is a body.
+        // For bodyless requests (GET, DELETE), adding Content-Type to the canonical
+        // headers but not to the actual HTTP request causes a signature mismatch,
+        // because Lambda's SigV4 validation reads what was actually sent on the wire.
+        if (hasBody) {
+            unsigned.putHeader("Content-Type", "application/json");
         }
 
-        // The raw, already-encoded query string is what goes on the wire, so it is what must be
-        // hashed. Our own log endpoint carries cell=NATIVE%2FARM64, so getting this wrong would
-        // break resuming a stream while leaving a fresh stream working.
-        String rawQuery = uri.getRawQuery();
-        if (rawQuery != null && !rawQuery.isEmpty()) {
-            for (String pair : rawQuery.split("&")) {
-                String[] kv = pair.split("=", 2);
-                sdkBuilder.putRawQueryParameter(kv[0], kv.length > 1 ? kv[1] : "");
-            }
-        }
+        // The raw query string is already in the URI; do NOT also call appendRawQueryParameter.
+        // The AWS SDK AwsV4HttpSigner reads query parameters from the URI automatically.
+        // Calling appendRawQueryParameter in addition would double the query string in the
+        // canonical request, producing a signature that Lambda cannot verify.
 
-        var signed = signer.sign(sdkBuilder.build(),
-                Aws4SignerParams.builder()
-                        .awsCredentials(credentialsProvider.resolveCredentials())
-                        .signingRegion(region)
-                        .signingName(service)
-                        .build());
-
-        signed.headers().forEach((name, values) -> {
-            // Host is set by the HTTP client from the URI; java.net.http also forbids setting it.
-            if (!"Host".equalsIgnoreCase(name)) {
-                values.forEach(value -> builder.header(name, value));
+        SignedRequest signed = signer.sign(b -> {
+            b.identity(credentialsProvider.resolveCredentials())
+                    .request(unsigned.build())
+                    .putProperty(AwsV4FamilyHttpSigner.SERVICE_SIGNING_NAME, service)
+                    .putProperty(AwsV4HttpSigner.REGION_NAME, region.id());
+            if (payload.length > 0) {
+                b.payload(() -> new ByteArrayInputStream(payload));
             }
         });
+
+        for (Map.Entry<String, List<String>> header : signed.request().headers().entrySet()) {
+            // Host is set by the HTTP client from the URI; java.net.http also forbids setting it.
+            if (!"Host".equalsIgnoreCase(header.getKey())
+                    && !"Content-Length".equalsIgnoreCase(header.getKey())) {
+                builder.header(header.getKey(), String.join(",", header.getValue()));
+            }
+        }
     }
 }

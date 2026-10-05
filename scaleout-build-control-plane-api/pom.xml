@@ -64,9 +64,13 @@
             <optional>true</optional>
         </dependency>
         <!--
-          http-auth-spi is needed for SigV4RequestFilter (the JAX-RS filter used by the Maven plugin).
-          http-auth-aws is no longer needed: SigV4Signer now uses Aws4Signer from the auth module.
+          http-auth-spi and http-auth-aws are needed for AwsV4HttpSigner / SigV4RequestFilter.
         -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>http-auth-aws</artifactId>
+            <optional>true</optional>
+        </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>regions</artifactId>
