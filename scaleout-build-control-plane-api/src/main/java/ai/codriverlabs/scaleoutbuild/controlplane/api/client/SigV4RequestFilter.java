@@ -115,15 +115,11 @@ public final class SigV4RequestFilter implements ClientRequestFilter {
                 .method(SdkHttpMethod.fromValue(requestContext.getMethod()))
                 .uri(uri);
 
-        // Query parameters must be signed too, and the raw (already-encoded) form is what goes on
-        // the wire, so it is what must be hashed.
-        String rawQuery = uri.getRawQuery();
-        if (rawQuery != null && !rawQuery.isEmpty()) {
-            for (String pair : rawQuery.split("&")) {
-                String[] kv = pair.split("=", 2);
-                unsigned.appendRawQueryParameter(kv[0], kv.length > 1 ? kv[1] : "");
-            }
-        }
+        // Do NOT call appendRawQueryParameter here. The query string is already present in the
+        // URI passed to uri() above, and AwsV4HttpSigner reads it from the URI automatically.
+        // Calling appendRawQueryParameter in addition would double every query parameter in the
+        // canonical query string, producing a signature that Lambda cannot verify.
+        // See: SigV4Signer — same fix applied there first.
 
         requestContext.getStringHeaders().forEach((name, values) -> {
             if (!"Host".equalsIgnoreCase(name) && !"Authorization".equalsIgnoreCase(name)) {

@@ -272,11 +272,13 @@ separate, deliberate act.
 
 First general availability release. The pipeline and installer are end-to-end verified:
 
-- Maven Central (no auth): `ai.codriverlabs:scaleout-build-maven-plugin:1.0.0`
-- Installer image (multi-arch, any region): `ghcr.io/codriverlabs/scaleout-build/installer:1.0.0`
-- Agent image: `ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:1.0.0`
-- Verified frameworks: Quarkus 3.39.4, Spring Boot 4.1.0 — both arches, both against the deployed control plane
-- Active deployments: eu-central-1 (Frankfurt), previously us-east-1
+- Maven Central (no auth): `ai.codriverlabs:scaleout-build-maven-plugin:1.0.1`
+- Installer image (multi-arch, any region): `ghcr.io/codriverlabs/scaleout-build/installer:1.0.1`
+- Agent image: `ghcr.io/codriverlabs/scaleout-build/scaleout-build-agent:1.0.1`
+- Verified frameworks: Quarkus 3.39.4, Spring Boot 4.1.0 — both arches
+- Active deployments: **us-east-1** (native x86_64, LWA v1.1.0); eu-central-1 destroyed
+- Endpoint: `https://h6qanqapgojyhniq5dkwccw4ny0foceg.lambda-url.us-east-1.on.aws/`
+- SSM: `/scaleout-build/control-plane/endpoint` in us-east-1
 
 ### What is known but not blocking GA
 
