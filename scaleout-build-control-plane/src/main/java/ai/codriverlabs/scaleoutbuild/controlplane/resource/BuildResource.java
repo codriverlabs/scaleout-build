@@ -10,6 +10,7 @@ import ai.codriverlabs.scaleoutbuild.controlplane.auth.CallerIdentity;
 import ai.codriverlabs.scaleoutbuild.controlplane.service.BuildService;
 import ai.codriverlabs.scaleoutbuild.controlplane.service.InvalidRequestException;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.core.Response;
