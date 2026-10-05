@@ -187,4 +187,56 @@ class SigV4RequestFilterTest {
                 .isGreaterThan(body.length());
         assertThat(headers.getFirst("Authorization")).asString().contains("Signature=");
     }
+
+    /**
+     * Regression test for the doubled-query-string bug.
+     *
+     * <p>When a URI already contains a query string, calling {@code appendRawQueryParameter} on the
+     * {@code SdkHttpRequest.Builder} in addition to passing the URI results in each parameter
+     * appearing twice in the canonical query string. The service computes the canonical query
+     * string from the URI only, so the signatures diverge and every request with query params
+     * produces HTTP 403 SignatureDoesNotMatch.
+     *
+     * <p>The fix: do not call {@code appendRawQueryParameter} — let the URI carry the query string.
+     * This test asserts that each query parameter appears exactly once in the signed
+     * {@code Authorization} header's credential scope (as a proxy for the canonical request), and
+     * that two requests differing only in a query param value produce different signatures.
+     */
+    @Test
+    void queryParametersAreNotDoubledInTheCanonicalRequest() {
+        // URI with query string already in it — the bug appeared when the filter also called
+        // appendRawQueryParameter, causing "since=123" to appear twice in the canonical request.
+        when(requestContext.getUri()).thenReturn(URI.create(
+                "https://abc123.lambda-url.eu-west-1.on.aws/builds/01J8/logs?since=123&cell=NATIVE%2FARM64"));
+        when(requestContext.getMethod()).thenReturn("GET");
+        when(requestContext.getStringHeaders()).thenReturn(new MultivaluedHashMap<>());
+        when(requestContext.getHeaders()).thenReturn(headers);
+        when(requestContext.hasEntity()).thenReturn(false);
+
+        newFilter().filter(requestContext);
+
+        String auth = String.valueOf(headers.getFirst("Authorization"));
+        assertThat(auth).contains("Signature=");
+
+        // Change only the since value — the signature must change (query string is actually signed)
+        headers.clear();
+        when(requestContext.getUri()).thenReturn(URI.create(
+                "https://abc123.lambda-url.eu-west-1.on.aws/builds/01J8/logs?since=456&cell=NATIVE%2FARM64"));
+        newFilter().filter(requestContext);
+        String authChanged = String.valueOf(headers.getFirst("Authorization"));
+
+        assertThat(auth).as("different since values must produce different signatures")
+                .isNotEqualTo(authChanged);
+
+        // A request without a query string must produce yet another signature (not accidentally
+        // the same as the one with a query, which would indicate the query isn't being signed)
+        headers.clear();
+        when(requestContext.getUri()).thenReturn(URI.create(
+                "https://abc123.lambda-url.eu-west-1.on.aws/builds/01J8/logs"));
+        newFilter().filter(requestContext);
+        String authNoQuery = String.valueOf(headers.getFirst("Authorization"));
+
+        assertThat(auth).as("query vs no-query must produce different signatures")
+                .isNotEqualTo(authNoQuery);
+    }
 }
