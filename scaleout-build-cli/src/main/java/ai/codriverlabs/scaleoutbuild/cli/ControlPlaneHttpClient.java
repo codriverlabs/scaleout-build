@@ -49,6 +49,16 @@ public final class ControlPlaneHttpClient {
                 .build();
     }
 
+    /**
+     * Test-only seam: injects a pre-built signer instead of the lazily-constructed default, so
+     * tests can supply {@code StaticCredentialsProvider} rather than depend on
+     * {@code DefaultCredentialsProvider} resolving real or ambient AWS credentials.
+     */
+    ControlPlaneHttpClient(String endpoint, String region, SigV4Signer signer) {
+        this(endpoint, region);
+        this.lazySignerInstance = signer;
+    }
+
     private SigV4Signer signer() {
         if (lazySignerInstance == null) {
             lazySignerInstance = new SigV4Signer();
