@@ -1,6 +1,25 @@
 # Consolidating the control-plane HTTP clients
 
-## Status: Planned — not yet implemented
+## Status: Implemented
+
+Shipped across three commits, one per migration step:
+
+1. `scaleout-build-control-plane-client` created with the full target surface.
+2. The Maven plugin migrated; its package-private `ControlPlaneClient` deleted.
+3. The CLI and MCP server migrated together; `ControlPlaneHttpClient` and `CliException` deleted
+   from `scaleout-build-cli`.
+
+One real gap surfaced during implementation that this document's original draft did not
+anticipate: `ControlPlaneClient`'s region-inference constructor (copied verbatim from the plugin's
+original client) cannot work for the CLI, whose `--region` option is a real, tested, documented
+feature and whose test suite deliberately uses non-Lambda-URL endpoints. A second public
+constructor, `ControlPlaneClient(String endpoint, String region)`, was added rather than dropping
+that capability — see the class javadoc for the full reasoning. Everything else matched this
+document's plan, including the claim that the CLI's package-keyed native-image
+`--initialize-at-run-time` config would transfer automatically (confirmed structurally by
+inspecting the built fat jar, not by running an actual native compile — no local GraalVM/Mandrel
+toolchain was available, and the `remote-native` profile compiles on live, cost-incurring Fargate
+infrastructure, which was deliberately left for a separate explicit go-ahead rather than run here).
 
 ## Problem
 
