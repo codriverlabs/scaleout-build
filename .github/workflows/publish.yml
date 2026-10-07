@@ -71,8 +71,8 @@ jobs:
       - name: Build and test
         run: mvn -B clean verify
 
-      # Only what a consumer resolves: the plugin, the three libraries it needs at runtime, and the root
-      # pom -- which is the parent every module inherits from, so omitting it would make all four
+      # Only what a consumer resolves: the plugin, the four libraries it needs at runtime, and the root
+      # pom -- which is the parent every module inherits from, so omitting it would make all five
       # unresolvable. The deployables (service, reaper, CDK app, agent) are excluded; they are deployed
       # from source, not consumed as artifacts.
       - name: Publish to GitHub Packages
@@ -80,7 +80,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mvn -B deploy -DskipTests \
-            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-ecs,scaleout-build-maven-plugin \
+            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-control-plane-client,scaleout-build-ecs,scaleout-build-maven-plugin \
             -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository }}
 
       - name: Summarise
@@ -330,7 +330,7 @@ jobs:
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
         run: |
           mvn -B deploy -Prelease -DskipTests \
-            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-ecs,scaleout-build-maven-plugin
+            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-control-plane-client,scaleout-build-ecs,scaleout-build-maven-plugin
 
 
   # ── build-installer-image ──────────────────────────────────────────────────────────────────────
