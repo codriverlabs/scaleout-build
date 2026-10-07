@@ -273,16 +273,37 @@ already done once this session for the SigV4 fix.
   does not start depending on the new module.
 - Presigned-transfer signing behavior (unsigned, separate path) is preserved exactly.
 
-## Open items (not yet decided)
+## Resolved: `ControlPlaneClientException` is checked, lives alongside `ControlPlaneClient`
 
-- Whether `ControlPlaneClientException` is checked or unchecked. The plugin's Mojo layer currently
-  catches `IOException` and the CLI's command layer currently catches `CliException` (checked) —
-  reconciling these without changing both callers' control flow needs a look at both at
-  implementation time, not a guess here.
-- Final package choice for `ControlPlaneClientException` — alongside `ControlPlaneClient` in the
-  new module, or in `-api` next to `ErrorResponse` since it's conceptually part of the wire
-  contract's error shape. Leaning toward the new module (it is a *client-side* exception type, not
-  part of the wire contract itself), but not settled.
+Both open items from the first draft of this document are now settled, by reading the actual call
+sites rather than guessing from the shape of the two existing types.
+
+**Checked, not unchecked.** Every call site in both existing consumers already declares and relies
+on the exception being checked:
+
+- `ScaleoutCli`'s picocli command classes (`BuildsCommand`, `ImagesCommand`) declare
+  `throws CliException` on every `call()` method; picocli's own `IExecutionExceptionHandler`
+  formats it as a one-line `error: ...` message by `instanceof CliException` after the exception
+  has propagated through the declared chain — not via an unchecked catch-anywhere.
+- `BuildMojo.execute()` catches `IOException` explicitly inside its per-cell build loop and wraps
+  it as `MojoExecutionException`, in the same `catch` block structure that separately catches
+  `BuildFailedException` (recorded as a per-cell failure, build continues) and
+  `InterruptedException` (restores the interrupt flag). This is a real branch on failure *kind*,
+  not a blanket catch.
+
+Making the new type unchecked would still compile at every existing call site (both are explicit
+`catch` blocks, not relying on propagation past an undeclared boundary), but it would stop the
+compiler from forcing any *new* call site to decide how to handle a control-plane failure — the
+exact kind of silent fallback `CONTRIBUTING.md`'s "fail loudly rather than fall through" convention
+exists to prevent. Keeping it checked preserves that property for whichever module adds the next
+call site.
+
+**Package: alongside `ControlPlaneClient` in the new module, not in `-api`.** The exception is
+return-type machinery for `ControlPlaneClient`'s own methods — thrown *after* a method has already
+parsed the wire-level `ErrorResponse` (which does stay in `-api`, unchanged, as the actual
+wire-contract shape). `ControlPlaneClientException` itself is never serialized, never appears on
+the wire, and has no meaning to the service implementation — it is purely "what calling this
+client's method can throw," which belongs with the class whose methods throw it.
 
 ## Related documents
 
