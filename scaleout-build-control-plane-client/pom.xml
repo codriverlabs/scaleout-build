@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Copyright © 2026 Plasticity.Cloud Limited & CoDriverLabs Limited. All rights reserved.
+  -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ai.codriverlabs</groupId>
+        <artifactId>scaleout-build-parent</artifactId>
+        <version>1.0.1</version>
+    </parent>
+
+    <artifactId>scaleout-build-control-plane-client</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Scaleout Build (control-plane client)</name>
+    <description>
+        One hand-written HTTP client for the control plane, over java.net.http.HttpClient, shared
+        by the Maven plugin, the CLI, and the MCP server. Replaces two independent copies that
+        existed previously (scaleout-build-maven-plugin's package-private ControlPlaneClient and
+        scaleout-build-cli's ControlPlaneHttpClient) -- see
+        docs/design/control-plane/control-plane-client-consolidation.md for why.
+
+        Deliberately not a JAX-RS REST client, same reasoning both prior copies already carried:
+        a JAX-RS client runtime on every consumer's classpath buys nothing when the whole surface
+        is a dozen calls with hand-held bodies. Kept out of scaleout-build-control-plane-api itself
+        because that module is also consumed by the service implementation, which has no business
+        depending on client-side networking code it never calls.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>ai.codriverlabs</groupId>
+            <artifactId>scaleout-build-control-plane-api</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!--
+          Required here, not optional: -api declares these optional so the service implementation
+          (which never signs anything) does not inherit them transitively. Every consumer of this
+          module is a client by definition and needs all four at runtime, so there is no equivalent
+          reason to make them optional here. Doing so would just push the "add it explicitly"
+          burden onto every consumer pom, which is exactly the repetition this module exists to
+          remove (the Maven plugin's pom previously repeated http-auth-aws for exactly this reason).
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>auth</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>http-auth-aws</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>regions</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
