@@ -211,6 +211,8 @@ breaking it caused a real bug.
 | [Control Plane Design](docs/design/control-plane/scaleout-builder-control-plane.md) | Architecture, wire contract, endpoints |
 | [Storage Layout & Isolation](docs/design/control-plane/storage-layout-and-isolation.md) | Per-owner CAS, ownerHash derivation |
 | [SigV4 Client Signing](docs/design/control-plane/sigv4-client-signing.md) | How the client authenticates |
+| [Control Plane Client Consolidation](docs/design/control-plane/control-plane-client-consolidation.md) | Design for one shared HTTP client, replacing the plugin's and CLI's independent copies |
+| [Unit Test Strategy](docs/design/testing/unit-test-strategy.md) | The two test patterns in use, and when to use each |
 | [Lambda Resource Usage](docs/design/control-plane/lambda-resource-usage.md) | Measured memory, duration, cold start |
 | [Fargate Task Resource Usage](docs/design/control-plane/fargate-task-resource-usage.md) | Measured peak RSS, CPU, compile times |
 | [GraalVM Version Matrix Axis](docs/design/control-plane/graalvm-version-matrix-axis.md) | Design for a version axis |
