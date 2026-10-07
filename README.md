@@ -219,6 +219,7 @@ breaking it caused a real bug.
 | [GraalVM Version Matrix Axis](docs/design/control-plane/graalvm-version-matrix-axis.md) | Design for a version axis |
 | [MicroVM Build Backend](docs/design/control-plane/microvm-build-backend.md) | Design for a Lambda MicroVM backend |
 | [MicroVM Build Backend — Phase 1](docs/design/control-plane/microvm-build-backend-phase1.md) | Implementation design for arm64 cells on MicroVM, grounded in the actual SDK |
+| [MicroVM Warm Pool — Phase 3](docs/design/control-plane/microvm-warm-pool-phase3.md) | Per-owner content-addressed MicroVM reuse + persistent multi-task agent with SSE |
 | [Publishing to Maven Central](docs/design/ci-cd/publishing-to-maven-central.md) | Readiness state and the publisher-tier question |
 | [Handover](docs/design/control-plane/HANDOVER.md) | Current deployed state and outstanding work |
 
