@@ -3,9 +3,12 @@
  */
 package ai.codriverlabs.scaleoutbuild.cli.command;
 
-import ai.codriverlabs.scaleoutbuild.cli.CliException;
-import ai.codriverlabs.scaleoutbuild.cli.ControlPlaneHttpClient;
-import com.fasterxml.jackson.databind.JsonNode;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.BuildStatus;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClientException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import java.util.List;
 import java.util.concurrent.Callable;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -49,9 +52,9 @@ public final class BuildsCommand implements Callable<Integer> {
         int limit;
 
         @Override
-        public Integer call() throws CliException {
-            String json = builds.parent.client().listBuilds(limit);
-            System.out.println(prettyOrRaw(json));
+        public Integer call() throws ControlPlaneClientException {
+            List<BuildStatus> statuses = builds.parent.client().listBuilds(limit);
+            System.out.println(prettyOrRaw(statuses));
             return 0;
         }
     }
@@ -68,9 +71,9 @@ public final class BuildsCommand implements Callable<Integer> {
         String buildId;
 
         @Override
-        public Integer call() throws CliException {
-            String json = builds.parent.client().getBuild(buildId);
-            System.out.println(prettyOrRaw(json));
+        public Integer call() throws ControlPlaneClientException {
+            BuildStatus status = builds.parent.client().status(buildId);
+            System.out.println(prettyOrRaw(status));
             return 0;
         }
     }
@@ -87,21 +90,31 @@ public final class BuildsCommand implements Callable<Integer> {
         String buildId;
 
         @Override
-        public Integer call() throws CliException {
-            String json = builds.parent.client().cancelBuild(buildId);
-            System.out.println(prettyOrRaw(json));
+        public Integer call() throws ControlPlaneClientException {
+            BuildStatus status = builds.parent.client().cancel(buildId);
+            System.out.println(prettyOrRaw(status));
             return 0;
         }
     }
 
     // ── shared utility ───────────────────────────────────────────────────────────────────────
 
-    static String prettyOrRaw(String json) {
+    /*
+     * Configured identically to the client's internal mapper (JavaTimeModule, lenient
+     * deserialization isn't needed here since we only ever serialize, not parse). Kept as its own
+     * instance rather than exposing the client's internal mapper: pretty-printing is a CLI display
+     * concern, not something the client should have an opinion about.
+     */
+    private static final ObjectMapper PRETTY = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .enable(SerializationFeature.INDENT_OUTPUT);
+
+    static String prettyOrRaw(Object dto) {
         try {
-            JsonNode node = ControlPlaneHttpClient.MAPPER.readTree(json);
-            return ControlPlaneHttpClient.MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(node);
+            return PRETTY.writeValueAsString(dto);
         } catch (Exception e) {
-            return json;
+            return String.valueOf(dto);
         }
     }
 }

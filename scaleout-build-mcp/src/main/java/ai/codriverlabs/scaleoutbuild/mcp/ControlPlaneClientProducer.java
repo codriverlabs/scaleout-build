@@ -3,13 +3,13 @@
  */
 package ai.codriverlabs.scaleoutbuild.mcp;
 
-import ai.codriverlabs.scaleoutbuild.cli.ControlPlaneHttpClient;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * CDI producer for {@link ControlPlaneHttpClient}.
+ * CDI producer for {@link ControlPlaneClient}.
  *
  * <p>Reads configuration from environment variables via MicroProfile Config:
  * <ul>
@@ -28,7 +28,7 @@ public class ControlPlaneClientProducer {
 
     @Produces
     @ApplicationScoped
-    public ControlPlaneHttpClient controlPlaneHttpClient() {
-        return new ControlPlaneHttpClient(endpoint, region);
+    public ControlPlaneClient controlPlaneClient() {
+        return new ControlPlaneClient(endpoint, region);
     }
 }

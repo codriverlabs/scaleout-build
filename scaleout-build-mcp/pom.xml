@@ -39,25 +39,17 @@
             <version>2.0.2</version>
         </dependency>
 
-        <!-- Wire contract, SigV4 signer, DTOs, and the ControlPlaneHttpClient -->
+        <!--
+          The client itself (signing, HttpClient, error mapping) now lives in
+          scaleout-build-control-plane-client. Previously this module depended on
+          scaleout-build-cli solely to reach ControlPlaneHttpClient, a protocol server pulling in
+          an entire CLI module (picocli, command classes, ScaleoutCli's argument parsing) for one
+          HTTP client class. See docs/design/control-plane/control-plane-client-consolidation.md.
+        -->
         <dependency>
             <groupId>ai.codriverlabs</groupId>
-            <artifactId>scaleout-build-cli</artifactId>
+            <artifactId>scaleout-build-control-plane-client</artifactId>
             <version>${project.version}</version>
-        </dependency>
-
-        <!-- AWS SDK deps for SigV4 signing (transitive from API module) -->
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>auth</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>http-auth-aws</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>regions</artifactId>
         </dependency>
 
         <dependency>

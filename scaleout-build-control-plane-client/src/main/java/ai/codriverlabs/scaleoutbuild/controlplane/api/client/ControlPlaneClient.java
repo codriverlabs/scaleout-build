@@ -78,6 +78,22 @@ public final class ControlPlaneClient {
     }
 
     /**
+     * Overrides the region instead of inferring it from the endpoint's hostname.
+     *
+     * <p>The Maven plugin and MCP server always point at a real deployed Lambda Function URL, so
+     * {@link SigV4Signer#regionOf(URI)} inferring the region from
+     * {@code <id>.lambda-url.<region>.on.aws} is sufficient for them. The CLI is different: it is
+     * also exercised against test doubles and non-Lambda-URL endpoints (its own test suite calls
+     * it with a bare {@code https://ep/}), and its {@code --region} option lets a caller specify
+     * the signing region explicitly rather than require it be derivable from the URL. This
+     * constructor is what the CLI uses; the single-argument constructor above is for every
+     * consumer that only ever talks to a real Function URL.
+     */
+    public ControlPlaneClient(String endpoint, String region) {
+        this(endpoint, new SigV4Signer(), Region.of(region));
+    }
+
+    /**
      * Test-only seam: injects a pre-built signer instead of the default, so tests can supply
      * {@code StaticCredentialsProvider} rather than depend on {@code DefaultCredentialsProvider}
      * resolving real or ambient AWS credentials.

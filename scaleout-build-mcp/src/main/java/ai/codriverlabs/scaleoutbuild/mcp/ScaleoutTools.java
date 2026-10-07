@@ -3,14 +3,16 @@
  */
 package ai.codriverlabs.scaleoutbuild.mcp;
 
-import ai.codriverlabs.scaleoutbuild.cli.CliException;
-import ai.codriverlabs.scaleoutbuild.cli.ControlPlaneHttpClient;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClient;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClientException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.quarkiverse.mcp.server.Tool;
 import io.quarkiverse.mcp.server.ToolArg;
 import io.quarkiverse.mcp.server.ToolResponse;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * MCP tools for the scaleout-build control plane.
@@ -47,7 +49,17 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 public class ScaleoutTools {
 
     @Inject
-    ControlPlaneHttpClient http;
+    ControlPlaneClient client;
+
+    /*
+     * Configured identically to the client's internal mapper. Kept as its own instance rather
+     * than exposing the client's internal mapper: pretty-printing a typed DTO for the MCP tool's
+     * text response is a display concern, not something the client should have an opinion about.
+     */
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .enable(SerializationFeature.INDENT_OUTPUT);
 
     // ── Build lifecycle ──────────────────────────────────────────────────────────────────────
 
@@ -60,7 +72,7 @@ public class ScaleoutTools {
             @ToolArg(description = "Maximum number of builds to return", required = false)
             Integer limit) {
         int n = limit != null ? limit : 20;
-        return invoke(() -> http.listBuilds(n));
+        return invoke(() -> client.listBuilds(n));
     }
 
     @Tool(description = """
@@ -71,7 +83,7 @@ public class ScaleoutTools {
     ToolResponse get_build_status(
             @ToolArg(description = "Build ID returned by the Maven plugin or list_builds")
             String build_id) {
-        return invoke(() -> http.getBuild(build_id));
+        return invoke(() -> client.status(build_id));
     }
 
     @Tool(description = """
@@ -81,7 +93,7 @@ public class ScaleoutTools {
     ToolResponse cancel_build(
             @ToolArg(description = "Build ID to cancel")
             String build_id) {
-        return invoke(() -> http.cancelBuild(build_id));
+        return invoke(() -> client.cancel(build_id));
     }
 
     @Tool(description = """
@@ -91,7 +103,7 @@ public class ScaleoutTools {
     ToolResponse list_build_artifacts(
             @ToolArg(description = "Build ID to list artifacts for")
             String build_id) {
-        return invoke(() -> http.listArtifacts(build_id));
+        return invoke(() -> client.artifacts(build_id));
     }
 
     // ── MicroVM image management (admin) ─────────────────────────────────────────────────────
@@ -105,7 +117,7 @@ public class ScaleoutTools {
     ToolResponse trigger_image_build(
             @ToolArg(description = "S3 URI of the code artifact ZIP, e.g. s3://bucket/agent.zip")
             String artifact_s3_uri) {
-        return invoke(() -> http.triggerImageBuild(artifact_s3_uri));
+        return invoke(() -> client.triggerImageBuild(artifact_s3_uri));
     }
 
     @Tool(description = """
@@ -119,27 +131,28 @@ public class ScaleoutTools {
             String image_identifier) {
         String id = (image_identifier == null || image_identifier.isBlank())
                 ? "scaleout-build-agent" : image_identifier;
-        return invoke(() -> http.getImageStatus(id));
+        return invoke(() -> client.getImageStatus(id));
     }
 
     // ── Dispatch helper ──────────────────────────────────────────────────────────────────────
 
     @FunctionalInterface
     private interface Action {
-        String execute() throws CliException;
+        Object execute() throws ControlPlaneClientException;
     }
 
     private static ToolResponse invoke(Action action) {
         try {
-            String json = action.execute();
+            Object result = action.execute();
             // Pretty-print for readability in the AI assistant's context window
+            String json;
             try {
-                var node = ControlPlaneHttpClient.MAPPER.readTree(json);
-                json = ControlPlaneHttpClient.MAPPER.writerWithDefaultPrettyPrinter()
-                        .writeValueAsString(node);
-            } catch (Exception ignored) {}
+                json = MAPPER.writeValueAsString(result);
+            } catch (Exception e) {
+                json = String.valueOf(result);
+            }
             return ToolResponse.success(json);
-        } catch (CliException e) {
+        } catch (ControlPlaneClientException e) {
             return ToolResponse.error("Error (HTTP " + e.statusCode() + "): " + e.getMessage());
         }
     }
