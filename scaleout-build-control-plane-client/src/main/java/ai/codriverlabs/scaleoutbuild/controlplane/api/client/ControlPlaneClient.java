@@ -104,7 +104,8 @@ public final class ControlPlaneClient {
         this.signer = signer;
     }
 
-    Region region() {
+    /** The AWS region inferred from the endpoint's Lambda Function URL, used for SigV4 signing. */
+    public Region region() {
         return region;
     }
 

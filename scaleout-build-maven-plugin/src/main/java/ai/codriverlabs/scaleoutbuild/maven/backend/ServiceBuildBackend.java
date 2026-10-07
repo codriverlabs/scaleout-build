@@ -16,6 +16,8 @@ import ai.codriverlabs.scaleoutbuild.controlplane.api.LogEvent;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.RequestedResources;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.StreamEndReason;
 import ai.codriverlabs.scaleoutbuild.controlplane.api.UploadTarget;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClient;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClientException;
 import ai.codriverlabs.scaleoutbuild.maven.MatrixCell;
 import ai.codriverlabs.scaleoutbuild.planner.NativeImageInputPlan;
 import ai.codriverlabs.scaleoutbuild.planner.StagedFile;
@@ -73,6 +75,30 @@ public final class ServiceBuildBackend implements BuildBackend {
         this.client = new ControlPlaneClient(options.endpoint());
     }
 
+    /**
+     * Converts {@link ControlPlaneClientException} to {@link IOException}, which is
+     * {@link BuildBackend#runCells}'s declared failure type.
+     *
+     * <p>Kept as the single conversion point rather than a {@code catch} at every call site: this
+     * class predates the shared client module and declared {@code IOException} throughout before
+     * the client existed, so converting here (once) is the minimal change that keeps
+     * {@code BuildBackend}'s existing contract — and every caller of this class — exactly as it
+     * was, rather than threading a new checked exception type through a public interface for a
+     * backend-internal implementation detail.
+     */
+    @FunctionalInterface
+    private interface ClientCall<T> {
+        T call() throws ControlPlaneClientException;
+    }
+
+    private static <T> T call(ClientCall<T> call) throws IOException {
+        try {
+            return call.call();
+        } catch (ControlPlaneClientException e) {
+            throw new IOException(e.getMessage(), e);
+        }
+    }
+
     @Override
     public List<String> runCells(List<MatrixCell> cells, NativeImageInputPlan plan, String buildId,
                                  ArtifactSink artifactSink)
@@ -83,8 +109,8 @@ public final class ServiceBuildBackend implements BuildBackend {
 
         log.info("Submitting " + cells.size() + " cell(s) to " + options.endpoint()
                 + " (signing region " + client.region() + ")");
-        CreateBuildResponse created = client.createBuild(new CreateBuildRequest(spec, inputs,
-                options.requestedResources(), options.clientVersion()));
+        CreateBuildResponse created = call(() -> client.createBuild(new CreateBuildRequest(spec,
+                inputs, options.requestedResources(), options.clientVersion())));
         log.info("Build " + created.buildId() + ": " + created.uploads().size() + " input(s) to upload, "
                 + created.alreadyStaged().size() + " already staged");
         if (!created.appliedResources().equals(options.requestedResources())
@@ -100,7 +126,7 @@ public final class ServiceBuildBackend implements BuildBackend {
         ScheduledExecutorService heartbeat = startHeartbeat(created);
         Thread shutdownHook = installCancelHook(created.buildId());
         try {
-            client.startBuild(created.buildId());
+            call(() -> client.startBuild(created.buildId()));
             BuildStatus terminal = streamUntilTerminal(created.buildId());
             return collect(terminal, artifactSink);
         } finally {
@@ -183,7 +209,11 @@ public final class ServiceBuildBackend implements BuildBackend {
                 throw new IOException("the service asked for digest " + target.sha256()
                         + ", which is not in the manifest this client sent");
             }
-            client.putPresigned(target.url(), source);
+            Path toUpload = source;
+            call(() -> {
+                client.putPresigned(target.url(), toUpload);
+                return null;
+            });
             bytes += Files.size(source);
         }
         log.info(String.format(Locale.ROOT, "Uploaded %d input(s), %.1f MB",
@@ -202,7 +232,7 @@ public final class ServiceBuildBackend implements BuildBackend {
         executor.scheduleAtFixedRate(() -> {
             try {
                 client.heartbeat(created.buildId());
-            } catch (IOException e) {
+            } catch (ControlPlaneClientException e) {
                 // Not fatal: missing one heartbeat does not reap a build, and failing the build over a
                 // transient error while the remote build is healthy would be worse than a warning.
                 log.debug("Heartbeat failed: " + e.getMessage());
@@ -222,7 +252,7 @@ public final class ServiceBuildBackend implements BuildBackend {
                 // paid-for tasks running, which is the failure this hook exists to prevent.
                 client.cancel(buildId);
                 log.info("Cancelled remote build " + buildId);
-            } catch (IOException e) {
+            } catch (ControlPlaneClientException e) {
                 log.warn("Could not cancel remote build " + buildId + ": " + e.getMessage()
                         + " -- the server will reap it once heartbeats stop");
             }
@@ -244,11 +274,12 @@ public final class ServiceBuildBackend implements BuildBackend {
             throws IOException, InterruptedException, MojoExecutionException {
         Long since = null;
         for (int reconnects = 0; reconnects < 64; reconnects++) {
-            LogEvent last = client.streamLogs(buildId, since, this::render);
+            Long sinceSnapshot = since;
+            LogEvent last = call(() -> client.streamLogs(buildId, sinceSnapshot, this::render));
             if (last == null) {
                 // The stream ended without a terminating event, e.g. a dropped connection. Fall back
                 // to polling so a network blip does not fail an otherwise healthy build.
-                BuildStatus status = client.status(buildId);
+                BuildStatus status = call(() -> client.status(buildId));
                 if (status.state().isTerminal()) {
                     return status;
                 }
@@ -257,7 +288,7 @@ public final class ServiceBuildBackend implements BuildBackend {
             }
             if (last.type() == LogEvent.Type.STREAM_END && last.reason() != null) {
                 if (!last.reason().shouldReconnect()) {
-                    return client.status(buildId);
+                    return call(() -> client.status(buildId));
                 }
                 since = last.nextSince().values().stream().min(Long::compareTo).orElse(since);
                 log.debug("Log stream ended with " + last.reason() + "; resuming from " + since);
@@ -293,7 +324,7 @@ public final class ServiceBuildBackend implements BuildBackend {
             return failures;
         }
 
-        ArtifactListResponse artifacts = client.artifacts(terminal.buildId());
+        ArtifactListResponse artifacts = call(() -> client.artifacts(terminal.buildId()));
         for (ArtifactListResponse.CellArtifacts cellArtifacts : artifacts.cells()) {
             if (cellArtifacts.downloads().isEmpty()) {
                 failures.add(cellArtifacts.cell()
@@ -308,7 +339,10 @@ public final class ServiceBuildBackend implements BuildBackend {
                 // download.path(), not options.imageName(): several artifacts per cell must not collapse
                 // into one file, and imageName is absent for a framework-generated argfile.
                 Path destination = destinationDir.resolve(download.path());
-                client.getPresigned(download.url(), destination);
+                call(() -> {
+                    client.getPresigned(download.url(), destination);
+                    return null;
+                });
                 downloaded.add(destination);
             }
             artifactSink.accept(cell, downloaded);
