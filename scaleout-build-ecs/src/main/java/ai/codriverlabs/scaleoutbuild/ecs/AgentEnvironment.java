@@ -108,6 +108,24 @@ public final class AgentEnvironment {
             return List.copyOf(environment);
         }
 
+        /**
+         * The same values {@link #build()} returns as ECS {@code KeyValuePair}s, as a plain map.
+         *
+         * <p>Added for the MicroVM cell launcher, which has no ECS task-override mechanism to hand
+         * these to — its {@code runHookPayload} is a JSON byte payload the agent's hook reads from
+         * its own HTTP request body, not an environment variable. Exposing the same accumulated
+         * values as a map lets both backends share this one construction path rather than building
+         * the variable list twice and risking the two drifting apart on what values a cell
+         * actually receives.
+         */
+        public java.util.Map<String, String> toMap() {
+            java.util.LinkedHashMap<String, String> map = new java.util.LinkedHashMap<>();
+            for (KeyValuePair pair : environment) {
+                map.put(pair.name(), pair.value());
+            }
+            return map;
+        }
+
         private void add(String name, String value) {
             environment.add(KeyValuePair.builder().name(name).value(value).build());
         }
