@@ -6,6 +6,7 @@ package ai.codriverlabs.scaleoutbuild.controlplane;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.codriverlabs.scaleoutbuild.controlplane.api.ErrorResponse;
+import ai.codriverlabs.scaleoutbuild.ecs.MicroVmCellLauncher;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -78,6 +79,34 @@ class WireContractReflectionTest {
                         + "@RegisterForReflection targets, or to NOT_SERIALIZED_AS_ENTITIES if they "
                         + "genuinely never appear in a payload.")
                 .isEmpty();
+    }
+
+    /**
+     * Asserts {@code MicrovmReflectionConfig} still registers {@code MicroVmCellLauncher
+     * .StatusReport} -- the one confirmed-in-production native-image reflection gap this project
+     * has actually hit (see that config class's own javadoc for the real failure: a valid
+     * {@code status.json} the control plane could never deserialize, consistently, for the whole
+     * MicroVM build). Deliberately a narrower, explicit check rather than trying to mechanically
+     * discover every plain-{@code ObjectMapper} deserialization target across every dependency
+     * module the way {@link #everyApiTypeIsRegisteredForReflection} does for wire DTOs -- those
+     * are enumerable from one well-known package; types read by ad hoc {@code ObjectMapper} calls
+     * scattered across modules are not, so this at least pins the one type already proven to bite.
+     */
+    @Test
+    void microVmStatusReportIsRegisteredForReflection() {
+        Set<String> registered = Set.of(MicrovmReflectionConfig.class
+                        .getAnnotation(RegisterForReflection.class).targets())
+                .stream()
+                .map(Class::getName)
+                .collect(Collectors.toSet());
+
+        assertThat(registered)
+                .as("MicroVmCellLauncher.StatusReport must stay registered in "
+                        + "MicrovmReflectionConfig -- removing it silently reintroduces the "
+                        + "exact native-image deserialization failure found in production: a "
+                        + "valid status.json that readStatusReport() can never parse, so the "
+                        + "control plane never learns a MicroVM cell actually succeeded.")
+                .contains(MicroVmCellLauncher.StatusReport.class.getName());
     }
 
     /** Top-level type names in the API package, read from wherever the artifact actually is. */
