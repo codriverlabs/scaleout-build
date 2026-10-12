@@ -60,6 +60,12 @@ Get a two-architecture native build running in about 5 minutes.
 [the example app](../examples/scaleout-build-example-app) for the pattern, which binds
 `properties-maven-plugin` to the `validate` phase.
 
+**Using the Lambda MicroVM backend for `arm64`?** See
+[the MicroVM example app](../examples/scaleout-build-example-app-microvm) instead — same pattern,
+scoped to `arm64` only (MicroVM has no `x86_64`), against a control plane that has opted into it.
+MicroVM is not the default: see
+["Choosing a backend for `arm64`"](configuration.md#choosing-a-backend-for-arm64) for why.
+
 ## Step 2: Make your framework emit its arguments
 
 Skip this step for a plain GraalVM project. Otherwise one extra command, because the framework normally runs

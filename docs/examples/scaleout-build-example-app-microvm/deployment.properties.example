@@ -1,0 +1,19 @@
+# Copy to deployment.properties (gitignored) and set the endpoint your control plane deployment
+# printed. This is the ONLY deployment-specific value the plugin needs.
+#
+# Not a region: a Lambda Function URL host is <id>.lambda-url.<region>.on.aws, so the client parses
+# the SigV4 signing region straight out of the endpoint.
+#
+# Not a bucket, cluster, role, subnet, security group, log group or agent image either. Those are the
+# control plane's configuration, and a client able to set them could choose what code runs with the
+# task role's permissions. See docs/design/control-plane/migration-from-direct-ecs-access.md for the
+# full inventory of what moved.
+#
+# Get it from the deploy script, or read it back at any time with:
+#   aws ssm get-parameter --name /scaleout-build/control-plane/endpoint \
+#       --query Parameter.Value --output text
+#
+# Callers need lambda:InvokeFunctionUrl and lambda:InvokeFunction on the control-plane function, and
+# no other AWS permissions at all.
+
+scaleout-build.endpoint=https://EXAMPLE123.lambda-url.eu-west-1.on.aws/

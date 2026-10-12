@@ -1,0 +1,4 @@
+# Real, account-specific values -- never commit this. Copy deployment.properties.example to
+# deployment.properties and fill in your own deployment's values instead.
+deployment.properties
+target/

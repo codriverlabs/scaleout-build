@@ -231,6 +231,15 @@ See [`docs/examples/scaleout-build-example-app`](docs/examples/scaleout-build-ex
 real, runnable example, verified end to end against AWS: native-image compilation for both
 `x86_64` and `arm64`, offloaded to ECS Fargate tasks.
 
+For the Lambda MicroVM backend instead — `arm64` only, since MicroVM has no `x86_64` — see
+[`docs/examples/scaleout-build-example-app-microvm`](docs/examples/scaleout-build-example-app-microvm).
+MicroVM is opt-in, not the default: it is the more expensive backend for a sustained,
+resource-saturating workload like `native-image` (roughly 3–3.7x Fargate's per-unit rate,
+confirmed against the AWS Price List API). See
+[the MicroVM backend design doc](docs/design/control-plane/microvm-build-backend-phase1.md) for
+how an operator opts a deployment in, and `backendPreference` in the
+[configuration reference](docs/user-guides/configuration.md) for how a developer chooses per build.
+
 ---
 
 ---
