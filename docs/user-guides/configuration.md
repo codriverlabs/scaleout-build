@@ -20,6 +20,29 @@ Every parameter is settable as `-Dscaleout-build.<name>` or as a `<configuration
 | `requestedCpu` | `4096` | Worker vCPU units; 4096 = 4 vCPU |
 | `requestedMemory` | `8192` | Worker MiB. 8 GiB is a floor — 4 GiB OOMs on real projects |
 | `requestedEphemeralStorageGiB` | `0` | `0` means omit, which yields the free 20 GiB |
+| `backendPreference` | `auto` | Which compute backend `arm64` cells should prefer: `auto` (deployment's own default), `fargate` (force Fargate), or `microvm` (force Lambda MicroVM — rejected, not silently substituted, if the deployment does not have it enabled, or if `x86_64` is also requested). See "Choosing a backend for `arm64`" below before setting this to `microvm` |
+
+## Choosing a backend for `arm64`
+
+A deployment operator decides whether `arm64` cells use Fargate or Lambda MicroVM by default
+(`scaleout.micro-vm.enabled` on the control plane) — that default is not yours to see or change
+from a build. `backendPreference` lets you override it for your own build, in either direction.
+
+**MicroVM is not simply "the newer, better option."** Its billing has a baseline-plus-burst model:
+you pay a lower baseline rate and only pay more when your workload actually bursts above it. That
+is a real win for bursty, idle-heavy workloads. A `native-image` compile is close to the opposite
+shape — it saturates CPU and memory for essentially its entire duration, with no idle period for
+the baseline rate to apply to. Measured against AWS's own published per-unit rates, MicroVM's
+vCPU-second and memory-GB-second prices run roughly 3–3.7x Fargate's for the same architecture, so
+a compile that costs about 1.8¢ on Fargate can cost closer to 5.9¢ on MicroVM for the identical
+work. If your deployment defaults `arm64` to MicroVM and your builds are long, CPU/memory-
+saturating compiles, set `backendPreference=fargate` to opt back out on a per-build basis.
+
+Set `backendPreference=microvm` instead if your deployment defaults to Fargate but you specifically
+want MicroVM's isolation, snapshot-based cold-start, or 8-hour lifetime — or if your build's actual
+resource profile has real idle periods between phases, where MicroVM's burst billing could plausibly
+beat Fargate's flat rate (not yet validated with real phase-by-phase measurements; try it and
+measure your own build before assuming it will).
 
 ## How a build is bounded
 
