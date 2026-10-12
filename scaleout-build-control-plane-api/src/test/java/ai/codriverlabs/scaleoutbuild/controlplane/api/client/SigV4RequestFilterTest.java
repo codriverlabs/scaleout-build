@@ -64,7 +64,7 @@ class SigV4RequestFilterTest {
         return new CreateBuildRequest(
                 new BuildSpec(List.of("native"), List.of("x86_64", "arm64"),
                         "ai.codriverlabs.example.HelloNative", "hello-native", null, List.of(),
-                        List.of(), 0, 120),
+                        List.of(), 0, 120, null),
                 List.of(new InputDescriptor("app.jar", "a1b2c3", 5060)),
                 null, "test/1.0");
     }
