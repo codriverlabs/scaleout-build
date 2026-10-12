@@ -18,6 +18,7 @@ import software.amazon.awssdk.services.lambdamicrovms.model.HookState;
 import software.amazon.awssdk.services.lambdamicrovms.model.MicrovmImageHooks;
 import software.amazon.awssdk.services.lambdamicrovms.model.MicrovmHooks;
 import software.amazon.awssdk.services.lambdamicrovms.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.lambdamicrovms.model.Resources;
 
 /**
  * Creates and queries Lambda MicroVM images for the scaleout-build agent.
@@ -87,6 +88,54 @@ public final class MicroVmImageManager {
      */
     static final int RUN_HOOK_TIMEOUT_SECONDS = 30;
 
+    /**
+     * The discrete {@code minimumMemoryInMiB} baseline tiers this image size can be built at,
+     * confirmed against AWS's own documentation (Lambda MicroVMs' "MicroVM images" page, "MicroVM
+     * sizing" section): sizing is a baseline-peak model, not an arbitrary MiB value. vCPU scales
+     * proportionally with baseline memory at a fixed 2:1 ratio (2 GB memory = 1 vCPU), and at peak
+     * activity a MicroVM automatically bursts up to <b>4x</b> the configured baseline, billed per
+     * second only for what is actually consumed above baseline — not for reserving the peak.
+     *
+     * <table>
+     *   <caption>Baseline / peak / max disk, per the documented sizing table</caption>
+     *   <tr><th>Baseline</th><th>Peak (4x burst)</th><th>Max disk</th></tr>
+     *   <tr><td>512 MiB, 0.25 vCPU</td><td>2 GB, 1 vCPU</td><td>8 GB</td></tr>
+     *   <tr><td>1024 MiB, 0.5 vCPU</td><td>4 GB, 2 vCPU</td><td>8 GB</td></tr>
+     *   <tr><td>2048 MiB, 1 vCPU (platform default)</td><td>8 GB, 4 vCPU</td><td>8 GB</td></tr>
+     *   <tr><td>4096 MiB, 2 vCPU</td><td>16 GB, 8 vCPU</td><td>16 GB</td></tr>
+     *   <tr><td>8192 MiB, 4 vCPU</td><td>32 GB, 16 vCPU</td><td>32 GB</td></tr>
+     * </table>
+     *
+     * <p>This is a <b>build-time</b> property of the image, not a per-{@code RunMicrovm} or
+     * per-cell choice — confirmed via the SDK ({@code javap}: {@code resources(Collection)} exists
+     * only on {@code CreateMicrovmImageRequest.Builder}, not {@code RunMicrovmRequest.Builder})
+     * and the skill's own "Image is single-size" constraint: every MicroVM run from a given image
+     * version shares the same baseline, so there is exactly one size per deployment to choose, the
+     * same shape as {@code ControlPlaneConfig.Limits.defaultMemory()} being deployment policy for
+     * the Fargate path rather than a client-supplied value.
+     *
+     * <p>Found the hard way that this field had never been set at all before this phase's own
+     * end-to-end verification: {@code CreateMicrovmImageRequest.resources} is optional (0–1
+     * entries), so every image built so far in this phase silently ran at the undocumented
+     * platform default of 2048 MiB / 1 vCPU baseline (8 GB / 4 vCPU peak) — adequate for the
+     * small two-jar example app this phase verified against, but marginal for a real project: the
+     * Fargate path's own measured peak RSS for a 233-jar Quarkus application is 5.3–5.6 GB (see
+     * {@code ControlPlaneConfig.Limits.defaultMemory()}'s own javadoc), which fits inside the 2048
+     * MiB tier's 8 GB peak burst but with very little headroom, and would not fit the 512/1024 MiB
+     * tiers' smaller peaks at all.
+     */
+    static final List<Integer> SUPPORTED_MINIMUM_MEMORY_MIB = List.of(512, 1024, 2048, 4096, 8192);
+
+    /**
+     * Default baseline when a deployment does not configure one explicitly: the platform's own
+     * documented default (2048 MiB / 1 vCPU baseline, 8 GB / 4 vCPU peak). Deliberately matches
+     * what every image built before this field existed already received implicitly, rather than
+     * silently making an unconfigured deployment more expensive than before this field was added.
+     * See {@link #SUPPORTED_MINIMUM_MEMORY_MIB}'s own javadoc for why a real native-image compile
+     * may need a higher explicit tier.
+     */
+    static final int DEFAULT_MINIMUM_MEMORY_MIB = 2048;
+
     private final LambdaMicrovmsClient client;
 
     public MicroVmImageManager(LambdaMicrovmsClient client) {
@@ -122,15 +171,27 @@ public final class MicroVmImageManager {
      * <p>Returns as soon as the platform accepts the request (typically within seconds). The image
      * build takes 10–15 minutes; poll {@link #getImageStatus} until {@link ImageStatus#isReady()}.
      *
-     * @param region         the AWS region to build in (e.g. {@code "eu-central-1"})
-     * @param buildRoleArn   ARN of the role the platform assumes during image build
-     * @param artifactS3Uri  S3 URI of the code artifact ZIP (e.g. {@code "s3://bucket/agent.zip"})
+     * @param region             the AWS region to build in (e.g. {@code "eu-central-1"})
+     * @param buildRoleArn       ARN of the role the platform assumes during image build
+     * @param artifactS3Uri      S3 URI of the code artifact ZIP (e.g. {@code "s3://bucket/agent.zip"})
+     * @param minimumMemoryInMiB the memory baseline to build the image at — must be one of
+     *                           {@link #SUPPORTED_MINIMUM_MEMORY_MIB}; see that constant's own
+     *                           javadoc for the full baseline/peak/vCPU table and why this is a
+     *                           build-time, deployment-wide choice rather than a per-build one
      * @return the initial image status — will be {@code BUILDING} or similar, not yet {@code READY}
+     * @throws IllegalArgumentException if {@code minimumMemoryInMiB} is not one of the documented
+     *         discrete tiers — rejected here rather than left to the platform's own opaque
+     *         {@code ValidationException}, which names the field but not the valid values
      */
-    public ImageStatus triggerBuild(String region, String buildRoleArn, String artifactS3Uri) {
+    public ImageStatus triggerBuild(String region, String buildRoleArn, String artifactS3Uri,
+                                     int minimumMemoryInMiB) {
         Objects.requireNonNull(region, "region");
         Objects.requireNonNull(buildRoleArn, "buildRoleArn");
         Objects.requireNonNull(artifactS3Uri, "artifactS3Uri");
+        if (!SUPPORTED_MINIMUM_MEMORY_MIB.contains(minimumMemoryInMiB)) {
+            throw new IllegalArgumentException("minimumMemoryInMiB must be one of "
+                    + SUPPORTED_MINIMUM_MEMORY_MIB + ", got " + minimumMemoryInMiB);
+        }
 
         String baseImageArn = String.format("arn:aws:lambda:%s:aws:%s", region, AL2023_BASE_IMAGE_ARN_SUFFIX);
 
@@ -141,6 +202,9 @@ public final class MicroVmImageManager {
                         .buildRoleArn(buildRoleArn)
                         .codeArtifact(CodeArtifact.builder().uri(artifactS3Uri).build())
                         .hooks(buildHooks())
+                        .resources(Resources.builder()
+                                .minimumMemoryInMiB(minimumMemoryInMiB)
+                                .build())
                         .build());
 
         return new ImageStatus(
