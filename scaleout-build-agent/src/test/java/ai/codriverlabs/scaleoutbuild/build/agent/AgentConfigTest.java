@@ -137,6 +137,39 @@ class AgentConfigTest {
                 .hasMessageContaining(AgentConfig.ENV_TIMEOUT_MINUTES);
     }
 
+    @Test
+    void fromHookPayload_readsTheSameKeysAsFromMap() throws Exception {
+        // The payload is a flat JSON object of the same SCALEOUT_BUILD_* keys AgentEnvironment.
+        // Builder#toMap() produces on the control-plane side -- see fromHookPayload's own javadoc.
+        byte[] payload = new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsBytes(MINIMAL_REQUIRED);
+
+        AgentConfig config = AgentConfig.fromHookPayload(payload);
+
+        assertThat(config.buildId()).isEqualTo("build-1");
+        assertThat(config.buildKind()).isEqualTo(BuildKind.NATIVE);
+        assertThat(config.architecture()).isEqualTo(HOST);
+        assertThat(config.stagingRelativePath()).isEqualTo("builds/build-1/" + HOST.stagingDirName());
+    }
+
+    @Test
+    void fromHookPayload_appliesTheSameValidationAsFromMap() {
+        // No ENV_BUILD_ID -- same required-field validation fromMap already has, exercised through
+        // the JSON entry point instead of a map literal.
+        assertThatThrownBy(() -> AgentConfig.fromHookPayload(
+                "{\"SCALEOUT_BUILD_KIND\":\"native\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(AgentConfig.ENV_BUILD_ID);
+    }
+
+    @Test
+    void fromHookPayload_rejectsMalformedJson() {
+        assertThatThrownBy(() -> AgentConfig.fromHookPayload(
+                "not json".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("runHookPayload");
+    }
+
     private static Map<String, String> merged(Map<String, String> extra) {
         var combined = new HashMap<>(MINIMAL_REQUIRED);
         combined.putAll(extra);
