@@ -25,6 +25,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
 import software.amazon.awssdk.services.dynamodb.model.ScanResponse;
 import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.lambdamicrovms.LambdaMicrovmsClient;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -36,14 +37,21 @@ class BuildReaperHandlerTest {
     private DynamoDbClient dynamo;
     @Mock
     private EcsClient ecs;
+    @Mock
+    private LambdaMicrovmsClient microvms;
 
     private BuildReaperHandler handler() {
-        return new BuildReaperHandler(dynamo, ecs, "scaleout-builds",
+        return new BuildReaperHandler(dynamo, ecs, microvms, "scaleout-builds",
                 "arn:aws:ecs:eu-west-1:1:cluster/scaleout-build", Duration.ofSeconds(120));
     }
 
     private static Map<String, AttributeValue> build(String id, String heartbeat, String expires,
                                                      List<String> taskArns) {
+        return build(id, heartbeat, expires, taskArns, List.of());
+    }
+
+    private static Map<String, AttributeValue> build(String id, String heartbeat, String expires,
+                                                     List<String> taskArns, List<String> microvmIds) {
         var item = new java.util.HashMap<String, AttributeValue>();
         item.put("buildId", AttributeValue.fromS(id));
         item.put("state", AttributeValue.fromS("RUNNING"));
@@ -55,6 +63,9 @@ class BuildReaperHandlerTest {
         }
         if (!taskArns.isEmpty()) {
             item.put("taskArns", AttributeValue.fromSs(taskArns));
+        }
+        if (!microvmIds.isEmpty()) {
+            item.put("microvmIds", AttributeValue.fromSs(microvmIds));
         }
         return item;
     }
@@ -74,7 +85,7 @@ class BuildReaperHandlerTest {
 
         // Both cells' tasks must be stopped, not just the first.
         verify(ecs, org.mockito.Mockito.times(2)).stopTask(any(Consumer.class));
-        verify(dynamo).updateItem(any(Consumer.class));
+        verify(dynamo).updateItem(any(software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest.class));
     }
 
     @Test
@@ -86,7 +97,7 @@ class BuildReaperHandlerTest {
         assertThat(handler().reap(NOW)).isZero();
 
         verify(ecs, never()).stopTask(any(Consumer.class));
-        verify(dynamo, never()).updateItem(any(Consumer.class));
+        verify(dynamo, never()).updateItem(any(software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest.class));
     }
 
     @Test
@@ -114,7 +125,7 @@ class BuildReaperHandlerTest {
 
         assertThat(handler().reap(NOW)).isEqualTo(1);
 
-        verify(dynamo).updateItem(any(Consumer.class));
+        verify(dynamo).updateItem(any(software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest.class));
     }
 
     @Test
@@ -129,5 +140,65 @@ class BuildReaperHandlerTest {
         assertThat(captor.getValue().expressionAttributeValues().values())
                 .extracting(AttributeValue::s)
                 .containsExactlyInAnyOrder("SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED");
+    }
+
+    // ── MicroVM-backed cells ────────────────────────────────────────────────────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void reapsAMicrovmBackedOrphanedBuild() {
+        givenScanReturns(build("mv1", "2026-09-21T11:55:00Z", "2026-09-21T13:00:00Z",
+                List.of(), List.of("microvm-abc123", "microvm-def456")));
+
+        assertThat(handler().reap(NOW)).isEqualTo(1);
+
+        verify(microvms, org.mockito.Mockito.times(2))
+                .terminateMicrovm(any(Consumer.class));
+        verify(dynamo).updateItem(any(software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest.class));
+        verify(ecs, never()).stopTask(any(Consumer.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void reapsAMixedBackendBuild() {
+        // One build can have both Fargate and MicroVM cells (e.g. x86_64 on Fargate, arm64 on a
+        // MicroVM) -- the reaper must stop/terminate both, not just one.
+        givenScanReturns(build("mv2", "2026-09-21T11:55:00Z", "2026-09-21T13:00:00Z",
+                List.of("arn:task/1"), List.of("microvm-abc123")));
+
+        assertThat(handler().reap(NOW)).isEqualTo(1);
+
+        verify(ecs, org.mockito.Mockito.times(1)).stopTask(any(Consumer.class));
+        verify(microvms, org.mockito.Mockito.times(1)).terminateMicrovm(any(Consumer.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void marksTheBuildExpiredEvenWhenTerminateMicrovmFails() {
+        givenScanReturns(build("mv3", "2026-09-21T11:00:00Z", null, List.of(),
+                List.of("microvm-abc123")));
+        when(microvms.terminateMicrovm(any(Consumer.class)))
+                .thenThrow(new RuntimeException("already terminated"));
+
+        assertThat(handler().reap(NOW)).isEqualTo(1);
+
+        verify(dynamo).updateItem(any(software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void updateExpressionRemovesBothFlatAttributes() {
+        givenScanReturns(build("mv4", "2026-09-21T11:55:00Z", null, List.of("arn:task/1"),
+                List.of("microvm-abc123")));
+
+        handler().reap(NOW);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(
+                software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest.class);
+        verify(dynamo).updateItem(captor.capture());
+        assertThat(captor.getValue().updateExpression()).contains("REMOVE #t, #m");
+        assertThat(captor.getValue().expressionAttributeNames())
+                .containsEntry("#t", "taskArns")
+                .containsEntry("#m", "microvmIds");
     }
 }
