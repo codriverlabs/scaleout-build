@@ -49,6 +49,22 @@ public final class BuildRecord {
         private String failureReason;
         private int spotInterruptions;
         private List<String> artifactPaths = new ArrayList<>();
+        /**
+         * Which {@code CellLauncher} implementation launched this cell: {@code "FARGATE"} or
+         * {@code "MICROVM"}. Nullable and defaults to {@code "FARGATE"} on read (see
+         * {@link #getBackend()}) so every record written before this field existed deserializes
+         * unchanged — no migration script, no dual-read window. See
+         * {@code docs/design/control-plane/microvm-build-backend-phase1.md}'s "widening
+         * {@code taskArn} without a flag day" section.
+         */
+        private String backend;
+        /** The MicroVM identifier, for MicroVM-backed cells only. Null for Fargate cells. */
+        private String microvmId;
+        /**
+         * The MicroVM's endpoint, informational only — the control plane never calls into it (see
+         * {@code CellHandle.MicroVmHandle}'s javadoc for why). Null for Fargate cells.
+         */
+        private String microvmEndpoint;
 
         public String getCell() {
             return cell;
@@ -80,6 +96,31 @@ public final class BuildRecord {
 
         public void setTaskDefinitionArn(String taskDefinitionArn) {
             this.taskDefinitionArn = taskDefinitionArn;
+        }
+
+        /** @return {@code "FARGATE"} or {@code "MICROVM"}; defaults to {@code "FARGATE"} if never set */
+        public String getBackend() {
+            return backend == null ? "FARGATE" : backend;
+        }
+
+        public void setBackend(String backend) {
+            this.backend = backend;
+        }
+
+        public String getMicrovmId() {
+            return microvmId;
+        }
+
+        public void setMicrovmId(String microvmId) {
+            this.microvmId = microvmId;
+        }
+
+        public String getMicrovmEndpoint() {
+            return microvmEndpoint;
+        }
+
+        public void setMicrovmEndpoint(String microvmEndpoint) {
+            this.microvmEndpoint = microvmEndpoint;
         }
 
         public Integer getExitCode() {
