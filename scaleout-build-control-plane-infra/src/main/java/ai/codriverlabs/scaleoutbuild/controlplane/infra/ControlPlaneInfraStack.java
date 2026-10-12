@@ -406,6 +406,18 @@ public class ControlPlaneInfraStack extends Stack {
                 .actions(List.of("ecs:StopTask", "ecs:DescribeTasks"))
                 .resources(List.of("*"))
                 .build());
+        // Same action already granted to the service function below for the admin image-build
+        // flow's own cleanup, granted a second time here because the reaper runs as its own
+        // function with its own role -- see docs/design/control-plane/
+        // microvm-build-backend-phase1.md's "CDK additions" section. Resource-unscoped like the
+        // ECS actions above: TerminateMicrovm takes a microvm id, not an image ARN, so there is
+        // nothing narrower to scope it to the way CreateMicrovmImage's actions below are scoped
+        // to the image name.
+        reaperFunction.addToRolePolicy(PolicyStatement.Builder.create()
+                .effect(Effect.ALLOW)
+                .actions(List.of("lambda:TerminateMicrovm"))
+                .resources(List.of("*"))
+                .build());
 
         Rule.Builder.create(this, "ReaperSchedule")
                 .description("Stops ECS tasks of builds whose client stopped heartbeating")
@@ -426,6 +438,23 @@ public class ControlPlaneInfraStack extends Stack {
                 this.getNode().tryGetContext("microvmAdminRoleArn") == null ? ""
                         : this.getNode().tryGetContext("microvmAdminRoleArn"));
 
+        // Memory baseline (MiB) the agent MicroVM image is built at -- vCPU scales proportionally
+        // (2 GB memory = 1 vCPU) and the platform bursts up to 4x this baseline automatically,
+        // billed per second only for what is actually used above it. Must be one of
+        // MicroVmImageManager.SUPPORTED_MINIMUM_MEMORY_MIB (512/1024/2048/4096/8192);
+        // AdminResource/MicroVmImageManager validate this at build-trigger time rather than here,
+        // so an invalid context value fails loudly on the first real "images build" call instead
+        // of silently at synth time. Confirmed against AWS's own documentation (Lambda MicroVMs'
+        // "MicroVM images" page, "MicroVM sizing" section) that this is a build-time property of
+        // the image, not a per-RunMicrovm choice -- the same reason this is deployment context
+        // rather than a CLI/API-caller-supplied value. Read here (alongside microvmAdminRoleArn)
+        // rather than inside the microvmEnabled block below: image building is gated by the admin
+        // role, not by microvmEnabled, which only gates whether built images are actually used to
+        // launch build-execution cells.
+        String microvmMinimumMemoryMib = String.valueOf(
+                this.getNode().tryGetContext("microvmMinimumMemoryMib") == null ? "2048"
+                        : this.getNode().tryGetContext("microvmMinimumMemoryMib"));
+
         if (!microvmAdminRoleArn.isBlank()) {
             // Bucket for the code artifact ZIPs submitted to CreateMicrovmImage.
             Bucket microvmArtifactsBucket = Bucket.Builder.create(this, "MicrovmArtifactsBucket")
@@ -437,44 +466,128 @@ public class ControlPlaneInfraStack extends Stack {
                     .build();
 
             // Role the MicroVM platform assumes during image builds.
-            // Trusts lambda-microvms.amazonaws.com.
+            // Trusts lambda.amazonaws.com -- confirmed against AWS's own documentation
+            // (Lambda MicroVMs' "Security and permissions" page): "Both roles require a trust
+            // policy that allows the Lambda service principal lambda.amazonaws.com to perform
+            // sts:AssumeRole and sts:TagSession." There is no separate
+            // "lambda-microvms.amazonaws.com" principal -- confirmed the hard way, by actually
+            // deploying: IAM rejected it outright with "Invalid principal in policy."
+            //
+            // assumedBy() alone only grants sts:AssumeRole (CDK's ServicePrincipal default
+            // action); sts:TagSession is added as a second trust-policy statement afterward,
+            // same pattern CDK's own docs use for EMR's SetSourceIdentity/TagSession case.
             Role microvmBuildRole = Role.Builder.create(this, "MicrovmBuildRole")
-                    .assumedBy(new ServicePrincipal("lambda-microvms.amazonaws.com"))
-                    .description("Role for Lambda MicroVM image builds — scaleout-build agent")
+                    .assumedBy(new ServicePrincipal("lambda.amazonaws.com"))
+                    // Em dash removed: IAM role descriptions are restricted to a limited ASCII +
+                    // Latin-1 character set, and the em dash originally here fell outside it.
+                    // Also confirmed the hard way -- IAM rejected the role creation with a regex
+                    // validation error.
+                    .description("Role for Lambda MicroVM image builds - scaleout-build agent")
                     .build();
+            microvmBuildRole.getAssumeRolePolicy().addStatements(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .principals(List.of(new ServicePrincipal("lambda.amazonaws.com")))
+                    .actions(List.of("sts:TagSession"))
+                    .build());
             microvmArtifactsBucket.grantRead(microvmBuildRole);
             agentLogGroup.grantWrite(microvmBuildRole);
 
             // Role the running MicroVM assumes at runtime.
             // Needs staging bucket and log group access (same as the Fargate task role).
+            // Same corrected service principal and sts:TagSession statement as microvmBuildRole.
             Role microvmExecutionRole = Role.Builder.create(this, "MicrovmExecutionRole")
-                    .assumedBy(new ServicePrincipal("lambda-microvms.amazonaws.com"))
+                    .assumedBy(new ServicePrincipal("lambda.amazonaws.com"))
                     .description("Execution role for scaleout-build agent MicroVMs at runtime")
                     .build();
+            microvmExecutionRole.getAssumeRolePolicy().addStatements(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .principals(List.of(new ServicePrincipal("lambda.amazonaws.com")))
+                    .actions(List.of("sts:TagSession"))
+                    .build());
             stagingBucket.grantReadWrite(microvmExecutionRole);
             agentLogGroup.grantWrite(microvmExecutionRole);
 
             // Grant the control plane Lambda the MicroVM operations it needs.
+            //
+            // CreateMicrovmImage is split into its own Resource: "*" statement, confirmed required
+            // the hard way: AWS's own least-privilege example policy for Lambda MicroVMs
+            // (Security and permissions page) places lambda:CreateMicrovmImage outside the
+            // resource-scoped statement entirely, alongside lambda:ListMicrovms/ListMicrovmImages.
+            // Scoping it to the target image's ARN -- the first version of this code did -- fails
+            // every call with "no identity-based policy allows the lambda:CreateMicrovmImage
+            // action", because the image does not exist yet at the moment of the call; there is no
+            // resource for a resource-scoped statement to match against. The actions that DO
+            // name an existing image (GetMicrovmImage, GetMicrovmImageBuild, TerminateMicrovm) stay
+            // scoped to the fixed image name, same reasoning as before: it prevents the service
+            // from creating/touching arbitrarily-named images.
+            serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .actions(List.of("lambda:CreateMicrovmImage"))
+                    .resources(List.of("*"))
+                    .build());
             serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
                     .effect(Effect.ALLOW)
                     .actions(List.of(
-                            "lambda-microvms:CreateMicrovmImage",
-                            "lambda-microvms:GetMicrovmImage",
-                            "lambda-microvms:GetMicrovmImageBuild",
-                            "lambda-microvms:TerminateMicrovm"))
-                    // Scoped to the image name to prevent the service from creating arbitrary images.
+                            "lambda:GetMicrovmImage",
+                            "lambda:GetMicrovmImageBuild",
+                            "lambda:TerminateMicrovm"))
+                    // Scoped to the image name to prevent the service from touching arbitrary images.
                     .resources(List.of(
                             String.format("arn:aws:lambda:%s:%s:microvm-image:scaleout-build-agent",
                                     this.getRegion(), this.getAccount())))
                     .build());
 
-            // PassRole for the MicroVM execution role — scoped to the MicroVM service principal.
+            // PassRole for both MicroVM roles -- scoped to the Lambda service principal, the one
+            // the role's own trust policy actually names (confirmed above: lambda.amazonaws.com,
+            // not "lambda-microvms.amazonaws.com", which doesn't exist as a service principal).
+            // Build role was missing entirely before this fix: CreateMicrovmImage passes
+            // microvmBuildRole, and the service function had no PassRole grant for it at all,
+            // confirmed the hard way -- "User: ... is not authorized to perform: iam:PassRole on
+            // resource: .../MicrovmBuildRole..." on the first real triggerImageBuild call.
             serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
                     .effect(Effect.ALLOW)
                     .actions(List.of("iam:PassRole"))
-                    .resources(List.of(microvmExecutionRole.getRoleArn()))
+                    .resources(List.of(microvmBuildRole.getRoleArn(), microvmExecutionRole.getRoleArn()))
                     .conditions(Map.of("StringEquals",
-                            Map.of("iam:PassedToService", "lambda-microvms.amazonaws.com")))
+                            Map.of("iam:PassedToService", "lambda.amazonaws.com")))
+                    .build());
+
+            // PassNetworkConnector for the AWS-managed default egress connector, found the hard
+            // way on the first real CreateMicrovmImage call: "User: ... is not authorized to
+            // perform: lambda:PassNetworkConnector on resource:
+            // arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS".
+            // MicroVmImageManager.triggerBuild passes no egressNetworkConnectors, so the platform
+            // defaults the image-build-time connector to this fixed, AWS-owned ARN (account "aws",
+            // not this account) rather than leaving it unset -- confirmed by the exact resource ARN
+            // in the error, not assumed. Account-agnostic and stable across regions in the sense
+            // that AWS owns it, so this is a fixed string rather than something built from
+            // this.getRegion()/this.getAccount().
+            serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .actions(List.of("lambda:PassNetworkConnector"))
+                    .resources(List.of(
+                            "arn:aws:lambda:" + this.getRegion()
+                                    + ":aws:network-connector:aws-network-connector:INTERNET_EGRESS"))
+                    .build());
+
+            // PassNetworkConnector for the AWS-managed default INGRESS connector, found the hard
+            // way on the first real RunMicrovm call (not CreateMicrovmImage -- a different
+            // operation, a different default connector): "User: ... is not authorized to
+            // perform: lambda:PassNetworkConnector on resource:
+            // arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS".
+            // MicroVmCellLauncher.launch() sets no ingress connector at all (deliberately -- see
+            // its own javadoc on why the control plane never calls into a MicroVM), yet the
+            // platform still defaults RunMicrovm to this fixed, AWS-owned HTTP_INGRESS connector
+            // rather than running with no ingress path. Confirmed by the exact resource ARN in
+            // the error, the same way INTERNET_EGRESS was confirmed above -- neither default was
+            // documented anywhere found during this phase's design or implementation, only
+            // surfaced by actually calling the real APIs.
+            serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .actions(List.of("lambda:PassNetworkConnector"))
+                    .resources(List.of(
+                            "arn:aws:lambda:" + this.getRegion()
+                                    + ":aws:network-connector:aws-network-connector:HTTP_INGRESS"))
                     .build());
 
             // Wire MicroVM config into the Lambda environment.
@@ -482,6 +595,7 @@ public class ControlPlaneInfraStack extends Stack {
             serviceFunction.addEnvironment("SCALEOUT_MICROVM_BUILD_ROLE_ARN", microvmBuildRole.getRoleArn());
             serviceFunction.addEnvironment("SCALEOUT_MICROVM_ARTIFACTS_BUCKET", microvmArtifactsBucket.getBucketName());
             serviceFunction.addEnvironment("SCALEOUT_MICROVM_EXECUTION_ROLE_ARN", microvmExecutionRole.getRoleArn());
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_MINIMUM_MEMORY_MIB", microvmMinimumMemoryMib);
 
             microvmArtifactsBucket.grantRead(serviceFunction);
 
@@ -491,9 +605,68 @@ public class ControlPlaneInfraStack extends Stack {
             CfnOutput.Builder.create(this, "MicrovmExecutionRoleArn")
                     .value(microvmExecutionRole.getRoleArn())
                     .description("Execution role ARN for running MicroVMs").build();
-            CfnOutput.Builder.create(this, "MicrovmArtifactsBucket")
+            // Output id "MicrovmArtifactsBucketName" rather than "MicrovmArtifactsBucket" --
+            // the latter collides with the Bucket construct's own id a few lines above, in the
+            // same scope (`this`). CDK rejects duplicate construct ids, and this specific
+            // collision had never been exercised by any synth before this step, because
+            // verify-synth.sh never sets microvmAdminRoleArn. Found by actually synthesizing with
+            // it set while verifying this step's own CDK additions, not by inspection.
+            CfnOutput.Builder.create(this, "MicrovmArtifactsBucketName")
                     .value(microvmArtifactsBucket.getBucketName())
                     .description("S3 bucket for MicroVM code artifact ZIPs").build();
+
+            // --- Build-execution MicroVM (arm64 cells launched as MicroVMs, not Fargate) -------
+            //
+            // Deliberately NESTED under microvmAdminRoleArn's gate rather than independently
+            // gated -- see docs/design/control-plane/microvm-build-backend-phase1.md's open
+            // question 2 for the two options and this document's resolution. Build-execution
+            // reuses microvmExecutionRole (created above) unchanged, per that document's "Config
+            // additions" reasoning: identical permission set, same trust boundary, no isolation
+            // benefit from a second role. That reuse is only possible because this role already
+            // exists by the time this code runs -- it cannot be created independently of the
+            // admin flow's own block, which is the concrete reason "independent gate" was not
+            // chosen: there would be nothing for an independent gate's execution role to reuse.
+            //
+            // A deployment can still build images without yet trusting them for real builds:
+            // microvmAdminRoleArn set + microvmEnabled unset/false builds and qualifies an image
+            // with no builds routed to it. Flipping to arm64-on-MicroVM is then microvmEnabled=true
+            // plus the image/version/connector context keys, independent of the admin gate itself.
+
+            boolean microvmEnabled = Boolean.parseBoolean(String.valueOf(
+                    this.getNode().tryGetContext("microvmEnabled") == null ? "false"
+                            : this.getNode().tryGetContext("microvmEnabled")));
+            String microvmImageArn = String.valueOf(
+                    this.getNode().tryGetContext("microvmImageArn") == null ? ""
+                            : this.getNode().tryGetContext("microvmImageArn"));
+            String microvmImageVersion = String.valueOf(
+                    this.getNode().tryGetContext("microvmImageVersion") == null ? ""
+                            : this.getNode().tryGetContext("microvmImageVersion"));
+            String microvmVpcEgressConnectorArn = String.valueOf(
+                    this.getNode().tryGetContext("microvmVpcEgressConnectorArn") == null ? ""
+                            : this.getNode().tryGetContext("microvmVpcEgressConnectorArn"));
+
+            // RunMicrovm/GetMicrovm granted whenever the admin gate is open, not only when
+            // microvmEnabled is currently true -- the same reasoning TerminateMicrovm above
+            // already has (confirmed read first): a config flip to enable builds should not also
+            // require a redeploy just to grant the IAM action it needs, and an unused grant is not
+            // itself a cost or a live behavior change (ControlPlaneConfig.MicroVm.enabled() is
+            // still what gates BuildService.cellLauncher() at runtime).
+            serviceFunction.addToRolePolicy(PolicyStatement.Builder.create()
+                    .effect(Effect.ALLOW)
+                    .actions(List.of(
+                            "lambda:RunMicrovm",
+                            "lambda:GetMicrovm"))
+                    // Same image-name scoping as the admin actions above.
+                    .resources(List.of(
+                            String.format("arn:aws:lambda:%s:%s:microvm-image:scaleout-build-agent",
+                                    this.getRegion(), this.getAccount())))
+                    .build());
+
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_ENABLED", String.valueOf(microvmEnabled));
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_IMAGE_ARN", microvmImageArn);
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_IMAGE_VERSION", microvmImageVersion);
+            serviceFunction.addEnvironment("SCALEOUT_MICROVM_VPC_EGRESS_CONNECTOR_ARN",
+                    microvmVpcEgressConnectorArn);
         }
 
         // --- Outputs --------------------------------------------------------------------------
