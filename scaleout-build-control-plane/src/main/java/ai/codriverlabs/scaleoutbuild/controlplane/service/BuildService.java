@@ -121,6 +121,7 @@ public class BuildService {
         for (String arch : spec.architectures()) {
             policy.validateArchitecture(arch);
         }
+        policy.validateBackendPreference(spec.backendPreference(), spec.architectures());
         if (request.inputs().isEmpty()) {
             throw new InvalidRequestException("inputs must not be empty");
         }
@@ -284,7 +285,8 @@ public class BuildService {
                 CellLaunchRequest request = new CellLaunchRequest(clusterSettings, containerSettings,
                         record.getBuildId(), buildKind, architecture, stagingRelativePath,
                         agentEnvironment);
-                CellHandle handle = cellLauncher(architecture).launch(request);
+                CellHandle handle = cellLauncher(architecture, record.getBuildSpec().backendPreference())
+                        .launch(request);
                 applyHandle(cell, handle);
                 cell.setState(CellState.PROVISIONING);
             } catch (Exception e) {
@@ -303,28 +305,63 @@ public class BuildService {
 
     /**
      * Returns the {@link CellLauncher} that should launch/poll/stop {@code architecture}'s cells
-     * for this build. {@code ARM64} goes to {@link MicroVmCellLauncher} only when
-     * {@code scaleout.micro-vm.enabled} is set and the two genuinely required MicroVM settings
-     * (image ARN, image version) are present; every other case uses {@link FargateCellLauncher}
-     * unchanged. See {@code docs/design/control-plane/microvm-build-backend-phase1.md}'s "Backend
-     * selection: by architecture, not configuration" section — this is deployment policy, not a
-     * per-build choice, and deliberately has no {@code AUTO} fallback.
+     * for this build, honoring {@code backendPreference} ({@code BuildSpec.backendPreference()},
+     * already validated by {@code ResourcePolicy.validateBackendPreference} at build-creation
+     * time — this method trusts that validation and does not re-check it).
      *
-     * <p>{@code vpcEgressConnectorArn} is deliberately not in this gate's required set — see
-     * {@code MicroVmSettings}' own javadoc for why it is genuinely optional, not just unenforced.
+     * <p><b>{@code fargate}</b>: forces Fargate for every architecture, including {@code arm64}.
+     * <b>{@code microvm}</b>: forces {@link MicroVmCellLauncher} — reaching this branch for an
+     * architecture or deployment that cannot actually satisfy it would be
+     * {@code validateBackendPreference}'s own bug, not a condition this method re-defends against.
+     * <b>{@code auto}</b> (the default — see {@code BuildSpec.BACKEND_AUTO}): the original,
+     * pre-{@code backendPreference} behavior this phase shipped with — {@code ARM64} goes to
+     * {@link MicroVmCellLauncher} only when {@code scaleout.micro-vm.enabled} is set and the
+     * required MicroVM settings are present; every other case uses {@link FargateCellLauncher}.
+     * See {@code docs/design/control-plane/microvm-build-backend-phase1.md}'s "Backend selection"
+     * section for why {@code auto} alone was judged insufficient and this field was added: an
+     * availability toggle ("can this deployment use MicroVM at all") and a placement choice
+     * ("should this particular build use it") are different questions, and real pricing data
+     * (MicroVM's per-unit rates run roughly 3–3.7x Fargate's for a sustained, saturating workload
+     * like {@code native-image}) means a developer who knows their own build's shape needs a real
+     * way to answer the second question themselves, not just inherit the deployment's default.
+     *
+     * <p>{@code vpcEgressConnectorArn} is deliberately not in the {@code auto} gate's required
+     * set — see {@code MicroVmSettings}' own javadoc for why it is genuinely optional, not just
+     * unenforced.
      */
-    private CellLauncher cellLauncher(Architecture architecture) {
+    private CellLauncher cellLauncher(Architecture architecture, String backendPreference) {
+        String preference = backendPreference == null ? BuildSpec.BACKEND_AUTO
+                : backendPreference.toLowerCase(java.util.Locale.ROOT);
+        if ("fargate".equals(preference)) {
+            return new FargateCellLauncher(ecs, clusterSettings());
+        }
+        if ("microvm".equals(preference)) {
+            return new MicroVmCellLauncher(microvms, s3Client, microVmSettingsFromConfig(),
+                    config.stagingBucket());
+        }
+        // auto: unchanged from before backendPreference existed.
         if (architecture == Architecture.ARM64) {
             var microVm = config.microVm();
             if (microVm.enabled() && microVm.imageArn().isPresent() && microVm.imageVersion().isPresent()
                     && microVm.executionRoleArn().isPresent()) {
-                MicroVmSettings settings = new MicroVmSettings(microVm.imageArn().get(),
-                        microVm.imageVersion().get(), microVm.executionRoleArn().get(),
-                        microVm.vpcEgressConnectorArn().orElse(null), config.ecs().logGroupName());
-                return new MicroVmCellLauncher(microvms, s3Client, settings, config.stagingBucket());
+                return new MicroVmCellLauncher(microvms, s3Client, microVmSettingsFromConfig(),
+                        config.stagingBucket());
             }
         }
         return new FargateCellLauncher(ecs, clusterSettings());
+    }
+
+    /**
+     * Builds {@link MicroVmSettings} from the live deployment config. Shared by every call site
+     * that needs a {@link MicroVmCellLauncher} — {@link #cellLauncher}'s {@code auto} and
+     * {@code microvm} branches, and {@link #microVmLauncherFor} — so the same construction is not
+     * repeated three times with the risk of one copy drifting from the others.
+     */
+    private MicroVmSettings microVmSettingsFromConfig() {
+        var microVm = config.microVm();
+        return new MicroVmSettings(microVm.imageArn().orElse("unused"),
+                microVm.imageVersion().orElse("unused"), microVm.executionRoleArn().orElse("unused"),
+                microVm.vpcEgressConnectorArn().orElse(null), config.ecs().logGroupName());
     }
 
     /** Applies a freshly launched cell's handle to its persisted record — the one place this
@@ -402,12 +439,7 @@ public class BuildService {
      * the image/role/connector used at launch time is irrelevant to issuing TerminateMicrovm, which
      * only needs the microvm id. */
     private CellLauncher microVmLauncherFor(BuildRecord record) {
-        var microVm = config.microVm();
-        return new MicroVmCellLauncher(microvms, s3Client,
-                new MicroVmSettings(
-                        microVm.imageArn().orElse("unused"), microVm.imageVersion().orElse("unused"),
-                        microVm.executionRoleArn().orElse("unused"),
-                        microVm.vpcEgressConnectorArn().orElse(null), config.ecs().logGroupName()),
+        return new MicroVmCellLauncher(microvms, s3Client, microVmSettingsFromConfig(),
                 config.stagingBucket());
     }
 

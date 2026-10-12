@@ -126,7 +126,7 @@ class BuildServiceTest {
     @Test
     void create_returns_build_id_and_cells_for_matrix() throws InvalidRequestException {
         BuildSpec spec = new BuildSpec(List.of("native"), List.of("x86_64", "arm64"),
-                null, "app", null, List.of(), List.of(), 0, 0);
+                null, "app", null, List.of(), List.of(), 0, 0, null);
         CreateBuildRequest req = new CreateBuildRequest(spec,
                 List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
 
@@ -144,7 +144,7 @@ class BuildServiceTest {
         when(staging.missingDigests(any(), any())).thenReturn(List.of());
 
         BuildSpec spec = new BuildSpec(List.of("native"), List.of("x86_64"),
-                null, "app", null, List.of(), List.of(), 0, 0);
+                null, "app", null, List.of(), List.of(), 0, 0, null);
         CreateBuildRequest req = new CreateBuildRequest(spec,
                 List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
 
@@ -162,7 +162,7 @@ class BuildServiceTest {
                         "sha256abc", "PUT", "https://s3/presigned", Instant.now().plusSeconds(900)));
 
         BuildSpec spec = new BuildSpec(List.of("native"), List.of("x86_64"),
-                null, "app", null, List.of(), List.of(), 0, 0);
+                null, "app", null, List.of(), List.of(), 0, 0, null);
         CreateBuildRequest req = new CreateBuildRequest(spec,
                 List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
 
@@ -178,7 +178,7 @@ class BuildServiceTest {
         when(repository.countActiveByOwner(any())).thenReturn(4L); // default max is 4
 
         BuildSpec spec = new BuildSpec(List.of("native"), List.of("x86_64"),
-                null, "app", null, List.of(), List.of(), 0, 0);
+                null, "app", null, List.of(), List.of(), 0, 0, null);
         CreateBuildRequest req = new CreateBuildRequest(spec,
                 List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
 
@@ -190,12 +190,51 @@ class BuildServiceTest {
     @Test
     void create_rejects_empty_build_kinds() {
         BuildSpec spec = new BuildSpec(List.of(), List.of("x86_64"),
-                null, "app", null, List.of(), List.of(), 0, 0);
+                null, "app", null, List.of(), List.of(), 0, 0, null);
         CreateBuildRequest req = new CreateBuildRequest(spec,
                 List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
 
         assertThatThrownBy(() -> service.create(CALLER, req))
                 .isInstanceOf(InvalidRequestException.class);
+    }
+
+    /**
+     * End-to-end proof (not just {@code ResourcePolicyBackendPreferenceTest}'s isolated unit
+     * test) that an explicit {@code microvm} preference requested for {@code x86_64} is rejected
+     * at {@code create()} time, before a build record is even persisted -- confirmed by
+     * {@code repository.put} never being called.
+     */
+    @Test
+    void create_rejects_microvmPreference_forX86_64() {
+        BuildSpec spec = new BuildSpec(List.of("native"), List.of("x86_64"),
+                null, "app", null, List.of(), List.of(), 0, 0, "microvm");
+        CreateBuildRequest req = new CreateBuildRequest(spec,
+                List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
+
+        assertThatThrownBy(() -> service.create(CALLER, req))
+                .isInstanceOf(InvalidRequestException.class)
+                .hasMessageContaining("x86_64");
+        verify(repository, never()).put(any());
+    }
+
+    /**
+     * This test class's own base profile does not enable MicroVM (see
+     * {@code BuildServiceMicrovmDispatchTest}'s own javadoc for why that is a separate test
+     * class), so an explicit {@code microvm} request here must be rejected for the deployment
+     * reason, not the architecture reason {@link #create_rejects_microvmPreference_forX86_64}
+     * already covers.
+     */
+    @Test
+    void create_rejects_microvmPreference_whenDeploymentDoesNotHaveItEnabled() {
+        BuildSpec spec = new BuildSpec(List.of("native"), List.of("arm64"),
+                null, "app", null, List.of(), List.of(), 0, 0, "microvm");
+        CreateBuildRequest req = new CreateBuildRequest(spec,
+                List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
+
+        assertThatThrownBy(() -> service.create(CALLER, req))
+                .isInstanceOf(InvalidRequestException.class)
+                .hasMessageContaining("MicroVM backend enabled");
+        verify(repository, never()).put(any());
     }
 
     // ── start() ──────────────────────────────────────────────────────────────────────────────
@@ -424,7 +463,7 @@ class BuildServiceTest {
         record.setAppliedCpu("4096");
         record.setAppliedMemory("8192");
         record.setAppliedEphemeralStorageGiB(0);
-        record.setBuildSpec(new BuildSpec(List.of("native"), List.of("x86_64"), null, "app", null, List.of(), List.of(), 0, 0));
+        record.setBuildSpec(new BuildSpec(List.of("native"), List.of("x86_64"), null, "app", null, List.of(), List.of(), 0, 0, null));
         record.setInputs(List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)));
 
         List<BuildRecord.CellRecord> cellList = new ArrayList<>();

@@ -23,6 +23,11 @@ public class ResourcePolicy {
     /** Fargate includes this much ephemeral storage; an explicit size must exceed it. */
     private static final int FARGATE_INCLUDED_EPHEMERAL_GIB = 20;
 
+    /** The only values {@code BuildSpec.backendPreference} may hold. See
+     * {@link #validateBackendPreference} for what each means. */
+    private static final java.util.Set<String> RECOGNIZED_BACKEND_PREFERENCES =
+            java.util.Set.of("auto", "fargate", "microvm");
+
     private final ControlPlaneConfig config;
 
     @Inject
@@ -100,6 +105,49 @@ public class ResourcePolicy {
         if (!config.limits().allowedArchitectures().contains(architecture.toLowerCase(Locale.ROOT))) {
             throw new InvalidRequestException("architecture '" + architecture
                     + "' is not permitted; allowed: " + config.limits().allowedArchitectures());
+        }
+    }
+
+    /**
+     * Validates {@code backendPreference} against both the fixed set of recognized values and,
+     * for {@code microvm}, whether this build can actually be satisfied by it.
+     *
+     * <p>Rejected here, at build-creation time, rather than silently substituted at launch time
+     * in {@code BuildService.cellLauncher} — an explicit request for a backend that cannot be
+     * honored (deployment does not have it enabled, or the architecture cannot run on it at all)
+     * is a real "no" the caller needs to see, not a quiet fallback to whatever was going to happen
+     * anyway. {@code auto} and {@code fargate} are always valid: every architecture this server
+     * accepts can run on Fargate, and {@code auto} is exactly today's pre-existing behavior.
+     *
+     * @param preference    the raw value from {@code BuildSpec.backendPreference()} — already
+     *                       normalized to {@code auto} by that record's own compact constructor
+     *                       if the client sent {@code null}/blank, but not yet lowercased or
+     *                       validated against the recognized set
+     * @param architectures the build's requested architectures, after
+     *                       {@link #validateArchitecture} has already accepted each one
+     */
+    public void validateBackendPreference(String preference, java.util.List<String> architectures)
+            throws InvalidRequestException {
+        String normalized = preference.toLowerCase(Locale.ROOT);
+        if (!RECOGNIZED_BACKEND_PREFERENCES.contains(normalized)) {
+            throw new InvalidRequestException("backendPreference '" + preference
+                    + "' is not recognized; allowed: " + RECOGNIZED_BACKEND_PREFERENCES);
+        }
+        if (!"microvm".equals(normalized)) {
+            return;
+        }
+        if (architectures.stream().anyMatch(a -> "x86_64".equalsIgnoreCase(a))) {
+            throw new InvalidRequestException(
+                    "backendPreference 'microvm' is not valid for x86_64 -- Lambda MicroVMs only "
+                            + "support arm64");
+        }
+        var microVm = config.microVm();
+        boolean available = microVm.enabled() && microVm.imageArn().isPresent()
+                && microVm.imageVersion().isPresent() && microVm.executionRoleArn().isPresent();
+        if (!available) {
+            throw new InvalidRequestException(
+                    "backendPreference 'microvm' was requested but this deployment does not have "
+                            + "the MicroVM backend enabled");
         }
     }
 

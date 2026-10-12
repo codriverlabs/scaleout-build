@@ -152,6 +152,45 @@ class BuildServiceMicrovmDispatchTest {
                 .containsExactlyInAnyOrder("NATIVE/X86_64", "NATIVE/ARM64");
     }
 
+    /**
+     * The actual point of {@code backendPreference}: on a deployment where {@code auto} would
+     * route this {@code arm64} cell to MicroVM (this test class's own
+     * {@code MicrovmEnabledProfile}), an explicit {@code fargate} preference overrides that
+     * default. This is the lever a cost-conscious caller needs — see {@code BuildSpec
+     * .backendPreference}'s own javadoc for the pricing data this exists to let them act on.
+     */
+    @Test
+    void start_fargatePreferenceOverridesTheDeploymentsMicrovmDefault() throws InvalidRequestException {
+        BuildRecord record = stagedBuild("mv5", List.of("NATIVE/ARM64"), "fargate");
+        when(repository.findOwned("mv5", CALLER.ownerKey())).thenReturn(Optional.of(record));
+
+        service.start(CALLER, "mv5");
+
+        verify(ecs, times(1)).runTask(any(RunTaskRequest.class));
+        verify(microvms, never()).runMicrovm(any(RunMicrovmRequest.class));
+    }
+
+    /**
+     * The inverse: an explicit {@code microvm} preference is honored even if a future deployment
+     * ever makes {@code auto}'s own default something other than "MicroVM when available" — this
+     * test does not depend on {@code MicrovmEnabledProfile}'s default at all, it asserts the
+     * explicit choice is what drove dispatch, independent of what {@code auto} would have done.
+     */
+    @Test
+    void start_microvmPreferenceDispatchesToMicrovm() throws InvalidRequestException {
+        BuildRecord record = stagedBuild("mv6", List.of("NATIVE/ARM64"), "microvm");
+        when(repository.findOwned("mv6", CALLER.ownerKey())).thenReturn(Optional.of(record));
+        when(microvms.runMicrovm(any(RunMicrovmRequest.class))).thenReturn(RunMicrovmResponse.builder()
+                .microvmId(MICROVM_ID)
+                .endpoint(ENDPOINT)
+                .build());
+
+        service.start(CALLER, "mv6");
+
+        verify(microvms, times(1)).runMicrovm(any(RunMicrovmRequest.class));
+        verify(ecs, never()).runTask(any(RunTaskRequest.class));
+    }
+
     @Test
     void start_recordsMicrovmIdAndEndpointForArm64Cell() throws InvalidRequestException {
         BuildRecord record = stagedBuild("mv2", List.of("NATIVE/ARM64"));
@@ -215,15 +254,19 @@ class BuildServiceMicrovmDispatchTest {
     // and these two test classes must not share mutable test state) ───────────────────────────
 
     private static BuildRecord stagedBuild(String id, List<String> cells) {
-        return buildRecord(id, BuildState.STAGED, CellState.PENDING, cells);
+        return buildRecord(id, BuildState.STAGED, CellState.PENDING, cells, null);
+    }
+
+    private static BuildRecord stagedBuild(String id, List<String> cells, String backendPreference) {
+        return buildRecord(id, BuildState.STAGED, CellState.PENDING, cells, backendPreference);
     }
 
     private static BuildRecord runningBuild(String id, List<String> cells) {
-        return buildRecord(id, BuildState.RUNNING, CellState.RUNNING, cells);
+        return buildRecord(id, BuildState.RUNNING, CellState.RUNNING, cells, null);
     }
 
     private static BuildRecord buildRecord(String id, BuildState state, CellState cellState,
-                                           List<String> cellIds) {
+                                           List<String> cellIds, String backendPreference) {
         BuildRecord record = new BuildRecord();
         record.setBuildId(id);
         record.setOwnerKey(CALLER.ownerKey());
@@ -238,7 +281,7 @@ class BuildServiceMicrovmDispatchTest {
         record.setAppliedMemory("8192");
         record.setAppliedEphemeralStorageGiB(0);
         record.setBuildSpec(new BuildSpec(List.of("native"), List.of("arm64"), null, "app", null,
-                List.of(), List.of(), 0, 0));
+                List.of(), List.of(), 0, 0, backendPreference));
         record.setInputs(List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)));
 
         List<BuildRecord.CellRecord> cellList = new ArrayList<>();
