@@ -325,12 +325,22 @@ jobs:
           </settings>
           EOF
 
+      # TEMPORARY DIAGNOSTIC CHANGE, not meant to stay: scaleout-build-control-plane-client is
+      # excluded here to test a hypothesis for why publish-central has been failing with "Bundle
+      # has content that does NOT have a .pom file" against the full 6-module list -- it is a
+      # brand-new artifactId never published to Central before (the only prior successful
+      # publish-central run, v0.0.1-centraltest, predates this module and only published the
+      # other 5). If this 5-module run succeeds where the 6-module one failed twice (v1.1.0-rc1,
+      # v1.1.0-centraltest) with an identical, version-qualifier-independent error, that is strong
+      # evidence the new artifactId is the actual trigger. Revert this exclusion once the
+      # hypothesis is confirmed or refuted -- scaleout-build-control-plane-client is a real,
+      # intended-for-publication module and belongs in the real release.
       - name: Sign and publish to Maven Central
         env:
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
         run: |
           mvn -B deploy -Prelease -DskipTests \
-            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-control-plane-client,scaleout-build-ecs,scaleout-build-maven-plugin
+            -pl .,scaleout-build-shared,scaleout-build-control-plane-api,scaleout-build-ecs,scaleout-build-maven-plugin
 
 
   # ── build-installer-image ──────────────────────────────────────────────────────────────────────
