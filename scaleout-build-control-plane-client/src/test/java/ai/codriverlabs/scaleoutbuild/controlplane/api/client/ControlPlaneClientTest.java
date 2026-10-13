@@ -86,7 +86,7 @@ class ControlPlaneClientTest {
 
     private static CreateBuildRequest sampleCreateRequest() {
         BuildSpec spec = new BuildSpec(List.of("native"), List.of("x86_64"), null, "app", null,
-                List.of(), List.of(), 0, 0);
+                List.of(), List.of(), 0, 0, null);
         return new CreateBuildRequest(spec,
                 List.of(new InputDescriptor("app.jar", "sha256abc", 1024L)), null, null);
     }

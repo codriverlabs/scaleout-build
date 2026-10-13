@@ -16,6 +16,37 @@ import java.util.List;
  * service configuration, and a client that could set them could choose what code runs with the task
  * role's permissions.
  *
+ * <p><b>{@code backendPreference} is the one deliberate, documented exception to that rule.</b>
+ * It still names no infrastructure directly (no cluster, role, bucket, or image ARN crosses the
+ * wire) — it only expresses which compute backend an {@code arm64} cell should prefer, and the
+ * server has the final say regardless of what is requested (see
+ * {@code ResourcePolicy.validateBackendPreference} and {@code BuildService.cellLauncher}).
+ *
+ * <p><b>Fargate is the default on both axes, and MicroVM is opt-in on both.</b>
+ * {@code scaleout.micro-vm.enabled} defaults to {@code false} on the deployment side; {@code
+ * backendPreference} defaults to {@link #BACKEND_AUTO} on the client side, which on a deployment
+ * that has not opted in resolves to Fargate exactly as it always did before this field existed.
+ * This is deliberate, not incidental: MicroVM's per-unit rates run roughly 3–3.7x Fargate's for
+ * the workload this project's own agents actually run (see below), so it does not get to be
+ * anyone's default by accident.
+ *
+ * <p>This field reverses an earlier, narrower design: Phase 1's own doc stated backend selection was "deployment
+ * policy, not a per-build choice, with deliberately no AUTO fallback". That held as long as the
+ * only lever was the deployment's own {@code microvmEnabled} switch, which is an availability
+ * toggle ("can this deployment use MicroVM at all"), not a placement choice ("should this
+ * particular build use it"). Collapsing those two questions into one switch left no way for a
+ * developer who knows their own workload's cost profile to opt out of MicroVM on a deployment
+ * that has opted into it, or opt in on one that has not. Real pricing data settled
+ * which way to resolve that gap: MicroVM's per-unit vCPU-second and memory-GB-second rates are
+ * roughly 3–3.7x Fargate's in {@code us-east-1} (confirmed against the AWS Price List API, not
+ * estimated), so a workload that saturates CPU and memory for its entire duration — which
+ * {@code native-image} measurably does, per
+ * {@code docs/design/control-plane/fargate-task-resource-usage.md} — can cost meaningfully more
+ * on MicroVM than on Fargate for the identical work, despite MicroVM's "pay only for what you
+ * burst above baseline" billing being a genuine win for bursty, idle-heavy workloads. A developer
+ * who knows which shape their own build has needs a real lever, not just the deployment's own
+ * default.
+ *
  * @param buildKinds            e.g. {@code native}, {@code native-pgo-instrument}; validated against
  *                              the server's allow-list
  * @param architectures         e.g. {@code x86_64}, {@code arm64}; validated against the allow-list
@@ -29,11 +60,27 @@ import java.util.List;
  *                              (30). Between this contract being written and that substitution being added,
  *                              {@code 0} meant "no timeout at all" and a hung compile ran unbounded
  * @param overallTimeoutMinutes wall-clock ceiling per cell, clamped by server policy
+ * @param backendPreference     {@code auto} (default — resolves to Fargate unless the deployment
+ *                              has explicitly opted into a MicroVM default, the only behavior
+ *                              that existed before this field), {@code fargate}
+ *                              (force every cell in this build onto Fargate, including
+ *                              {@code arm64} ones, regardless of the deployment's own default), or
+ *                              {@code microvm} (force {@code arm64} cells onto Lambda MicroVM —
+ *                              itself opt-in, never a default; rejected at build-creation time,
+ *                              not silently substituted, if the deployment has not enabled it or
+ *                              if any requested architecture is {@code x86_64}, which MicroVM
+ *                              genuinely cannot run). Case-insensitive; blank or {@code null}
+ *                              means {@code auto}.
  */
 public record BuildSpec(List<String> buildKinds, List<String> architectures, String mainClass,
                         String imageName, String nativeImageCommand,
                         List<String> extraNativeImageArgs, List<String> extraBuildArgs,
-                        int timeoutMinutes, int overallTimeoutMinutes) {
+                        int timeoutMinutes, int overallTimeoutMinutes, String backendPreference) {
+
+    /** Default when a client sends {@code null} or blank: resolves to Fargate unless the
+     * deployment has explicitly opted into a MicroVM default — the only behavior that existed
+     * before this field, and still the default on both axes. */
+    public static final String BACKEND_AUTO = "auto";
 
     public BuildSpec {
         buildKinds = buildKinds == null ? List.of() : List.copyOf(buildKinds);
@@ -41,5 +88,7 @@ public record BuildSpec(List<String> buildKinds, List<String> architectures, Str
         extraNativeImageArgs =
                 extraNativeImageArgs == null ? List.of() : List.copyOf(extraNativeImageArgs);
         extraBuildArgs = extraBuildArgs == null ? List.of() : List.copyOf(extraBuildArgs);
+        backendPreference = backendPreference == null || backendPreference.isBlank()
+                ? BACKEND_AUTO : backendPreference;
     }
 }

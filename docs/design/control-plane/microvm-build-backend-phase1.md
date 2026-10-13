@@ -84,6 +84,56 @@ If a deployment wants to migrate `arm64` from Fargate to MicroVM, that is one SS
 one redeploy — a hard cutover, not a gradual one. Given Phase 1 has no suspend/resume and therefore
 no state carried between builds, there is nothing a gradual rollout would be protecting.
 
+### Addendum: `backendPreference`, a per-build override added after real pricing data
+
+**Policy, stated plainly: Fargate is the default on both axes, and MicroVM is opt-in on both.**
+`scaleout.micro-vm.enabled` defaults to `false` on the deployment side (`application.properties`),
+and `BuildSpec.backendPreference` defaults to `auto` on the client side, which — on a deployment
+that has not opted in — resolves to Fargate exactly as it always did before this field existed.
+Reaching MicroVM at all requires an operator to explicitly enable it for the deployment *and*
+either leave `auto` on a deployment that has done so, or a developer to explicitly request
+`microvm`. There is no path to MicroVM that does not pass through an explicit opt-in by a human who
+saw the cost tradeoff below. This is a direct consequence of that tradeoff, not an incidental
+default: MicroVM is the more expensive backend for this project's dominant workload shape (see
+below), so it does not get to be anyone's default by accident.
+
+The reasoning in "Backend selection" above still holds for what it actually argued against: a
+*silent*, *image-existence-probing* `AUTO` that could leave an `arm64` cell on a different backend
+from one build to the next with no visible signal why. `BuildSpec.backendPreference` is not that.
+It is a client-supplied, **explicitly validated** choice — `auto` (the default just described),
+`fargate` (force Fargate even if a deployment has opted into MicroVM by default), or `microvm`
+(force MicroVM; **rejected outright at build-creation time**, not silently substituted, if the
+deployment has not opted in or if `x86_64` is also requested). No image-existence probe is added —
+`microvm` is only accepted when `config.microVm()` already reports the deployment as fully
+configured, which is a config read, not an AWS API call.
+
+What changed the calculus from "deployment policy, full stop" to "deployment policy, with an
+explicit per-build override, both defaulting to the cheaper backend": real pricing data, pulled
+from the AWS Price List API rather than estimated. In `us-east-1`, MicroVM's per-unit rates run
+roughly **3–3.7x** Fargate's for the same architecture (ARM): $0.0000276944 vs $0.000008994 per
+vCPU-second, $0.0000036667 vs $0.0000009889 per GB-second. MicroVM's baseline/burst billing model
+is a genuine win for bursty, idle-heavy workloads — you only pay the higher rate for the
+vCPU-seconds/GB-seconds actually consumed above baseline. It is not a win for a workload with no
+idle period to exploit. `native-image` is measurably that second kind:
+`fargate-task-resource-usage.md` documents it saturating all 4 vCPUs and holding near-peak RSS for
+the compile's entire duration. Modeled against this project's own measured 233-dependency compile
+(5–9 min at 4 vCPU/8 GiB, used throughout), the same work costs roughly $0.0184 on Fargate and
+$0.0589 on MicroVM — about 3.2x, for identical output. That is the whole reason Fargate stays the
+default on both axes rather than either default drifting toward MicroVM over time: a deployment
+that wants MicroVM's latency, isolation, or lifetime benefits opts in deliberately, and a developer
+on that deployment who knows their own build saturates resources the whole way through can opt back
+out per build with `backendPreference=fargate`, rather than silently inheriting a more expensive
+default. The inverse lever (`backendPreference=microvm` on a Fargate-default deployment) exists for
+the opposite case — a developer who wants MicroVM's non-cost benefits, or who has reason to believe
+their own build has real idle periods between phases where burst billing could beat Fargate's flat
+rate (not yet validated with real phase-level profiling data, so this is a reason to allow opting
+in, not yet a reason to default to it).
+
+This is Tier 2 of a larger, intentionally staged plan. Tier 4 — percentage-based rollout and
+group/tag-based quota allocation (mirroring the RBAC model `KubeMicroVM PRO` uses for its own
+MicroVM access tiers) — is deliberately not built here; it needs real usage/cost data from Tier 2
+in production first, and is tracked as a roadmap item, not a Phase 1 deliverable.
+
 ## New interface: `CellLauncher`
 
 `microvm-backend-integration.md` proposed this and it is still the right shape, taken essentially
@@ -512,9 +562,12 @@ a second time to a second principal because the reaper runs as its own function 
 Unchanged from `microvm-backend-integration.md`'s own list, restated because it still holds:
 suspend/resume for PGO, MicroVM for `x86_64` (platform does not support it), per-build idle-policy
 override, auth-token forwarding to any client. Also newly out of scope for Phase 1 specifically,
-found while writing this document rather than assumed in advance: the `AUTO` backend-selection mode
-(see "Backend selection" above for why), and any gradual/canary rollout mechanism (also explained
-there).
+found while writing this document rather than assumed in advance: the *silent, image-probing*
+`AUTO` backend-selection mode originally sketched in `microvm-backend-integration.md` (see
+"Backend selection" above for why), and any gradual/canary rollout mechanism — the latter is still
+out of scope for Phase 1 proper, but is now a named roadmap item (Tier 4, percentage/group-based
+rollout) rather than an open question, following the per-build `backendPreference` override added
+after Phase 1's own real-AWS verification (see "Backend selection"'s addendum).
 
 ## Open questions before implementation starts
 

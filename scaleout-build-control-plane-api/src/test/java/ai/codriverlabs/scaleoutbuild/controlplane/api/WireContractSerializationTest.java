@@ -30,7 +30,7 @@ class WireContractSerializationTest {
         CreateBuildRequest original = new CreateBuildRequest(
                 new BuildSpec(List.of("native"), List.of("x86_64", "arm64"),
                         "ai.codriverlabs.example.HelloNative", "hello-native", "native-image",
-                        List.of("-O2"), List.of(), 0, 120),
+                        List.of("-O2"), List.of(), 0, 120, null),
                 List.of(new InputDescriptor("scaleout-build-example-app.jar", "a1b2", 5060),
                         new InputDescriptor("lib/commons-lang3-3.19.0.jar", "c3d4", 709075)),
                 new RequestedResources("4096", "16384", 40),
@@ -149,8 +149,10 @@ class WireContractSerializationTest {
 
     @Test
     void nullCollectionsNormalizeToEmptyRatherThanNull() {
-        assertThat(new BuildSpec(null, null, null, null, null, null, null, 0, 0).buildKinds())
+        assertThat(new BuildSpec(null, null, null, null, null, null, null, 0, 0, null).buildKinds())
                 .isEmpty();
+        assertThat(new BuildSpec(null, null, null, null, null, null, null, 0, 0, null)
+                .backendPreference()).isEqualTo(BuildSpec.BACKEND_AUTO);
         assertThat(new CreateBuildRequest(null, null, null, null).inputs()).isEmpty();
         assertThat(LogEvent.log("c", 1L, "m").nextSince()).isEmpty();
         assertThat(ErrorResponse.of("E", "m", "r").missingItems()).isEmpty();

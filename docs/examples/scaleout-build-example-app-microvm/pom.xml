@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example project exercising scaleout-build-maven-plugin's scaleout-build:build goal end to end
+  against real AWS: native-image compilation for arm64, offloaded to the Lambda MicroVM backend
+  (Lambda MicroVMs only support arm64; there is no x86_64 MicroVM, unlike the companion
+  scaleout-build-example-app, which uses ECS Fargate for both architectures). The control plane
+  this points at must have the MicroVM backend explicitly enabled; it is opt-in, not the
+  default. See docs/design/control-plane/microvm-build-backend-phase1.md.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>ai.codriverlabs.example</groupId>
+    <artifactId>scaleout-build-example-app-microvm</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>scaleout-build-maven-plugin example app (Lambda MicroVM backend)</name>
+    <description>
+        Minimal, reflection-free "hello world" plus one small real dependency (Commons Lang3, to
+        exercise a genuine classpath jar through the plugin's content-addressed S3 staging), used
+        to prove scaleout-build:build's real, end-to-end pipeline against the Lambda MicroVM
+        backend: stage inputs, launch a MicroVM for the one arm64 cell, retrieve the produced
+        native binary. See the companion scaleout-build-example-app for the ECS Fargate,
+        both-architectures version this one is scoped down from.
+    </description>
+
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!-- One small, real dependency jar so the classpath staging path (S3StagingSink's
+             content-addressed dedup) has something genuine to upload, not just this project's own
+             single class file. -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+            <version>3.19.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>scaleout-build-example-app-microvm</finalName>
+        <plugins>
+            <!--
+              Reads deployment.properties (copied from deployment.properties.example and filled
+              in with real, account-specific values — see that file's own header comment) into
+              Maven properties at build start, so the scaleout-build-maven-plugin configuration below can
+              reference them as placeholders instead of hardcoding one AWS account's specific
+              resource identifiers directly into a committed example. Bound to validate (before
+              initialize) so the properties exist before anything else in the build needs them.
+
+              Deliberately not <quiet>true</quiet>: if deployment.properties is missing (e.g. a
+              fresh checkout that hasn't copied the .example file yet), the build should fail
+              clearly here, not proceed with unresolved ${...} placeholders passed literally into
+              the plugin configuration.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>properties-maven-plugin</artifactId>
+                <version>1.3.1</version>
+                <executions>
+                    <execution>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>read-project-properties</goal>
+                        </goals>
+                        <configuration>
+                            <files>
+                                <!-- Gitignored; copy deployment.properties.example and set the one
+                                     endpoint value. Read at validate so ${scaleout-build.endpoint}
+                                     resolves before the package phase runs the build goal. -->
+                                <file>deployment.properties</file>
+                            </files>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>ai.codriverlabs.example.HelloNative</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>ai.codriverlabs</groupId>
+                <artifactId>scaleout-build-maven-plugin</artifactId>
+                <version>1.0.0-SNAPSHOT</version>
+                <executions>
+                    <execution>
+                        <id>native-image-arm64-microvm</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>build</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <!-- Matrix: one build kind, one architecture; Lambda MicroVM only supports
+                         arm64, so there is no x86_64 counterpart to request here. The control
+                         plane launches a MicroVM for this cell when its own
+                         scaleout.micro-vm.enabled is set; this project never names a cluster, a
+                         role, a bucket, or a MicroVM image ARN. -->
+                    <buildKinds>
+                        <buildKind>native</buildKind>
+                    </buildKinds>
+                    <architectures>
+                        <architecture>arm64</architecture>
+                    </architectures>
+                    <mainClass>ai.codriverlabs.example.HelloNative</mainClass>
+                    <imageName>hello-native</imageName>
+
+                    <!-- forceRemote: build the cell remotely even though it may match this host's
+                         architecture, which is the whole point of the example. -->
+                    <forceRemote>true</forceRemote>
+
+                    <!-- The only deployment-specific value, read from deployment.properties. The
+                         signing region comes from the URL host, so there is nothing else to set. -->
+                    <endpoint>${scaleout-build.endpoint}</endpoint>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

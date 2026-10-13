@@ -101,6 +101,26 @@ public class BuildMojo extends AbstractMojo {
     @Parameter(property = "scaleout-build.imageName")
     private String imageName;
 
+    /**
+     * Which compute backend {@code arm64} cells should prefer: {@code auto} (default — the
+     * deployment's own policy decides, exactly as before this parameter existed), {@code fargate}
+     * (force Fargate even on a deployment that defaults {@code arm64} to Lambda MicroVM), or
+     * {@code microvm} (force Lambda MicroVM; rejected by the control plane, not silently
+     * substituted, if the deployment does not have it enabled or if {@code x86_64} is also
+     * requested — MicroVM genuinely cannot run it).
+     *
+     * <p>Real pricing data is why this exists as a client choice at all, not just a deployment
+     * default: MicroVM's per-unit vCPU-second and memory-GB-second rates run roughly 3–3.7x
+     * Fargate's (confirmed against the AWS Price List API), so a {@code native-image} compile —
+     * which saturates CPU and memory for its whole duration, leaving none of the idle time
+     * MicroVM's baseline/burst billing is actually built to reward — can cost meaningfully more
+     * on MicroVM than on Fargate for the identical work. A developer who knows their own build's
+     * shape needs a real lever to answer "should this build use MicroVM", separate from whatever
+     * the deployment defaults to.
+     */
+    @Parameter(property = "scaleout-build.backendPreference", defaultValue = "auto")
+    private String backendPreference;
+
     /** Extra {@code native-image} arguments appended for derived-argfile builds. */
     @Parameter
     private List<String> extraBuildArgs;
@@ -409,7 +429,7 @@ public class BuildMojo extends AbstractMojo {
                 endpoint, resolveWorkDirectory(), mainClass, imageName, nativeImageCommand,
                 extraNativeImageArgs, extraBuildArgs, timeoutMinutes, overallTimeoutMinutes,
                 new RequestedResources(requestedCpu, requestedMemory, requestedEphemeralStorageGiB),
-                "scaleout-build-maven-plugin/" + pluginVersion()), getLog());
+                "scaleout-build-maven-plugin/" + pluginVersion(), backendPreference), getLog());
         return backend.runCells(remoteCells, plan, buildId, this::attachArtifacts);
     }
 

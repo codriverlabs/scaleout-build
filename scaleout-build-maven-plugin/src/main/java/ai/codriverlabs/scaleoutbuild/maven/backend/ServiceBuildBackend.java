@@ -148,7 +148,7 @@ public final class ServiceBuildBackend implements BuildBackend {
                 .map(c -> c.architecture().name().toLowerCase(Locale.ROOT)).distinct().toList();
         return new BuildSpec(kinds, architectures, options.mainClass(), options.imageName(),
                 options.nativeImageCommand(), options.extraNativeImageArgs(), options.extraBuildArgs(),
-                options.timeoutMinutes(), options.overallTimeoutMinutes());
+                options.timeoutMinutes(), options.overallTimeoutMinutes(), options.backendPreference());
     }
 
     /**
@@ -382,7 +382,8 @@ public final class ServiceBuildBackend implements BuildBackend {
                                       String imageName, String nativeImageCommand,
                                       List<String> extraNativeImageArgs, List<String> extraBuildArgs,
                                       int timeoutMinutes, int overallTimeoutMinutes,
-                                      RequestedResources requestedResources, String clientVersion) {
+                                      RequestedResources requestedResources, String clientVersion,
+                                      String backendPreference) {
 
         public ServiceBuildOptions {
             extraNativeImageArgs = extraNativeImageArgs == null ? List.of()
