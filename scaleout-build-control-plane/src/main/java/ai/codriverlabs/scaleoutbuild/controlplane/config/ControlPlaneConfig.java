@@ -177,8 +177,77 @@ public interface ControlPlaneConfig {
          * ARN of the role the running MicroVM assumes at runtime. Must trust
          * {@code lambda-microvms.amazonaws.com} and have S3 read/write on the staging bucket and
          * CloudWatch Logs write on the agent log group.
+         *
+         * <p>Reused unchanged for build-execution MicroVMs (see {@link #enabled()}): both the
+         * admin image-build flow and a running build need identical permissions (S3 staging
+         * bucket read/write, CloudWatch Logs write), so provisioning a second role for the same
+         * permission set would be duplication with no isolation benefit — they are the same trust
+         * boundary. See {@code docs/design/control-plane/microvm-build-backend-phase1.md}'s
+         * "Config additions" section.
          */
         Optional<String> executionRoleArn();
+
+        /**
+         * Whether {@code arm64} cells use the Lambda MicroVM backend instead of Fargate. Default
+         * {@code false}: opt-in, the same way the admin image-build surface above is opt-in via
+         * {@link #adminRoleArns()}. When {@code true}, {@link #imageArn()} and
+         * {@link #imageVersion()} must also be present — enforced by
+         * {@code BuildService.cellLauncher(Architecture)}, not here, since a {@code @ConfigMapping}
+         * interface cannot express "these fields are required only when this flag is set."
+         * {@link #vpcEgressConnectorArn()} is genuinely optional, not just unenforced — see its
+         * own javadoc.
+         *
+         * <p>Deliberately not a per-build or per-cell choice: this is deployment policy, the same
+         * category as {@code Ecs.fargateCapacityStrategy()}. See the design doc's "Backend
+         * selection: by architecture, not configuration" section for why no {@code AUTO} fallback
+         * or gradual rollout mechanism exists either.
+         */
+        @WithDefault("false")
+        boolean enabled();
+
+        /** ARN of the MicroVM image to launch (the published {@code scaleout-build-agent} image,
+         * see {@code MicroVmImageManager}). Required when {@link #enabled()} is {@code true}. */
+        Optional<String> imageArn();
+
+        /** Version of {@link #imageArn()} to launch. Required when {@link #enabled()} is
+         * {@code true}. */
+        Optional<String> imageVersion();
+
+        /**
+         * VPC egress connector ARN, for routing a MicroVM's outbound traffic through a
+         * customer-managed VPC. Genuinely optional, confirmed against AWS's own documentation
+         * (Lambda MicroVMs' "Networking" page): a MicroVM has public internet access by default,
+         * and a connector only exists to route outbound traffic through a VPC *instead*, for
+         * reaching private resources (databases, caches, internal APIs). Phase 1's agent needs
+         * only S3 and CloudWatch Logs — both public AWS service endpoints reachable over the
+         * default path via {@link #executionRoleArn()}'s IAM permissions alone — so leaving this
+         * absent is a normal, supported deployment, not a degraded one. See
+         * {@code MicroVmSettings}' own javadoc in {@code scaleout-build-ecs} for the fuller
+         * correction: this was wrongly treated as required earlier in Phase 1's own design doc
+         * and task list, before actually checking.
+         */
+        Optional<String> vpcEgressConnectorArn();
+
+        /**
+         * The memory baseline (MiB) to build the MicroVM image at, applied on every
+         * {@code AdminResource.triggerImageBuild} call. Must be one of
+         * {@code MicroVmImageManager.SUPPORTED_MINIMUM_MEMORY_MIB} — see that constant's own
+         * default. Deployment-wide, not a per-build choice: a MicroVM image is single-size (every
+         * MicroVM run from a given image version shares the same baseline), the same category as
+         * {@link ControlPlaneConfig.Limits#defaultMemory()} being deployment policy for the
+         * Fargate path.
+         *
+         * <p>Defaults to 2048 — the platform's own undocumented default, which every image built
+         * before this field existed already received implicitly (confirmed by inspecting a real
+         * image build's resources field once this gap was found). Not raised further here by
+         * default despite the Fargate path's own 8192 MiB floor (justified there by measured peak
+         * RSS of 5.3–5.6 GB for a 233-jar project) — this default intentionally keeps an
+         * unconfigured deployment's cost unchanged from before this field existed; raising the
+         * baseline is an explicit, informed choice an operator makes once their own workload's
+         * memory needs are known, not a default this phase imposes without measurement.
+         */
+        @WithDefault("2048")
+        int minimumMemoryMib();
     }
 
     /**

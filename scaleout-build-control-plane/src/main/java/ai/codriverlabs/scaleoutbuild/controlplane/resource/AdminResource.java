@@ -103,8 +103,17 @@ public class AdminResource {
             ImageStatus status = imageManager.triggerBuild(
                     region,
                     microVmConfig.buildRoleArn().get(),
-                    body.artifactS3Uri());
+                    body.artifactS3Uri(),
+                    microVmConfig.minimumMemoryMib());
             return Response.accepted(toResponse(status)).build();
+        } catch (IllegalArgumentException e) {
+            // minimumMemoryInMiB misconfigured to a non-tier value -- a deployment config problem,
+            // not a caller problem, but still worth a clear 500 rather than an opaque platform
+            // ValidationException with no indication of which values are actually valid.
+            LOG.errorf(e, "MicroVM image build rejected: invalid minimumMemoryInMiB configuration");
+            return Response.serverError()
+                    .entity(ErrorResponse.of("InvalidConfiguration", e.getMessage(), null))
+                    .build();
         } catch (Exception e) {
             LOG.errorf(e, "Failed to trigger MicroVM image build");
             return Response.serverError()

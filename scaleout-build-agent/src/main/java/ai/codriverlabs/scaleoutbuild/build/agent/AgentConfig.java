@@ -82,6 +82,8 @@ public final class AgentConfig {
     private static final Path DEFAULT_TEMP_DIR = Paths.get("/tmp");
     private static final List<String> DEFAULT_NATIVE_IMAGE_COMMAND = List.of("native-image");
     private static final String DEFAULT_ARG_FILE_NAME = "native-image.args";
+    private static final com.fasterxml.jackson.databind.ObjectMapper HOOK_PAYLOAD_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     private final Path mountRoot;
     private final String s3Bucket;
@@ -120,6 +122,36 @@ public final class AgentConfig {
     /** Reads configuration from the process environment. */
     public static AgentConfig fromEnvironment() {
         return fromMap(System.getenv());
+    }
+
+    /**
+     * Reads configuration from a MicroVM {@code run} hook's request body, as an alternative entry
+     * point to {@link #fromEnvironment()} for the Fargate/ECS path.
+     *
+     * <p>The payload is the same {@code SCALEOUT_BUILD_*}-keyed values {@link #fromMap} already
+     * reads from the environment, serialized as a flat JSON object of strings rather than as ECS
+     * task-override environment variables — a MicroVM's {@code runHookPayload} is a byte payload
+     * the agent's hook reads from its own HTTP request body, not an environment variable mechanism.
+     * See {@code AgentEnvironment.Builder#toMap()}, the control-plane-side counterpart that
+     * produces exactly this shape, for why both backends share one value-construction path rather
+     * than risking the two drifting apart on what values a cell receives.
+     *
+     * @throws IllegalArgumentException if the payload is not a flat JSON object of strings, or
+     *         naming the offending variable if a required one is missing — same contract as
+     *         {@link #fromMap}
+     */
+    public static AgentConfig fromHookPayload(byte[] payloadJson) {
+        Objects.requireNonNull(payloadJson, "payloadJson");
+        Map<String, String> environment;
+        try {
+            environment = HOOK_PAYLOAD_MAPPER.readValue(payloadJson,
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {
+                    });
+        } catch (java.io.IOException e) {
+            throw new IllegalArgumentException(
+                    "runHookPayload is not a flat JSON object of strings: " + e.getMessage(), e);
+        }
+        return fromMap(environment);
     }
 
     /**

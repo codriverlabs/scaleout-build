@@ -5,6 +5,8 @@ package ai.codriverlabs.scaleoutbuild.cli;
 
 import ai.codriverlabs.scaleoutbuild.cli.command.BuildsCommand;
 import ai.codriverlabs.scaleoutbuild.cli.command.ImagesCommand;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClient;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClientException;
 import java.util.concurrent.Callable;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -57,19 +59,19 @@ public class ScaleoutCli implements Callable<Integer> {
             description = "Print raw JSON without pretty-printing")
     boolean rawJson;
 
-    private ControlPlaneHttpClient lazyClient;
+    private ControlPlaneClient lazyClient;
 
     /**
-     * Lazily constructs the HTTP client. Called by subcommands after picocli has bound the options.
+     * Lazily constructs the client. Called by subcommands after picocli has bound the options.
      */
-    public ControlPlaneHttpClient client() {
+    public ControlPlaneClient client() {
         if (lazyClient == null) {
             if (endpoint == null || endpoint.isBlank()) {
                 throw new picocli.CommandLine.ParameterException(
                         new picocli.CommandLine(this),
                         "Missing required option '--endpoint' (or set $SCALEOUT_ENDPOINT)");
             }
-            lazyClient = new ControlPlaneHttpClient(endpoint, region);
+            lazyClient = new ControlPlaneClient(endpoint, region);
         }
         return lazyClient;
     }
@@ -88,12 +90,12 @@ public class ScaleoutCli implements Callable<Integer> {
     }
 
     /**
-     * Formats {@link CliException} as a single-line error rather than a stack trace.
-     * Network errors and HTTP errors both surface with just their message.
+     * Formats {@link ControlPlaneClientException} as a single-line error rather than a stack
+     * trace. Network errors and HTTP errors both surface with just their message.
      */
     private static IExecutionExceptionHandler errorHandler() {
         return (ex, commandLine, parseResult) -> {
-            if (ex instanceof CliException ce) {
+            if (ex instanceof ControlPlaneClientException ce) {
                 System.err.println("error: " + ce.getMessage());
             } else {
                 System.err.println("error: " + ex.getMessage());

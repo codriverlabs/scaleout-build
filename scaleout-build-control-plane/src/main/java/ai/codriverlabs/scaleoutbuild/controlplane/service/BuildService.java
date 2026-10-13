@@ -24,11 +24,17 @@ import ai.codriverlabs.scaleoutbuild.controlplane.store.BuildRecord;
 import ai.codriverlabs.scaleoutbuild.controlplane.store.BuildRepository;
 import ai.codriverlabs.scaleoutbuild.ecs.AgentContainerSettings;
 import ai.codriverlabs.scaleoutbuild.ecs.AgentEnvironment;
+import ai.codriverlabs.scaleoutbuild.ecs.CellHandle;
+import ai.codriverlabs.scaleoutbuild.ecs.CellLaunchException;
+import ai.codriverlabs.scaleoutbuild.ecs.CellLaunchRequest;
+import ai.codriverlabs.scaleoutbuild.ecs.CellLauncher;
+import ai.codriverlabs.scaleoutbuild.ecs.CellPollResult;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsClusterSettings;
 import ai.codriverlabs.scaleoutbuild.ecs.FargateCapacityStrategy;
 import ai.codriverlabs.scaleoutbuild.ecs.EcsLaunchType;
-import ai.codriverlabs.scaleoutbuild.ecs.EcsTaskLauncher;
-import ai.codriverlabs.scaleoutbuild.ecs.TaskDefinitionRegistrar;
+import ai.codriverlabs.scaleoutbuild.ecs.FargateCellLauncher;
+import ai.codriverlabs.scaleoutbuild.ecs.MicroVmCellLauncher;
+import ai.codriverlabs.scaleoutbuild.ecs.MicroVmSettings;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.security.SecureRandom;
@@ -37,9 +43,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import org.jboss.logging.Logger;
 import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.lambdamicrovms.LambdaMicrovmsClient;
+import software.amazon.awssdk.services.s3.S3Client;
 
 /** Build lifecycle: create, start, observe, cancel. Every method is ownership-scoped. */
 @ApplicationScoped
@@ -82,15 +91,20 @@ public class BuildService {
     private final ResourcePolicy policy;
     private final ControlPlaneConfig config;
     private final EcsClient ecs;
+    private final LambdaMicrovmsClient microvms;
+    private final S3Client s3Client;
 
     @Inject
     public BuildService(BuildRepository repository, StagingService staging, ResourcePolicy policy,
-                        ControlPlaneConfig config, EcsClient ecs) {
+                        ControlPlaneConfig config, EcsClient ecs, LambdaMicrovmsClient microvms,
+                        S3Client s3Client) {
         this.repository = repository;
         this.staging = staging;
         this.policy = policy;
         this.config = config;
         this.ecs = ecs;
+        this.microvms = microvms;
+        this.s3Client = s3Client;
     }
 
     // --- Create -------------------------------------------------------------------------------
@@ -217,8 +231,6 @@ public class BuildService {
         AgentContainerSettings containerSettings = new AgentContainerSettings(
                 config.ecs().agentImage(), record.getAppliedCpu(), record.getAppliedMemory(),
                 record.getAppliedEphemeralStorageGiB());
-        var registrar = new TaskDefinitionRegistrar(ecs);
-        var launcher = new EcsTaskLauncher(ecs);
 
         record.setState(BuildState.RUNNING);
         record.setStartedAt(Instant.now());
@@ -234,11 +246,10 @@ public class BuildService {
             try {
                 staging.materializeCell(record.getOwnerKey(), record.getBuildId(), buildKind,
                         architecture, record.getInputs());
-                String taskDefinitionArn = registrar.registerIfChanged(clusterSettings,
-                        containerSettings, buildKind, architecture);
-                var environment = AgentEnvironment
-                        .builder(record.getBuildId(), buildKind, architecture,
-                                staging.stagingPath(record.getOwnerKey(), record.getBuildId(), buildKind, architecture),
+                String stagingRelativePath = staging.stagingPath(record.getOwnerKey(),
+                        record.getBuildId(), buildKind, architecture);
+                Map<String, String> agentEnvironment = AgentEnvironment
+                        .builder(record.getBuildId(), buildKind, architecture, stagingRelativePath,
                                 ai.codriverlabs.scaleoutbuild.build.StagingLayout.DEFAULT_ARGS_FILE_NAME)
                         .s3Bucket(config.ecs().agentUsesDirectS3Io() ? config.stagingBucket() : null)
                         /*
@@ -264,11 +275,17 @@ public class BuildService {
                         // inherits an arbitrary client value and the only ceiling left is the reaper.
                         .timeoutMinutes(policy.resolveCellTimeoutMinutes(
                                 record.getBuildSpec().timeoutMinutes()))
-                        .build();
-                String taskArn = launcher.runTask(clusterSettings, taskDefinitionArn, environment,
-                        false);
-                cell.setTaskDefinitionArn(taskDefinitionArn);
-                cell.setTaskArn(taskArn);
+                        .build().stream()
+                        .collect(java.util.stream.Collectors.toMap(
+                                software.amazon.awssdk.services.ecs.model.KeyValuePair::name,
+                                software.amazon.awssdk.services.ecs.model.KeyValuePair::value,
+                                (a, b) -> b, java.util.LinkedHashMap::new));
+
+                CellLaunchRequest request = new CellLaunchRequest(clusterSettings, containerSettings,
+                        record.getBuildId(), buildKind, architecture, stagingRelativePath,
+                        agentEnvironment);
+                CellHandle handle = cellLauncher(architecture).launch(request);
+                applyHandle(cell, handle);
                 cell.setState(CellState.PROVISIONING);
             } catch (Exception e) {
                 LOG.errorf(e, "Failed to launch %s for build %s", cell.getCell(),
@@ -284,11 +301,51 @@ public class BuildService {
         return Optional.of(toStatus(record));
     }
 
+    /**
+     * Returns the {@link CellLauncher} that should launch/poll/stop {@code architecture}'s cells
+     * for this build. {@code ARM64} goes to {@link MicroVmCellLauncher} only when
+     * {@code scaleout.micro-vm.enabled} is set and the two genuinely required MicroVM settings
+     * (image ARN, image version) are present; every other case uses {@link FargateCellLauncher}
+     * unchanged. See {@code docs/design/control-plane/microvm-build-backend-phase1.md}'s "Backend
+     * selection: by architecture, not configuration" section — this is deployment policy, not a
+     * per-build choice, and deliberately has no {@code AUTO} fallback.
+     *
+     * <p>{@code vpcEgressConnectorArn} is deliberately not in this gate's required set — see
+     * {@code MicroVmSettings}' own javadoc for why it is genuinely optional, not just unenforced.
+     */
+    private CellLauncher cellLauncher(Architecture architecture) {
+        if (architecture == Architecture.ARM64) {
+            var microVm = config.microVm();
+            if (microVm.enabled() && microVm.imageArn().isPresent() && microVm.imageVersion().isPresent()
+                    && microVm.executionRoleArn().isPresent()) {
+                MicroVmSettings settings = new MicroVmSettings(microVm.imageArn().get(),
+                        microVm.imageVersion().get(), microVm.executionRoleArn().get(),
+                        microVm.vpcEgressConnectorArn().orElse(null), config.ecs().logGroupName());
+                return new MicroVmCellLauncher(microvms, s3Client, settings, config.stagingBucket());
+            }
+        }
+        return new FargateCellLauncher(ecs, clusterSettings());
+    }
+
+    /** Applies a freshly launched cell's handle to its persisted record — the one place this
+     * module's {@code CellHandle} vocabulary is translated into {@code BuildRecord.CellRecord}'s
+     * stored fields. */
+    private static void applyHandle(BuildRecord.CellRecord cell, CellHandle handle) {
+        if (handle instanceof CellHandle.FargateHandle h) {
+            cell.setBackend("FARGATE");
+            cell.setTaskArn(h.taskArn());
+        } else if (handle instanceof CellHandle.MicroVmHandle h) {
+            cell.setBackend("MICROVM");
+            cell.setMicrovmId(h.microvmId());
+            cell.setMicrovmEndpoint(h.endpoint());
+        }
+    }
+
     // --- Observe, cancel, heartbeat -----------------------------------------------------------
 
     public Optional<BuildStatus> status(CallerIdentity caller, String buildId) {
         return repository.findOwned(buildId, caller.ownerKey())
-                .map(this::refreshFromEcs)
+                .map(this::refreshCellStates)
                 .map(this::toStatus);
     }
 
@@ -313,26 +370,57 @@ public class BuildService {
     }
 
     /**
-     * Stops every non-terminal cell's task, and only returns once StopTask has been issued for each.
-     * Fire-and-forget would leave paid-for Fargate tasks running.
+     * Stops every non-terminal cell, dispatching by each cell's **stored** {@code backend} field
+     * (set at launch time by {@link #applyHandle}), not current config — a config flip mid-build
+     * must not change how an in-flight build's cells are stopped. Only returns once a stop call has
+     * been issued for each; fire-and-forget would leave paid-for Fargate tasks or MicroVMs running.
      */
     void stopRunningCells(BuildRecord record, String reason) {
-        var launcher = new EcsTaskLauncher(ecs);
-        EcsClusterSettings clusterSettings = clusterSettings();
+        FargateCellLauncher fargateLauncher = new FargateCellLauncher(ecs, clusterSettings());
         for (BuildRecord.CellRecord cell : record.getCells()) {
-            if (cell.getState().isTerminal() || cell.getTaskArn() == null) {
+            if (cell.getState().isTerminal() || cellHandleOf(cell).isEmpty()) {
                 cell.setState(CellState.CANCELLED);
                 continue;
             }
+            CellHandle handle = cellHandleOf(cell).get();
+            CellLauncher launcher = handle instanceof CellHandle.MicroVmHandle
+                    ? microVmLauncherFor(record) : fargateLauncher;
             try {
-                launcher.stopTask(clusterSettings, cell.getTaskArn(), reason);
+                launcher.stop(handle, reason);
             } catch (RuntimeException e) {
                 // Already stopped, or transient. Recording the intent matters more than the call.
-                LOG.warnf("StopTask failed for %s (%s): %s", cell.getCell(), cell.getTaskArn(),
+                LOG.warnf("Stop failed for %s (%s): %s", cell.getCell(), handle.describe(),
                         e.getMessage());
             }
             cell.setState(CellState.CANCELLED);
         }
+    }
+
+    /** The {@code MicroVmCellLauncher} used to stop an already-launched MicroVM cell. Does not
+     * re-check {@code config.microVm().enabled()}: a cell that was launched as MICROVM must be
+     * stoppable via the MicroVM API regardless of what current config says — only the identity of
+     * the image/role/connector used at launch time is irrelevant to issuing TerminateMicrovm, which
+     * only needs the microvm id. */
+    private CellLauncher microVmLauncherFor(BuildRecord record) {
+        var microVm = config.microVm();
+        return new MicroVmCellLauncher(microvms, s3Client,
+                new MicroVmSettings(
+                        microVm.imageArn().orElse("unused"), microVm.imageVersion().orElse("unused"),
+                        microVm.executionRoleArn().orElse("unused"),
+                        microVm.vpcEgressConnectorArn().orElse(null), config.ecs().logGroupName()),
+                config.stagingBucket());
+    }
+
+    /** Reconstructs this module's {@code CellHandle} from a persisted {@code CellRecord}, or empty
+     * if the cell was never launched (no handle fields set). */
+    private static Optional<CellHandle> cellHandleOf(BuildRecord.CellRecord cell) {
+        if ("MICROVM".equals(cell.getBackend())) {
+            return cell.getMicrovmId() == null ? Optional.empty()
+                    : Optional.of(new CellHandle.MicroVmHandle(cell.getMicrovmId(),
+                            cell.getMicrovmEndpoint(), null));
+        }
+        return cell.getTaskArn() == null ? Optional.empty()
+                : Optional.of(new CellHandle.FargateHandle(cell.getTaskArn()));
     }
 
     public Optional<BuildStatus> heartbeat(CallerIdentity caller, String buildId) {
@@ -380,70 +468,60 @@ public class BuildService {
     // --- ECS reconciliation -------------------------------------------------------------------
 
     /**
-     * Refreshes non-terminal cells from ECS. DescribeTasks is the source of truth: this service does
-     * not hold a supervision loop the way the plugin's direct backend does, so state is pulled on
-     * read rather than pushed.
+     * Refreshes non-terminal cells from their respective backends. Neither backend is pushed to —
+     * this service holds no supervision loop, so state is pulled on read.
+     *
+     * <p>Dispatches by each cell's **stored** {@code backend} field, not current config (same
+     * reasoning as {@link #stopRunningCells}). Fargate cells are polled in one batched
+     * {@code DescribeTasks} call via {@link FargateCellLauncher#pollBatch}, unchanged from before
+     * this method had a MicroVM counterpart. MicroVM cells are polled one
+     * {@code GetMicrovm}/{@code status.json}-read per cell — there is no batch {@code GetMicrovm}
+     * in the SDK (confirmed absent via {@code javap} while writing {@code MicroVmCellLauncher}),
+     * which is acceptable because the matrix is small (typically 1–2 MicroVM cells per build).
      */
-    public BuildRecord refreshFromEcs(BuildRecord record) {
-        List<String> taskArns = record.getCells().stream()
-                .filter(c -> !c.getState().isTerminal() && c.getTaskArn() != null)
-                .map(BuildRecord.CellRecord::getTaskArn)
-                .toList();
-        if (taskArns.isEmpty()) {
-            return record;
-        }
-        var response = ecs.describeTasks(b -> b.cluster(config.ecs().clusterArn()).tasks(taskArns));
-        boolean changed = false;
-        for (var task : response.tasks()) {
-            BuildRecord.CellRecord cell = record.getCells().stream()
-                    .filter(c -> task.taskArn().equals(c.getTaskArn()))
-                    .findFirst().orElse(null);
-            if (cell == null) {
+    public BuildRecord refreshCellStates(BuildRecord record) {
+        List<BuildRecord.CellRecord> fargateCells = new ArrayList<>();
+        List<BuildRecord.CellRecord> microVmCells = new ArrayList<>();
+        for (BuildRecord.CellRecord cell : record.getCells()) {
+            if (cell.getState().isTerminal()) {
                 continue;
             }
-            CellState previous = cell.getState();
-            switch (task.lastStatus()) {
-                case "RUNNING" -> cell.setState(CellState.RUNNING);
-                case "STOPPED" -> {
-                    Integer exitCode = task.containers().isEmpty() ? null
-                            : task.containers().get(0).exitCode();
-                    cell.setExitCode(exitCode);
-                    if (exitCode != null && exitCode == 0) {
-                        cell.setState(CellState.SUCCEEDED);
-                        /*
-                         * Second place imageName was assumed non-null. It is absent for a pass-through
-                         * build, where the argfile names its own output, so List.of(null) threw and every
-                         * status poll for a Quarkus build returned HTTP 500 -- after the compile had
-                         * already succeeded. Left empty in that case: the agent discovers artifacts by
-                         * scanning and the artifact listing reports what it actually uploaded.
-                         */
-                        if (cell.getArtifactPaths().isEmpty()
-                                && record.getBuildSpec().imageName() != null) {
-                            cell.setArtifactPaths(
-                                    new ArrayList<>(List.of(record.getBuildSpec().imageName())));
-                        }
-                    } else {
-                        cell.setState(CellState.FAILED);
-                        /*
-                         * 124 is coreutils `timeout` reporting that the agent image's entrypoint wrapper hit
-                         * its deadline -- the container-wide backstop, not the inner native-image budget.
-                         * Without translating it the developer sees "exit 124" and an empty stoppedReason,
-                         * which names neither the cause nor the setting that controls it. `timeout` reports
-                         * 124 whether the process took SIGTERM or had to be SIGKILLed after the grace
-                         * period, so this covers both.
-                         */
-                        cell.setFailureReason(exitCode != null && exitCode == CONTAINER_TIMEOUT_EXIT_CODE
-                                ? "the build container exceeded its overall timeout. The compile itself has"
-                                        + " a separate, shorter budget, so this usually means a stall in"
-                                        + " staging download or artifact upload rather than a slow compile."
-                                        + " Raise it with -Dscaleout-build.timeoutMinutes."
-                                : task.stoppedReason());
-                    }
+            if ("MICROVM".equals(cell.getBackend())) {
+                if (cell.getMicrovmId() != null) {
+                    microVmCells.add(cell);
                 }
-                default -> cell.setState(CellState.PROVISIONING);
+            } else if (cell.getTaskArn() != null) {
+                fargateCells.add(cell);
             }
-            changed |= previous != cell.getState();
         }
+        if (fargateCells.isEmpty() && microVmCells.isEmpty()) {
+            return record;
+        }
+
+        boolean changed = false;
+
+        if (!fargateCells.isEmpty()) {
+            FargateCellLauncher fargateLauncher = new FargateCellLauncher(ecs, clusterSettings());
+            Map<String, CellPollResult> results = fargateLauncher.pollBatch(
+                    fargateCells.stream().map(BuildRecord.CellRecord::getTaskArn).toList());
+            for (BuildRecord.CellRecord cell : fargateCells) {
+                CellPollResult result = results.get(cell.getTaskArn());
+                if (result != null) {
+                    changed |= applyPollResult(record, cell, result);
+                }
+            }
+        }
+
+        if (!microVmCells.isEmpty()) {
+            CellLauncher microVmLauncher = microVmLauncherFor(record);
+            for (BuildRecord.CellRecord cell : microVmCells) {
+                CellHandle handle = new CellHandle.MicroVmHandle(cell.getMicrovmId(),
+                        cell.getMicrovmEndpoint(), stagingPathFor(record, cell));
+                CellPollResult result = microVmLauncher.poll(handle);
+                changed |= applyPollResult(record, cell, result);
+            }
+        }
+
         if (changed) {
             if (record.allCellsTerminal()) {
                 boolean anyFailed = record.getCells().stream()
@@ -453,6 +531,63 @@ public class BuildService {
             repository.put(record);
         }
         return record;
+    }
+
+    /** The staging path a cell was launched with, recomputed from {@code StagingService} rather
+     * than stored on {@code CellRecord} — {@code StagingService.stagingPath} is a pure function of
+     * owner/build/kind/architecture, so recomputing it here needs no new persisted field. */
+    private String stagingPathFor(BuildRecord record, BuildRecord.CellRecord cell) {
+        BuildKind buildKind = BuildKind.parse(cell.getCell().split("/")[0]);
+        Architecture architecture = Architecture.parse(cell.getCell().split("/")[1]);
+        return staging.stagingPath(record.getOwnerKey(), record.getBuildId(), buildKind, architecture);
+    }
+
+    /**
+     * Maps this module's {@code CellLaunchState} onto the control plane's own {@code CellState} —
+     * the one boundary allowed to depend on both vocabularies, same as before this method existed
+     * (see {@code CellPollResult}'s own javadoc for why {@code scaleout-build-ecs} itself must not).
+     *
+     * @return whether the cell's state actually changed
+     */
+    private boolean applyPollResult(BuildRecord record, BuildRecord.CellRecord cell,
+                                    CellPollResult result) {
+        CellState previous = cell.getState();
+        switch (result.state()) {
+            case RUNNING -> cell.setState(CellState.RUNNING);
+            case PROVISIONING -> cell.setState(CellState.PROVISIONING);
+            case SUCCEEDED -> {
+                cell.setExitCode(result.exitCode());
+                cell.setState(CellState.SUCCEEDED);
+                /*
+                 * imageName is absent for a pass-through build; see the identical comment at the
+                 * other call site in start() for why List.of(null) must never be attempted here.
+                 */
+                if (cell.getArtifactPaths().isEmpty() && record.getBuildSpec().imageName() != null) {
+                    cell.setArtifactPaths(new ArrayList<>(List.of(record.getBuildSpec().imageName())));
+                }
+            }
+            case FAILED -> {
+                cell.setExitCode(result.exitCode());
+                cell.setState(CellState.FAILED);
+                /*
+                 * 124 is coreutils `timeout` reporting that the agent image's entrypoint wrapper hit
+                 * its deadline -- the container-wide backstop, not the inner native-image budget.
+                 * Without translating it the developer sees "exit 124" and an empty failure reason,
+                 * which names neither the cause nor the setting that controls it. `timeout` reports
+                 * 124 whether the process took SIGTERM or had to be SIGKILLed after the grace
+                 * period, so this covers both. Fargate-only: a MicroVM has no equivalent wrapper, so
+                 * its own CellPollResult.failed() reasons are passed through unchanged below.
+                 */
+                cell.setFailureReason(result.exitCode() != null
+                        && result.exitCode() == CONTAINER_TIMEOUT_EXIT_CODE
+                        ? "the build container exceeded its overall timeout. The compile itself has"
+                                + " a separate, shorter budget, so this usually means a stall in"
+                                + " staging download or artifact upload rather than a slow compile."
+                                + " Raise it with -Dscaleout-build.timeoutMinutes."
+                        : result.failureReason());
+            }
+        }
+        return previous != cell.getState();
     }
 
     private EcsClusterSettings clusterSettings() {

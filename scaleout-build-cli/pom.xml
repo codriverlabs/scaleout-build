@@ -19,26 +19,15 @@
     </description>
 
     <dependencies>
-        <!-- Wire contract, SigV4 signer, DTOs -->
+        <!--
+          The client itself (signing, HttpClient, error mapping) now lives in
+          scaleout-build-control-plane-client, which depends on -api transitively for the DTOs.
+          See docs/design/control-plane/control-plane-client-consolidation.md.
+        -->
         <dependency>
             <groupId>ai.codriverlabs</groupId>
-            <artifactId>scaleout-build-control-plane-api</artifactId>
+            <artifactId>scaleout-build-control-plane-client</artifactId>
             <version>${project.version}</version>
-        </dependency>
-
-        <!-- AWS SDK region type — transitive through the API module but needed directly -->
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>regions</artifactId>
-        </dependency>
-        <!-- AWS SDK auth — declared optional in the API module, so must be explicit here -->
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>auth</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>http-auth-aws</artifactId>
         </dependency>
 
         <!-- Argument parsing: zero transitive deps, GraalVM-native-compatible. -->

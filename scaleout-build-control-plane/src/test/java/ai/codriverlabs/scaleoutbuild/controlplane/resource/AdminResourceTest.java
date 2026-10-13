@@ -116,7 +116,7 @@ class AdminResourceTest {
                 MicroVmImageManager.IMAGE_NAME, "1.0", "CREATING", null);
         Mockito.when(imageManager.triggerBuild(
                 Mockito.anyString(),
-                Mockito.anyString(), Mockito.eq("s3://bucket/agent-1.0.1.zip")))
+                Mockito.anyString(), Mockito.eq("s3://bucket/agent-1.0.1.zip"), Mockito.anyInt()))
                 .thenReturn(stub);
 
         given()

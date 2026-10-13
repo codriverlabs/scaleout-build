@@ -14,6 +14,7 @@ import java.util.Map;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.lambdamicrovms.LambdaMicrovmsClient;
 
 /**
  * Stops the ECS tasks of builds whose client has died, and marks them {@code EXPIRED}.
@@ -84,27 +85,37 @@ public class BuildReaperHandler implements RequestHandler<Map<String, Object>, S
     private static final String ATTR_LAST_HEARTBEAT_AT = "lastHeartbeatAt";
     private static final String ATTR_EXPIRES_AT = "expiresAt";
     private static final String ATTR_TASK_ARNS = "taskArns";
+    /**
+     * MicroVM-backed sibling of {@link #ATTR_TASK_ARNS}, same flat {@code StringSet} shape — see
+     * {@code BuildItems.ATTR_MICROVM_IDS}'s javadoc on the service side (this reaper deliberately
+     * keeps its own copy of the literal rather than depending on that class, for the same reason
+     * it already keeps its own copy of {@code ATTR_TASK_ARNS}: a separately deployed function must
+     * not couple to the service's storage shape).
+     */
+    private static final String ATTR_MICROVM_IDS = "microvmIds";
 
     private static final List<String> TERMINAL_STATES =
             List.of("SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED");
 
     private final DynamoDbClient dynamo;
     private final EcsClient ecs;
+    private final LambdaMicrovmsClient microvms;
     private final String tableName;
     private final String clusterArn;
     private final Duration heartbeatGrace;
 
     public BuildReaperHandler() {
-        this(DynamoDbClient.create(), EcsClient.create(),
+        this(DynamoDbClient.create(), EcsClient.create(), LambdaMicrovmsClient.create(),
                 env("SCALEOUT_BUILDS_TABLE", "scaleout-builds"),
                 env("SCALEOUT_ECS_CLUSTER_ARN", ""),
                 Duration.ofSeconds(Long.parseLong(env("SCALEOUT_HEARTBEAT_GRACE_SECONDS", "120"))));
     }
 
-    BuildReaperHandler(DynamoDbClient dynamo, EcsClient ecs, String tableName, String clusterArn,
-                       Duration heartbeatGrace) {
+    BuildReaperHandler(DynamoDbClient dynamo, EcsClient ecs, LambdaMicrovmsClient microvms,
+                       String tableName, String clusterArn, Duration heartbeatGrace) {
         this.dynamo = dynamo;
         this.ecs = ecs;
+        this.microvms = microvms;
         this.tableName = tableName;
         this.clusterArn = clusterArn;
         this.heartbeatGrace = heartbeatGrace;
@@ -171,6 +182,8 @@ public class BuildReaperHandler implements RequestHandler<Map<String, Object>, S
         String buildId = item.containsKey(ATTR_BUILD_ID) ? item.get(ATTR_BUILD_ID).s() : null;
         List<String> taskArns = item.containsKey(ATTR_TASK_ARNS)
                 ? item.get(ATTR_TASK_ARNS).ss() : List.of();
+        List<String> microvmIds = item.containsKey(ATTR_MICROVM_IDS)
+                ? item.get(ATTR_MICROVM_IDS).ss() : List.of();
         List<String> failures = new ArrayList<>();
         for (String taskArn : taskArns) {
             try {
@@ -182,14 +195,28 @@ public class BuildReaperHandler implements RequestHandler<Map<String, Object>, S
                 failures.add(taskArn + ": " + e.getMessage());
             }
         }
+        for (String microvmId : microvmIds) {
+            try {
+                microvms.terminateMicrovm(b -> b.microvmIdentifier(microvmId));
+            } catch (RuntimeException e) {
+                // Same tolerance as the StopTask loop above, and for the same reason.
+                failures.add(microvmId + ": " + e.getMessage());
+            }
+        }
         var key = new HashMap<String, AttributeValue>();
         key.put(ATTR_BUILD_ID, AttributeValue.fromS(buildId));
-        dynamo.updateItem(b -> b.tableName(tableName).key(key)
-                .updateExpression("SET #s = :expired REMOVE #t")
-                .expressionAttributeNames(Map.of("#s", ATTR_STATE, "#t", ATTR_TASK_ARNS))
-                .expressionAttributeValues(Map.of(":expired", AttributeValue.fromS("EXPIRED"))));
-        System.out.printf("Reaped build %s, stopped %d task(s)%s%n", buildId, taskArns.size(),
-                failures.isEmpty() ? "" : " (StopTask issues: " + failures + ")");
+        var updateRequest = software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest.builder()
+                .tableName(tableName)
+                .key(key)
+                .updateExpression("SET #s = :expired REMOVE #t, #m")
+                .expressionAttributeNames(Map.of("#s", ATTR_STATE, "#t", ATTR_TASK_ARNS,
+                        "#m", ATTR_MICROVM_IDS))
+                .expressionAttributeValues(Map.of(":expired", AttributeValue.fromS("EXPIRED")))
+                .build();
+        dynamo.updateItem(updateRequest);
+        System.out.printf("Reaped build %s, stopped %d task(s), terminated %d MicroVM(s)%s%n",
+                buildId, taskArns.size(), microvmIds.size(),
+                failures.isEmpty() ? "" : " (issues: " + failures + ")");
     }
 
     private static Instant instant(Map<String, AttributeValue> item, String attribute) {

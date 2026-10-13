@@ -16,6 +16,7 @@ import ai.codriverlabs.scaleoutbuild.ecs.EcsTaskSupervisor;
 import ai.codriverlabs.scaleoutbuild.ecs.TaskDefinitionRegistrar;
 import io.smallrye.common.annotation.Blocking;
 import io.smallrye.mutiny.Multi;
+import io.smallrye.mutiny.infrastructure.Infrastructure;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.NotFoundException;
@@ -118,6 +119,22 @@ public class LogStreamResource {
 
         return Multi.createFrom().ticks().every(POLL_INTERVAL)
                 .onOverflow().drop()
+                // Each tick's own work (poll(), which calls CloudWatchLogTailer.pollOnce --
+                // a synchronous, blocking AWS SDK call) must not run on the Vert.x event loop
+                // that scheduled the tick. Found the hard way, in production: a real build's
+                // BlockedThreadChecker logged the event loop blocked for up to 9.6s against
+                // CloudWatchLogsClient.filterLogEvents, called from exactly this flatMap. That
+                // stalled every subsequent tick -- including the one meant to notice
+                // Instant.now().isAfter(deadline) at STREAM_BUDGET and end the stream gracefully
+                // with StreamEndReason.LAMBDA_TIMEOUT -- so the invocation never got the chance to
+                // hand off before the Lambda runtime's own hard 900s ceiling killed it outright
+                // (confirmed via CloudWatch Logs: "Billed Duration: 900000 ms ... Status: timeout"
+                // for the exact request handling this stream), severing the client's connection
+                // mid-response instead of a clean, reconnectable end. emitOn moves each tick's
+                // emission onto the default worker pool before flatMap's poll() call runs, so the
+                // blocking AWS call executes off the event loop and the scheduling timer itself
+                // stays free to fire on time.
+                .emitOn(Infrastructure.getDefaultWorkerPool())
                 .flatMap(tick -> {
                     if (finished.get()) {
                         return Multi.createFrom().empty();
@@ -139,9 +156,9 @@ public class LogStreamResource {
             events.add(LogEvent.streamEnd(StreamEndReason.BUILD_TERMINAL, snapshot(watermarks)));
             return events;
         }
-        // Reconcile against ECS on each poll: this is also what advances the build to a terminal
-        // state, since nothing else is watching the tasks.
-        record = buildService.refreshFromEcs(record);
+        // Reconcile against each cell's backend on each poll: this is also what advances the build
+        // to a terminal state, since nothing else is watching the tasks/MicroVMs.
+        record = buildService.refreshCellStates(record);
 
         for (BuildRecord.CellRecord cell : record.getCells()) {
             if (!watermarks.containsKey(cell.getCell())) {

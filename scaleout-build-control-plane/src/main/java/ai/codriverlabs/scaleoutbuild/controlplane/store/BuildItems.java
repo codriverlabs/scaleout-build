@@ -52,6 +52,12 @@ final class BuildItems {
      * "state, timestamps, task ARNs" and nothing more.
      */
     static final String ATTR_TASK_ARNS = "taskArns";
+    /**
+     * Running MicroVM identifiers, the MicroVM-backed sibling of {@link #ATTR_TASK_ARNS}. Same
+     * shape, same reason: the reaper stops a dead build's cells without parsing the document JSON,
+     * regardless of which {@code CellLauncher} backend launched them.
+     */
+    static final String ATTR_MICROVM_IDS = "microvmIds";
 
     private BuildItems() {
     }
@@ -84,6 +90,14 @@ final class BuildItems {
         if (!taskArns.isEmpty()) {
             item.put(ATTR_TASK_ARNS,
                     software.amazon.awssdk.services.dynamodb.model.AttributeValue.fromSs(taskArns));
+        }
+        var microvmIds = record.getCells().stream()
+                .filter(c -> c.getMicrovmId() != null && !c.getState().isTerminal())
+                .map(BuildRecord.CellRecord::getMicrovmId)
+                .toList();
+        if (!microvmIds.isEmpty()) {
+            item.put(ATTR_MICROVM_IDS,
+                    software.amazon.awssdk.services.dynamodb.model.AttributeValue.fromSs(microvmIds));
         }
         try {
             item.put(ATTR_DOCUMENT, s(mapper.writeValueAsString(new Document(

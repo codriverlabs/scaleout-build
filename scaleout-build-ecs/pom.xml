@@ -51,6 +51,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>lambdamicrovms</artifactId>
         </dependency>
+        <!--
+          MicroVmCellLauncher serializes a cell's agent environment as the runHookPayload JSON
+          body (RunMicrovmRequest.runHookPayload is a plain String, not a KeyValuePair list; see
+          that class's own javadoc), and deserializes the status.json AgentHookServer writes back.
+          Version comes from the jackson-bom already managed in the parent POM; no separate pin.
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>

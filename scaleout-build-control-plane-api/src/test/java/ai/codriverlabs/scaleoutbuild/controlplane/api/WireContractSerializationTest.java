@@ -109,6 +109,44 @@ class WireContractSerializationTest {
                 .isEqualTo(original);
     }
 
+    /**
+     * {@link ArtifactListResponse} was previously untested by this class — a real gap, found
+     * while generating GraalVM native-image reflection metadata for
+     * {@code scaleout-build-cli}: neither this test nor any CLI command had ever exercised
+     * Jackson deserialization of this record, so a native build silently lacked reflection
+     * config for it until this test (and the metadata it lets the native-image agent capture)
+     * closed the gap. See {@code docs/design/control-plane/control-plane-client-consolidation.md}.
+     */
+    @Test
+    void artifactListResponseRoundTripsWithDownloads() throws Exception {
+        ArtifactListResponse original = new ArtifactListResponse("01J8ZQ",
+                List.of(new ArtifactListResponse.CellArtifacts("NATIVE/X86_64",
+                        List.of(new ArtifactDownload("hello-native",
+                                "https://example.invalid/get",
+                                Instant.parse("2026-09-20T21:00:00Z"))))));
+
+        assertThat(mapper.readValue(mapper.writeValueAsString(original),
+                ArtifactListResponse.class)).isEqualTo(original);
+    }
+
+    /**
+     * {@link AdminApi}'s records were previously untested by this class — the same gap and the
+     * same fix as {@link #artifactListResponseRoundTripsWithDownloads}.
+     */
+    @Test
+    void adminApiRecordsRoundTrip() throws Exception {
+        AdminApi.TriggerImageBuildRequest request = new AdminApi.TriggerImageBuildRequest(
+                "s3://scaleout-build-microvm-artifacts-123456789012-eu-west-1/agent.zip");
+        assertThat(mapper.readValue(mapper.writeValueAsString(request),
+                AdminApi.TriggerImageBuildRequest.class)).isEqualTo(request);
+
+        AdminApi.ImageBuildResponse response = new AdminApi.ImageBuildResponse(
+                "scaleout-build-agent", "1.0", "CREATED",
+                "arn:aws:lambda:eu-west-1:123456789012:microvm-image:scaleout-build-agent");
+        assertThat(mapper.readValue(mapper.writeValueAsString(response),
+                AdminApi.ImageBuildResponse.class)).isEqualTo(response);
+    }
+
     @Test
     void nullCollectionsNormalizeToEmptyRatherThanNull() {
         assertThat(new BuildSpec(null, null, null, null, null, null, null, 0, 0).buildKinds())

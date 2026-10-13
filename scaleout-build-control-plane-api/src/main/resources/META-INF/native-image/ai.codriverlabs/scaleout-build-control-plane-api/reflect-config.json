@@ -1,0 +1,102 @@
+[
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.AdminApi$ImageBuildResponse",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.AdminApi$TriggerImageBuildRequest",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDescriptor",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactDownload",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactListResponse",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.ArtifactListResponse$CellArtifacts",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.BuildSpec",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.BuildState",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.BuildStatus",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.CellState",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.CellStatus",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.CreateBuildRequest",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.CreateBuildResponse",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.ErrorResponse",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.InputDescriptor",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.LogEvent",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.LogEvent$Type",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.RequestedResources",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.StreamEndReason",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "ai.codriverlabs.scaleoutbuild.controlplane.api.UploadTarget",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  }
+]

@@ -33,9 +33,17 @@
             <artifactId>scaleout-build-control-plane-api</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!--
+          The client itself (signing, HttpClient, error mapping) now lives in
+          scaleout-build-control-plane-client. See
+          docs/design/control-plane/control-plane-client-consolidation.md. This module no longer
+          needs http-auth-aws directly: it was only ever here because the plugin's own
+          package-private ControlPlaneClient signed requests itself.
+        -->
         <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>http-auth-aws</artifactId>
+            <groupId>ai.codriverlabs</groupId>
+            <artifactId>scaleout-build-control-plane-client</artifactId>
+            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>ai.codriverlabs</groupId>

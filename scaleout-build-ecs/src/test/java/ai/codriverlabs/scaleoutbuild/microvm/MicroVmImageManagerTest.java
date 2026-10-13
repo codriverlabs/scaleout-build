@@ -51,7 +51,8 @@ class MicroVmImageManagerTest {
         ImageStatus status = manager.triggerBuild(
                 "eu-central-1",
                 "arn:aws:iam::123:role/MicrovmBuildRole",
-                "s3://bucket/agent.zip");
+                "s3://bucket/agent.zip",
+                MicroVmImageManager.DEFAULT_MINIMUM_MEMORY_MIB);
 
         ArgumentCaptor<CreateMicrovmImageRequest> captor =
                 ArgumentCaptor.forClass(CreateMicrovmImageRequest.class);
@@ -63,11 +64,43 @@ class MicroVmImageManagerTest {
         assertThat(req.codeArtifact().uri()).isEqualTo("s3://bucket/agent.zip");
         assertThat(req.baseImageArn()).contains("eu-central-1");
         assertThat(req.baseImageArn()).endsWith(MicroVmImageManager.AL2023_BASE_IMAGE_ARN_SUFFIX);
+        // resources: exactly one entry, carrying the requested baseline -- confirmed against AWS's
+        // own docs (CreateMicrovmImage's "resources" field: Array Members 0-1) that this is a
+        // single-element list, not a per-architecture or per-tier collection.
+        assertThat(req.resources()).hasSize(1);
+        assertThat(req.resources().get(0).minimumMemoryInMiB())
+                .isEqualTo(MicroVmImageManager.DEFAULT_MINIMUM_MEMORY_MIB);
 
         assertThat(status.imageName()).isEqualTo(MicroVmImageManager.IMAGE_NAME);
         assertThat(status.imageVersion()).isEqualTo("1.0");
         assertThat(status.state()).isEqualTo("CREATING");
         assertThat(status.isReady()).isFalse();
+    }
+
+    @Test
+    void triggerBuild_rejects_a_minimumMemoryInMiB_outside_the_documented_tiers() {
+        // 3000 is not one of the five discrete baseline tiers AWS documents (512/1024/2048/4096/
+        // 8192) -- this must fail here, with the invalid value named, rather than reach the
+        // platform and come back as an opaque ValidationException.
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> manager.triggerBuild(
+                        "eu-central-1", "arn:aws:iam::123:role/MicrovmBuildRole",
+                        "s3://bucket/agent.zip", 3000))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("3000")
+                .hasMessageContaining("512");
+    }
+
+    @Test
+    void triggerBuild_accepts_every_documented_tier() {
+        when(client.createMicrovmImage(any(CreateMicrovmImageRequest.class)))
+                .thenReturn(CreateMicrovmImageResponse.builder()
+                        .state(MicrovmImageState.CREATING)
+                        .build());
+
+        for (int tier : MicroVmImageManager.SUPPORTED_MINIMUM_MEMORY_MIB) {
+            manager.triggerBuild("eu-central-1", "arn:aws:iam::123:role/MicrovmBuildRole",
+                    "s3://bucket/agent.zip", tier);
+        }
     }
 
     @Test
@@ -78,7 +111,8 @@ class MicroVmImageManagerTest {
                         .build());
 
         manager.triggerBuild("eu-central-1",
-                "arn:aws:iam::123:role/MicrovmBuildRole", "s3://bucket/agent.zip");
+                "arn:aws:iam::123:role/MicrovmBuildRole", "s3://bucket/agent.zip",
+                MicroVmImageManager.DEFAULT_MINIMUM_MEMORY_MIB);
 
         ArgumentCaptor<CreateMicrovmImageRequest> captor =
                 ArgumentCaptor.forClass(CreateMicrovmImageRequest.class);

@@ -44,6 +44,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ecs</artifactId>
         </dependency>
+        <!--
+          For TerminateMicrovm on orphaned MicroVM-backed cells, the sibling to ecs:StopTask
+          above; see BuildReaperHandler's "Reaper dispatch" section and ATTR_MICROVM_IDS'
+          javadoc in BuildItems for why the reaper reads a flat attribute rather than parsing the
+          service's JSON document shape.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>lambdamicrovms</artifactId>
+        </dependency>
         <!-- No connection pool to keep warm in a scheduled function, and a smaller cold start. -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

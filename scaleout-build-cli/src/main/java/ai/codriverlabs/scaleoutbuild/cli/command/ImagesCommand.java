@@ -3,8 +3,8 @@
  */
 package ai.codriverlabs.scaleoutbuild.cli.command;
 
-import ai.codriverlabs.scaleoutbuild.cli.CliException;
-import ai.codriverlabs.scaleoutbuild.cli.ControlPlaneHttpClient;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.AdminApi;
+import ai.codriverlabs.scaleoutbuild.controlplane.api.client.ControlPlaneClientException;
 import java.util.concurrent.Callable;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -58,20 +58,16 @@ public final class ImagesCommand implements Callable<Integer> {
         String artifactS3Uri;
 
         @Override
-        public Integer call() throws CliException {
-            String json = images.parent.client().triggerImageBuild(artifactS3Uri);
-            System.out.println(BuildsCommand.prettyOrRaw(json));
+        public Integer call() throws ControlPlaneClientException {
+            AdminApi.ImageBuildResponse response = images.parent.client()
+                    .triggerImageBuild(artifactS3Uri);
+            System.out.println(BuildsCommand.prettyOrRaw(response));
 
-            // Parse the returned imageVersion for convenience
-            try {
-                var node = ControlPlaneHttpClient.MAPPER.readTree(json);
-                String version = node.path("imageVersion").asText(null);
-                String state = node.path("state").asText("?");
-                if (version != null) {
-                    System.err.println("\nImage build submitted (version " + version + ", state " + state + ")");
-                    System.err.println("Poll: scaleout images status scaleout-build-agent");
-                }
-            } catch (Exception ignored) {}
+            if (response.imageVersion() != null) {
+                System.err.println("\nImage build submitted (version " + response.imageVersion()
+                        + ", state " + response.state() + ")");
+                System.err.println("Poll: scaleout images status scaleout-build-agent");
+            }
             return 0;
         }
     }
@@ -94,9 +90,10 @@ public final class ImagesCommand implements Callable<Integer> {
         String imageIdentifier;
 
         @Override
-        public Integer call() throws CliException {
-            String json = images.parent.client().getImageStatus(imageIdentifier);
-            System.out.println(BuildsCommand.prettyOrRaw(json));
+        public Integer call() throws ControlPlaneClientException {
+            AdminApi.ImageBuildResponse response = images.parent.client()
+                    .getImageStatus(imageIdentifier);
+            System.out.println(BuildsCommand.prettyOrRaw(response));
             return 0;
         }
     }

@@ -6,7 +6,7 @@ from your normal `mvn package` — no local toolchain, no build machines to main
 Built with **Quarkus 3**, **GraalVM native image** (Java 25), **AWS CDK**, and **Mandrel**.
 
 [![Release](https://img.shields.io/github/v/release/codriverlabs/scaleout-build?include_prereleases)](https://github.com/codriverlabs/scaleout-build/releases)
-[![Tests](https://img.shields.io/badge/tests-213%20passing-brightgreen)](.github/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-255%20passing-brightgreen)](.github/workflows/ci.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.codriverlabs/scaleout-build-maven-plugin)](https://central.sonatype.com/artifact/ai.codriverlabs/scaleout-build-maven-plugin)
 [![License](https://img.shields.io/badge/license-ELv2-blue)](LICENSE)
 
@@ -49,6 +49,7 @@ complete in five to nine minutes each, running concurrently.
 | `scaleout-build-control-plane` | Quarkus service on Lambda behind a Function URL. Holds the ECS/S3/CloudWatch permissions so developers need none |
 | `scaleout-build-agent` | Container that runs one matrix cell and exits. Carries the Mandrel toolchain |
 | `scaleout-build-control-plane-api` | Wire contract: JAX-RS interfaces, DTOs, SigV4 client filter |
+| `scaleout-build-control-plane-client` | Shared HTTP client for the control plane, used by the Maven plugin, the CLI, and the MCP server |
 | `scaleout-build-ecs` | ECS orchestration, S3 staging, native-image input planning |
 | `scaleout-build-control-plane-reaper` | Scheduled Lambda that stops the tasks of builds whose client died |
 | `scaleout-build-control-plane-infra` | AWS CDK app provisioning the control plane and its ECS data plane as one stack |
@@ -153,7 +154,7 @@ the components have different delivery constraints.
 | **Control-plane Lambda** — native `arm64` **zip**, 256 MB | in the installer tarball, and standalone on the release | `cdk deploy` uploads it to the CDK bootstrap S3 bucket |
 | **Reaper Lambda** — JVM **jar** | same | same |
 | **Installer** — pre-synthesized CDK app + `install.sh` | GitHub Release asset | `curl`, `tar`, `./install.sh` |
-| **Maven artifacts** — plugin, API, shared, ECS | **Maven Central** (primary) and GitHub Packages | `mvn` from a developer machine or CI — no token required for Central |
+| **Maven artifacts** — plugin, API, client, shared, ECS | **Maven Central** (primary) and GitHub Packages | `mvn` from a developer machine or CI — no token required for Central |
 
 **An image for the agent and zips for the Lambdas** is forced rather than stylistic. Lambda
 [cannot pull container images from anywhere but ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/migrate-from-third-party.html),
@@ -187,7 +188,7 @@ Report a vulnerability privately: see [`SECURITY.md`](SECURITY.md).
 ## Development
 
 ```bash
-mvn -B clean verify              # 175 tests
+mvn -B clean verify              # 255 tests
 ./scripts/verify-synth.sh        # CDK synthesises in both deployment modes
 ./scripts/verify-agent-image.sh <image-uri>
 ```
@@ -211,10 +212,14 @@ breaking it caused a real bug.
 | [Control Plane Design](docs/design/control-plane/scaleout-builder-control-plane.md) | Architecture, wire contract, endpoints |
 | [Storage Layout & Isolation](docs/design/control-plane/storage-layout-and-isolation.md) | Per-owner CAS, ownerHash derivation |
 | [SigV4 Client Signing](docs/design/control-plane/sigv4-client-signing.md) | How the client authenticates |
+| [Control Plane Client Consolidation](docs/design/control-plane/control-plane-client-consolidation.md) | One shared HTTP client for the plugin, CLI, and MCP server, replacing three independent copies |
+| [Unit Test Strategy](docs/design/testing/unit-test-strategy.md) | The two test patterns in use, and when to use each |
 | [Lambda Resource Usage](docs/design/control-plane/lambda-resource-usage.md) | Measured memory, duration, cold start |
 | [Fargate Task Resource Usage](docs/design/control-plane/fargate-task-resource-usage.md) | Measured peak RSS, CPU, compile times |
 | [GraalVM Version Matrix Axis](docs/design/control-plane/graalvm-version-matrix-axis.md) | Design for a version axis |
 | [MicroVM Build Backend](docs/design/control-plane/microvm-build-backend.md) | Design for a Lambda MicroVM backend |
+| [MicroVM Build Backend — Phase 1](docs/design/control-plane/microvm-build-backend-phase1.md) | Implementation design for arm64 cells on MicroVM, grounded in the actual SDK |
+| [MicroVM Warm Pool — Phase 3](docs/design/control-plane/microvm-warm-pool-phase3.md) | Per-owner content-addressed MicroVM reuse + persistent multi-task agent with SSE |
 | [Publishing to Maven Central](docs/design/ci-cd/publishing-to-maven-central.md) | Readiness state and the publisher-tier question |
 | [Handover](docs/design/control-plane/HANDOVER.md) | Current deployed state and outstanding work |
 
