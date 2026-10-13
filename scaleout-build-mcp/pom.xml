@@ -52,6 +52,18 @@
             <version>${project.version}</version>
         </dependency>
 
+        <!--
+          provided, not compile: only the native-image build needs the @TargetClass annotation
+          on the classpath (see graal/AwsCrtChecksumSubstitutions.java). Never shipped in the
+          JVM-mode jar or its runtime classpath.
+        -->
+        <dependency>
+            <groupId>org.graalvm.sdk</groupId>
+            <artifactId>nativeimage</artifactId>
+            <version>25.0.4.1</version>
+            <scope>provided</scope>
+        </dependency>
+
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
