@@ -124,7 +124,7 @@
             against Central (never recalled) before pinning, per .kiro/steering/tech.md.
         -->
         <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
-        <central-publishing-maven-plugin.version>0.11.0</central-publishing-maven-plugin.version>
+        <central-publishing-maven-plugin.version>0.12.0</central-publishing-maven-plugin.version>
         <maven-surefire-plugin.version>3.6.0</maven-surefire-plugin.version>
         <maven-plugin-plugin.version>3.16.0</maven-plugin-plugin.version>
         <maven-shade-plugin.version>3.6.2</maven-shade-plugin.version>
