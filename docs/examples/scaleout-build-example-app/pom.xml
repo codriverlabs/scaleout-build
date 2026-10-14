@@ -94,7 +94,7 @@
             <plugin>
                 <groupId>ai.codriverlabs</groupId>
                 <artifactId>scaleout-build-maven-plugin</artifactId>
-                <version>1.0.0-SNAPSHOT</version>
+                <version>1.0.1</version>
                 <executions>
                     <execution>
                         <id>native-image-both-architectures</id>
