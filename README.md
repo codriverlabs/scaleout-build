@@ -137,8 +137,14 @@ lambda:InvokeFunction
 ```
 
 The control plane itself holds the ECS, S3, CloudWatch and ECR permissions, with `iam:PassRole` scoped to
-exactly two role ARNs conditioned on `iam:PassedToService=ecs-tasks.amazonaws.com`. If your developers
-currently hold broader permissions for native builds, those can be revoked — see
+exactly two role ARNs conditioned on `iam:PassedToService=ecs-tasks.amazonaws.com`. If a deployment has
+also opted into the [Lambda MicroVM backend](docs/design/control-plane/microvm-build-backend-phase1.md),
+the control plane additionally holds `lambda:RunMicrovm`, `lambda:GetMicrovm`, `lambda:TerminateMicrovm`,
+`lambda:CreateMicrovmImage` and `lambda:GetMicrovmImage`, plus a second `iam:PassRole` statement scoped to
+two more role ARNs conditioned on `iam:PassedToService=lambda.amazonaws.com`. Either way, developers
+themselves still need only the two permissions above — these are all held by the control plane, never by
+a developer. If your developers currently hold broader permissions for native builds, those can be
+revoked — see
 [`storage-layout-and-isolation.md`](docs/design/control-plane/storage-layout-and-isolation.md).
 
 ---
